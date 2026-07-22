@@ -291,6 +291,7 @@
     "ensemble/actor/macros"
     "ensemble/actor/reactor"
     "ensemble/actor/actor"
+    "ensemble/actor"
 
     "ensemble/config"
 
