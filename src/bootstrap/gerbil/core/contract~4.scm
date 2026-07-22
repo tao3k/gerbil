@@ -316,8 +316,15 @@
                                            (cons (cons (gx#datum->syntax
                                                         '#f
                                                         'val)
-                                                       (cons _%$%g5386753939%_
-                                                             '()))
+                                                       (cons (cons (gx#datum->syntax
+;;<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+                            '#f
+                            'begin-annotation)
+                           (cons (cons (gx#datum->syntax '#f '@type)
+                                       (cons (gx#datum->syntax '#f 't::t) '()))
+                                 (cons _%$%g5386753939%_ '())))
+                     '()))
+;;>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
                                                  (cons (cons (gx#datum->syntax
                                                               '#f
                                                               'if)
