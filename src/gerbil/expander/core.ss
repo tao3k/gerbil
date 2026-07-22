@@ -417,7 +417,8 @@ namespace: gx
            (or rpath
                (core-resolve-path path (stx-source stx))))
        (if (member rpath (current-expander-path))
-         (raise-syntax-error #f "Bad syntax; cyclic expansion" stx)
+         (raise-syntax-error #f "Bad syntax; cyclic expansion" stx
+                             (append (member rpath (reverse (current-expander-path))) [rpath]))
          (syntax-local-rewrap
           (stx-wrap-source
            (core-cons 'begin

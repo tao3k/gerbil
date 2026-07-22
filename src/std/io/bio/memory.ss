@@ -40,12 +40,13 @@
       (when mem.cached?
         (buffer-cache.put! mem.buf))
       (set! mem.buf new-buf)
+      (set! mem.whi input-size)
       (set! mem.cached? #t)
       input-size)))
 
 (def (mem-read (mem    : memory-input-buffer)
                (output : :u8vector)
-               (start  :~ (in-range? 0 (u8vector-length output))
+               (start  :~ (in-range-inclusive? 0 (u8vector-length output))
                        :- :fixnum)
                (end    :~ (in-range-inclusive? start (u8vector-length output))
                        :- :fixnum)

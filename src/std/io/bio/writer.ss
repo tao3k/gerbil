@@ -198,7 +198,7 @@
               (begin
               (__bio-output-buffer-drain! bio buf whi)
               (again bio.whi)))))
-         ((##fx<= c #xffff)
+         ((fx<= c #xffff)
           (let ((whi+1 (fx+ whi 1))
                 (whi+2 (fx+ whi 2)))
             (if (fx< whi+2 buflen)
@@ -246,7 +246,7 @@
         (writer.write-u8 b1)
         (writer.write-u8 b2)
         2))
-     ((##fx<= c #xffff)
+     ((fx<= c #xffff)
       (let ((b1 (fxior #xe0 (fxarithmetic-shift-right c 12)))
             (b2 (fxior #x80 (fxand (fxarithmetic-shift-right c 6) #x3f)))
             (b3 (fxior #x80 (fxand c #x3f))))

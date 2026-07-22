@@ -70,7 +70,8 @@
                 (read (__read bio output output-start output-end input-need)))
            (fx+ have read)))
         ;; empty buffer (rlo=rhi=0)
-        ((or (fx>= input-need (u8vector-length buf)) fx>= input-want (u8vector-length buf))
+        ((or (fx>= input-need (u8vector-length buf))
+             (fx>= input-want (u8vector-length buf)))
          ;; needed/wanted bytes exceed buffer size, read unbuffered
          (__read bio output output-start output-end input-need))
         (else

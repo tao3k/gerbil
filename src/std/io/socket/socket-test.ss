@@ -15,10 +15,14 @@
         datagram-socket-test)
 
 (def (echo-server srv)
-  (let lp ()
-    (let (cli (ServerSocket-accept srv))
-      (spawn/name 'echo-server-handler echo-server-handler cli)
-      (lp))))
+  (try
+   (let lp ()
+     (let (cli (ServerSocket-accept srv))
+       (spawn/name 'echo-server-handler echo-server-handler cli)
+       (lp)))
+   (catch (e)
+     (unless (io-closed-error? e)
+       (raise e)))))
 
 (def (echo-server-handler cli)
   (let ((reader (StreamSocket-reader cli))
@@ -41,12 +45,16 @@
     (utf8->string buffer)))
 
 (def (echo-server-udp sock)
-  (let ((peer (box #f))
-        (buffer (make-u8vector 2048)))
-    (let lp ()
-      (let (read (DatagramSocket-recvfrom sock peer buffer))
-        (DatagramSocket-sendto sock (unbox peer) buffer 0 read)
-        (lp)))))
+  (try
+   (let ((peer (box #f))
+         (buffer (make-u8vector 2048)))
+     (let lp ()
+       (let (read (DatagramSocket-recvfrom sock peer buffer))
+         (DatagramSocket-sendto sock (unbox peer) buffer 0 read)
+         (lp))))
+   (catch (e)
+     (unless (io-closed-error? e)
+       (raise e)))))
 
 (def (do-echo-udp sock input peer)
   (Socket-set-input-timeout! sock (IOTimeout 1))
@@ -84,7 +92,7 @@
         (check (do-echo cli input) => input)
         (Socket-close cli)
         (Socket-close srv)
-        (check-exception (thread-join! srv) true)))
+        (check-exception (thread-join! server) true)))
     (test-case "unix echo"
       (call-with-temporary-file-name "echo"
         (lambda (path)
@@ -97,7 +105,7 @@
         (check (do-echo cli input) => input)
         (Socket-close cli)
         (Socket-close srv)
-        (check-exception (thread-join! srv) true)))))
+        (check-exception (thread-join! server) true)))))
     (test-case "timeout"
       (let* ((input "the quick brown fox jumped over the fence")
              (srv (tcp-listen echo-server-address))
@@ -118,7 +126,7 @@
         (check (do-echo-udp cli input echo-server-address) => input)
         (Socket-close cli)
         (Socket-close srv)
-        (check-exception (thread-join! srv) true)))
+        (check-exception (thread-join! server) true)))
     (test-case "connected udp echo"
       (let* ((input "the quick brown fox jumped over the fence")
              (srv (udp-socket echo-server-address))
@@ -128,7 +136,7 @@
         (check (do-echo-udp/connect cli input echo-server-address) => input)
         (Socket-close cli)
         (Socket-close srv)
-        (check-exception (thread-join! srv) true)))
+        (check-exception (thread-join! server) true)))
     (test-case "multicast echo"
       (let* ((input "the quick brown fox jumped over the fence")
              (srv (udp-multicast-socket echo-server-multicast-ip-address echo-server-address-any))
@@ -139,4 +147,4 @@
         (check (do-echo-udp cli input echo-server-multicast-address) => input)
         (Socket-close cli)
         (Socket-close srv)
-        (check-exception (thread-join! srv) true)))))
+        (check-exception (thread-join! server) true)))))

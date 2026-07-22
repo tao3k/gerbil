@@ -76,7 +76,7 @@
 
 (def (complement-input (uint : :integer) (len : :fixnum))
   => :integer
-  (let (bits (fxarithmetic-shift-left len 3))
+  (let (bits (fxshift len 3))
     (if (< uint (expt-cache.get (fx- bits 1)))
       uint
       (- uint (expt-cache.get bits)))))
@@ -196,7 +196,7 @@
                     (begin
                       (__bio-input-advance! bio (fx+ rlo 2) rhi)
                       (integer->char
-                       (fxior (fxarithmetic-shift-left (fxand byte1 #x1f) 6)
+                       (fxior (fxshift (fxand byte1 #x1f) 6)
                               (fxand byte2 #x3f))))
                     ;; bad continuation; replacement character
                     (begin
@@ -215,8 +215,8 @@
                     (begin
                       (__bio-input-advance! bio (fx+ rlo 3) rhi)
                       (integer->char
-                       (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                              (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
+                       (fxior (fxshift (fxand byte1 #x0f) 12)
+                              (fxshift (fxand byte2 #x3f) 6)
                               (fxand byte3 #x3f))))
                     ;; bad continuation; replacement character
                     (begin
@@ -238,9 +238,10 @@
                     (begin
                       (__bio-input-advance! bio (fx+ rlo 4) rhi)
                       (integer->char
-                       (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                              (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
-                              (fxand byte3 #x3f))))
+                       (fxior (fxshift (fxand byte1 #x07) 18)
+                              (fxshift (fxand byte2 #x3f) 12)
+                              (fxshift (fxand byte3 #x3f) 6)
+                              (fxand byte4 #x3f))))
                     ;; bad continuation; replacement character
                     (begin
                       (__bio-input-advance! bio rlo+1 rhi)
@@ -270,7 +271,7 @@
       (let (byte2 (reader.read-u8!))
         (if (fx= (fxand byte2 #xc0) #x80)
           (integer->char
-           (fxior (fxarithmetic-shift-left (fxand byte1 #x1f) 6)
+           (fxior (fxshift (fxand byte1 #x1f) 6)
                   (fxand byte2 #x3f)))
           (begin
             ;; bad continuation; put back the byte to the buffer and return replacement char
@@ -282,8 +283,8 @@
           (let (byte3 (reader.read-u8!))
             (if (fx= (fxand byte3 #xc0) #x80)
               (integer->char
-               (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                      (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
+               (fxior (fxshift (fxand byte1 #x0f) 12)
+                      (fxshift (fxand byte2 #x3f) 6)
                       (fxand byte3 #x3f)))
               (begin
                 ;; bad continuation; put back and return replacement char
@@ -301,9 +302,10 @@
               (let (byte4 (reader.read-u8!))
                 (if (fx= (fxand byte4 #xc0) #x80)
                   (integer->char
-                   (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                          (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
-                          (fxand byte3 #x3f)))
+                   (fxior (fxshift (fxand byte1 #x07) 18)
+                          (fxshift (fxand byte2 #x3f) 12)
+                          (fxshift (fxand byte3 #x3f) 6)
+                          (fxand byte4 #x3f)))
                   (begin
                     ;; bad continuation; put back and return replacement char
                     (reader.put-back [byte2 byte3 byte4])
@@ -346,7 +348,7 @@
                 (let (byte2 (u8vector-ref buf rlo+1))
                   (if (fx= (fxand byte2 #xc0) #x80)
                     (integer->char
-                     (fxior (fxarithmetic-shift-left (fxand byte1 #x1f) 6)
+                     (fxior (fxshift (fxand byte1 #x1f) 6)
                             (fxand byte2 #x3f)))
                     ;; bad continuation; replacement character
                     #\xfffd))
@@ -361,8 +363,8 @@
                        (byte3 (u8vector-ref buf rlo+2)))
                   (if (fx= (fxand (fxior byte2 byte3) #xc0) #x80)
                     (integer->char
-                     (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                            (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
+                     (fxior (fxshift (fxand byte1 #x0f) 12)
+                            (fxshift (fxand byte2 #x3f) 6)
                             (fxand byte3 #x3f)))
                     ;; bad continuation; replacement character
                     #\xfffd))
@@ -380,9 +382,10 @@
                        (byte4 (u8vector-ref buf rlo+3)))
                   (if (fx= (fxand (fxior byte2 byte3 byte4) #xc0) #x80)
                     (integer->char
-                     (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                            (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
-                            (fxand byte3 #x3f)))
+                     (fxior (fxshift (fxand byte1 #x07) 18)
+                            (fxshift (fxand byte2 #x3f) 12)
+                            (fxshift (fxand byte3 #x3f) 6)
+                            (fxand byte4 #x3f)))
                     ;; bad continuation; replacement character
                     #\xfffd))
                 (let* ((need (fx- 4 (fx- rhi rlo)))
@@ -412,7 +415,7 @@
           (begin
             (reader.put-back [byte1 byte2])
             (integer->char
-             (fxior (fxarithmetic-shift-left (fxand byte1 #x1f) 6)
+             (fxior (fxshift (fxand byte1 #x1f) 6)
                     (fxand byte2 #x3f))))
           (begin
             ;; bad continuation; put back the byte to the buffer and return replacement char
@@ -427,8 +430,8 @@
               (begin
                 (reader.put-back [byte1 byte2 byte3])
                 (integer->char
-                 (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                        (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
+                 (fxior (fxshift (fxand byte1 #x0f) 12)
+                        (fxshift (fxand byte2 #x3f) 6)
                         (fxand byte3 #x3f))))
               (begin
                 ;; bad continuation; return replacement char
@@ -449,9 +452,10 @@
                   (begin
                     (reader.put-back [byte1 byte2 byte3 byte4])
                     (integer->char
-                     (fxior (fxarithmetic-shift-left (fxand byte1 #x0f) 12)
-                            (fxarithmetic-shift-left (fxand byte2 #x3f) 6)
-                            (fxand byte3 #x3f))))
+                     (fxior (fxshift (fxand byte1 #x07) 18)
+                            (fxshift (fxand byte2 #x3f) 12)
+                            (fxshift (fxand byte3 #x3f) 6)
+                            (fxand byte4 #x3f))))
                   (begin
                     ;; bad continuation; return replacement char
                     (reader.put-back [byte1 byte2 byte3 byte4])
@@ -472,7 +476,7 @@
   ;; => :char or :eof
   (if (is-input-buffer-instance? reader)
     (using (bio (&interface-instance-object reader) :- basic-input-buffer)
-      (__check-buffer-open! peer-char-utf8 bio)
+      (__check-buffer-open! peek-char-utf8 bio)
       (if (fx<= 4 (u8vector-length bio.buf))
         (__bio-peek-char-utf8 bio)
         (__bio-peek-char-utf8-generic reader)))
@@ -548,7 +552,12 @@
     (if (eof-object? next)
       '#!eof
       (let loop ((chars []) (chars-read 0) (separators-rest separators) (separators-count 0))
-        (if (read-more? chars-read)
+        ;; Terminate when max-chars reached, or when the complete separator sequence
+        ;; has been consumed (separators is non-empty and separators-rest is now empty).
+        ;; Check before reading so we never consume a character past the line ending.
+        (if (or (not (read-more? chars-read))
+                (and (pair? separators) (null? separators-rest)))
+          (finish chars separators-count)
           (let (next (__read-char input))
             (if (eof-object? next)
               (finish chars separators-count)
@@ -557,9 +566,9 @@
                  (if (eq? sep next)
                    (loop (cons next chars) (fx+ chars-read 1) separators-rest (fx+ separators-count 1))
                    (loop (cons next chars) (fx+ chars-read 1) separators 0)))
-                ([]
-                 (finish (cons next chars) separators-count)))))
-          (finish chars separators-count))))))
+                ;; No-separator mode (sep=#f): accumulate without matching
+                ([] (loop (cons next chars) (fx+ chars-read 1) separators-rest 0))))))))))
+
 
 (def (bio-read-line-utf8 (bio        : basic-input-buffer)
                          (separators : :list)
@@ -569,7 +578,7 @@
                          __bio-peek-char-utf8
                          __bio-read-char-utf8))
 
-(def (bio-read-line-utf8-generic (reader     : Reader)
+(def (bio-read-line-utf8-generic (reader     : BufferedReader)
                                  (separators : :list)
                                  (read-more? : :procedure)
                                  (finish     : :procedure))
@@ -602,7 +611,7 @@
                               separators
                               read-more?
                               finish))
-      (__bio-read-line-utf8-generic (&interface-instance-object reader)
+      (__bio-read-line-utf8-generic reader
                                     separators
                                     read-more?
                                     finish))))

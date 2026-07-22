@@ -6,7 +6,7 @@
         ./interface
         ./level
         ./format)
-(export console-log-sink)
+(export console-log-sink stderr-log-sink)
 
 (def __console
   (delay-atomic
@@ -18,6 +18,18 @@
 
 (def (console-log-sink) => LogSink
   (:- (force __console)
+      LogSink))
+
+(def __stderr
+  (delay-atomic
+   (LogSink
+    (PortLogSink
+     "/system/stderr"
+     (default-log-level)
+     ##stderr-port))))
+
+(def (stderr-log-sink) => LogSink
+  (:- (force __stderr)
       LogSink))
 
 (defstruct (PortLogSink BasicLogger)

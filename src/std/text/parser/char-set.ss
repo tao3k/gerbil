@@ -3,16 +3,20 @@
 ;;;; Codepoints are important to analyze data that might or might not actually be unicode,
 ;;;; or to deal directly with binary data without casting to char.
 
+(import :std/error)
+
 (export #t)
 
 ;; Codepoints assume Unicode encoding
 
 (defrule (def-codepoint (name x y ...) body ...)
-  (with-id ((codepoint-fun name "codepoint-" name)
-            (char-fun name "char-" name))
+  (with-id ((codepoint-predicate name "codepoint-" name)
+            (char-predicate name "char-" name))
     (begin
-      (def (codepoint-fun (x : :fixnum) y ...) => :boolean (declare (fixnum)) body ...)
-      (def (char-fun x y ...) => :boolean (and (char? x) (codepoint-fun (char->integer x) y ...))))))
+      (def (codepoint-predicate (x : :fixnum) y ...) => :boolean
+        body ...)
+      (def (char-predicate x y ...) => :boolean
+        (and (char? x) (codepoint-predicate (char->integer x) y ...))))))
 
 ;; : Codepoint -> Bool
 (def-codepoint (ascii? c)
@@ -46,6 +50,40 @@
 (def-codepoint (ascii-printable? c) ;; any ascii printable character
   (<= 32 c 126)) ;; see https://en.wikipedia.org/wiki/ASCII
 
+;; : Codepoint -> Bool
+(def-codepoint (bmp? c) ;; in the Unicode Basic Multilingual Plane (BMP)
+  (<= 0 c #xffff))
+
+;; : Codepoint -> Bool
+(def (codepoint-surrogate? (c : :fixnum)) => :boolean ;; Unicode surrogate for UTF-16
+  (<= #xd800 c #xdfff))
+
+;; : Codepoint -> (Values Codepoint Codepoint)
+(def (codepoint-surrogates (c : :fixnum)) => :values
+  (check-argument (<= #x10000 c #x10FFFF) "Unicode codepoint beyond the BMP" c)
+  (using (o (fx- c #x10000) :- :fixnum)
+    (values (fx+ #xd800 (fxarithmetic-shift-right o 10))
+            (fx+ #xdc00 (bitwise-and o #x3FF)))))
+
+;; char-surrogates returns two codepoints (not chars), or #f if the character is outside the BMP.
+;; Surrogates are not valid codepoints for Gambit characters, so we cannot return chars.
+(def (char-surrogates c)
+  (and (char? c)
+       (let ((codepoint (char->integer c)))
+         (and (fx<= #x10000 codepoint)
+              (codepoint-surrogates codepoint)))))
+
+(def (surrogates->codepoint (hi : :fixnum) (lo : :fixnum)) => :fixnum
+  (check-argument (fx<= #xd800 hi #xdbff) "Unicode codepoint in high surrogate range" hi)
+  (check-argument (fx<= #xdc00 lo #xdfff) "Unicode codepoint in low surrogate range" lo)
+  (+ #x10000
+     (fxarithmetic-shift-left (bitwise-and hi #x3ff) 10)
+     (bitwise-and lo #x3ff)))
+
+(def (surrogates->char (hi : :fixnum) (lo : :fixnum)) => :char
+  (integer->char (surrogates->codepoint hi lo)))
+
+
 ;;; There is no consensus on what a Unicode "whitespace" is.
 ;; See https://en.wikipedia.org/wiki/Whitespace_character
 
@@ -77,8 +115,8 @@
   (char-whitespace? (integer->char c)))
 
 ;; Note that JavaScript accepts the ASCII whitespace, the Unicode Space Separators,
-;; #xFEFF (ZWNBSP), but doesn't consider the line separators whitespace; rather
-;; it considers #x0A #x0D #x2028 #x2029 as line terminators but not #x85 (Next Line).
+;; #xFEFF (ZWNBSP), but doesn't consider the line separators as whitespace; rather
+;; it considers #x0A #x0D #x2028 #x2029 as line terminators, but not #x85 (Next Line).
 
 ;; Rust recognizes the ASCII whitespace plus #x85 #x200E #x200F #x2028 #x2029.
 
@@ -106,15 +144,18 @@
 ;; What character (we assume ASCII) for the given digit in the given base (up to 36)?
 ;; Return #f if N isn't a digit number that has a corresponding character in the given base.
 ;; : Integer (Optional Integer 10) (Optional Bool #f) -> (Or Char #f)
-(def (digit-char n (base : :fixnum := 10) (upper-case? : :boolean := #f))
+(def (digit-char n (base 10) (upper-case? #f))
   (and (exact-integer? n) (exact-integer? base)
        (<= 2 base 36) (< -1 n base)
-       (integer->char (+ n (cond
-                            ((< n 10) 48) ;; ASCII 0-9
-                            (upper-case? 55) ;; ASCII A-Z
-                            (else 87)))))) ;; ASCII a-z
+       (integer->char (unsafe-digit-char-integer n (and upper-case? #t)))))
+
+(def (unsafe-digit-char-integer (n :- :fixnum) (upper-case? :- :boolean)) => :fixnum
+  (fx+ n (cond
+          ((fx< n 10) 48)  ;; ASCII 0-9
+          (upper-case? 55) ;; ASCII A-Z
+          (else 87))))     ;; ASCII a-z
 
 ;; Is the result from read-char or peek-char from a Port or Reader a line terminator?
 ;; : Any -> Bool
-(def (char-eol? x) => :boolean
+(def (char-eol? x)
   (or (eqv? x #\newline) (eqv? x #\return) (eof-object? x)))

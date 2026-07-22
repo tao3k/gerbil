@@ -2,6 +2,7 @@
 ;;; (C) vyzo
 ;;; Command-line option and command argument parsing
 (import :std/error
+        :std/format
         :std/iter
         :std/hash/misc
         :std/list/list

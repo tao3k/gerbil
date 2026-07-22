@@ -139,7 +139,8 @@ namespace: gx
 (def (core-import-module rpath (reload? #f))
   (def (import-source path)
     (when (member path (current-expander-path))
-      (raise-syntax-error #f "Cyclic expansion" path (current-expander-path)))
+      (raise-syntax-error #f "Cyclic expansion"
+             (append (member path (reverse (current-expander-path))) [path])))
     (parameterize ((current-expander-context (core-context-root))
                    (current-expander-marks [])
                    (current-expander-phi 0)

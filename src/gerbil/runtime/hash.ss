@@ -39,6 +39,14 @@ namespace: #f
   (write-lock!) => :void
   (write-unlock!) => :void)
 
+(def (wrap-hash (proc : :procedure))
+  (lambda (self)
+    (HashTable (proc self))))
+
+(def (wrap-hash-new (proc : :procedure))
+  (lambda (self (size-hint #f))
+    (HashTable (proc self size-hint))))
+
 ;; raw/builtin table methods
 (bind-method! __table::t 'HashTable::ref raw-table-ref)
 (bind-method! __table::t 'HashTable::set! raw-table-set!)
@@ -47,7 +55,7 @@ namespace: #f
 (bind-method! __table::t 'HashTable::for-each raw-table-for-each)
 (bind-method! __table::t 'HashTable::length &raw-table-count)
 (bind-method! __table::t 'HashTable::copy (wrap-hash raw-table-copy))
-(bind-method! __table::t 'HashTable::new (wrap-hash raw-table-new))
+(bind-method! __table::t 'HashTable::new (wrap-hash-new raw-table-new))
 (bind-method! __table::t 'HashTable::clear! raw-table-clear!)
 
 (bind-method! __gc-table::t 'HashTable::ref gc-table-ref)
@@ -57,7 +65,7 @@ namespace: #f
 (bind-method! __gc-table::t 'HashTable::for-each gc-table-for-each)
 (bind-method! __gc-table::t 'HashTable::length gc-table-length)
 (bind-method! __gc-table::t 'HashTable::copy (wrap-hash gc-table-copy))
-(bind-method! __gc-table::t 'HashTable::new (wrap-hash gc-table-new))
+(bind-method! __gc-table::t 'HashTable::new (wrap-hash-new gc-table-new))
 (bind-method! __gc-table::t 'HashTable::clear! gc-table-clear!)
 
 (def (gambit-table-update! table key update default)
@@ -77,7 +85,7 @@ namespace: #f
 (bind-method! (macro-type-table) 'HashTable::for-each gambit-table-for-each)
 (bind-method! (macro-type-table) 'HashTable::length table-length)
 (bind-method! (macro-type-table) 'HashTable::copy (wrap-hash table-copy))
-(bind-method! (macro-type-table) 'HashTable::new (wrap-hash table-new))
+(bind-method! (macro-type-table) 'HashTable::new (wrap-hash-new table-new))
 (bind-method! (macro-type-table) 'HashTable::clear! gambit-table-clear!)
 
 ;; immediate hash-table class; reifies the raw-table type
@@ -197,10 +205,6 @@ namespace: #f
   make-immediate-hash-table immediate-hash-table?
   name: immediate-hash-table)
 
-(def (wrap-hash (proc : :procedure))
-  (lambda (self)
-    (HashTable (proc self))))
-
 (bind-method! hash-table::t 'HashTable::ref raw-table-ref)
 (bind-method! hash-table::t 'HashTable::set! raw-table-set!)
 (bind-method! hash-table::t 'HashTable::update! raw-table-update!)
@@ -208,7 +212,7 @@ namespace: #f
 (bind-method! hash-table::t 'HashTable::for-each raw-table-for-each)
 (bind-method! hash-table::t 'HashTable::length &raw-table-count)
 (bind-method! hash-table::t 'HashTable::copy (wrap-hash raw-table-copy))
-(bind-method! hash-table::t 'HashTable::new (wrap-hash raw-table-new))
+(bind-method! hash-table::t 'HashTable::new (wrap-hash-new raw-table-new))
 (bind-method! hash-table::t 'HashTable::clear! raw-table-clear!)
 
 (bind-method! eq-hash-table::t 'HashTable::ref eq-table-ref)
@@ -243,7 +247,7 @@ namespace: #f
 (bind-method! gc-hash-table::t 'HashTable::for-each gc-table-for-each)
 (bind-method! gc-hash-table::t 'HashTable::length gc-table-length)
 (bind-method! gc-hash-table::t 'HashTable::copy (wrap-hash gc-table-copy))
-(bind-method! gc-hash-table::t 'HashTable::new (wrap-hash gc-table-new))
+(bind-method! gc-hash-table::t 'HashTable::new (wrap-hash-new gc-table-new))
 (bind-method! gc-hash-table::t 'HashTable::clear! gc-table-clear!)
 
 ;; HashTable interface methods

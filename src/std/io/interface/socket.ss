@@ -28,8 +28,7 @@
   ;; setsockopt syscall
   (setsockopt (opt : SockOpt)
               (arg  :  :t))
-  => :void
-  )
+  => :void)
 
 (interface (ClientSocket Socket)
   ;; receives data into a buffer; it _must_ be a u8vector

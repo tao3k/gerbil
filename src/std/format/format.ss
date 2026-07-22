@@ -10,6 +10,7 @@
         ./format-string
         ./env
         ./ioutil
+        ./writer
         ./io)
 (export #t)
 
@@ -19,7 +20,7 @@
   final: #t)
 
 (def (make-formatter (fmt                   :  :string)
-                    (ctx  (format-context) :  WriteContext))
+                     (ctx  (format-context) :  WriteContext))
   => Formatter
   (Formatter fmt ctx))
 
@@ -55,25 +56,19 @@
 (def (make-folder-for-writer (fmt : Formatter) (writer : BufferedWriter)) => FormatFolder
   (let ((fold-char
          (lambda ((char   :- :char)
-             (result :- :fixnum))
+                  (result :- :fixnum))
            (fx+ result (writer.write-char-utf8 char))))
         (fold-int
-         (lambda (arg how flags width result)
-           (using (ctx (@format-env fmt.env
-                                    (flags: flags)
-                                    (width: width)
-                                    (integer-conversion: how))
-                       : WriteContext)
-             (fx+ result (ctx.methods.write-integer writer (: arg :integer) ctx)))))
+         (lambda (arg how flags width precision result)
+           (with ([prefix-char base upper-case?]
+                  (or (agetq how __integer-conversions)
+                      (raise-bad-argument format "integer format specifier" how)))
+             (fx+ result
+                  (do-write-integer writer (: arg :integer)
+                                    flags width precision prefix-char base upper-case?)))))
         (fold-float
          (lambda (arg how flags width precision result)
-           (using (ctx (@format-env fmt.env
-                                    (flags: flags)
-                                    (width: width)
-                                    (precision: precision)
-                                    (flonum-conversion: how))
-                       : WriteContext)
-             (fx+ result (ctx.methods.write-flonum writer (: arg :flonum) ctx)))))
+           (fx+ result (writer.format-float arg flags width precision (char->integer how)))))
         (fold-object
          (lambda (arg how result)
            (fx+ result

@@ -35,63 +35,70 @@
              (u8vector-set! buf i (fx+ #x30 r))
              (fx+ i 1))))))
 
-   (def (buffer-cache-get-float-format-buffer (opt : FormatOpt) (num : :flonum)) => :u8vector
+   (def (buffer-cache-get-float-format-buffer flags width precision (flonum-repr : :fixnum)) => :u8vector
      (let (buf (buffer-cache.get 32))
        (u8vector-set! buf 0 (@char->int #\%))
-       (let* ((i (if opt.flags
-                   (for/fold (i 1) (flag (in-list opt.flags) : :char)
+       (let* ((i (if flags
+                   (for/fold (i 1) (flag (in-list flags) : :char)
                      (u8vector-set! buf i (char->integer flag))
                      (fx+ i 1))
                    1))
-              (i (if opt.precision
-                   (buffer-write-digits buf i opt.precision)
+              (i (if width
+                   (buffer-write-digits buf i width)
                    i))
-              (i (cond
-                  (opt.width
-                   (u8vector-set! buf i (@char->int #\.))
-                   (buffer-write-digits buf (fx+ i 1) opt.width))
-                  ((and (flinteger? num) (not (memq #\# opt.flags)))
-                   (u8vector-set! buf i (@char->int #\#))
-                   (u8vector-set! buf (fx+ i 1) (@char->int #\.))
-                   (buffer-write-digits buf (fx+ i 2) 0))
-                  (else i))))
-         (u8vector-set! buf i opt.flonum-repr)
+              (i (if precision
+                   (begin
+                     (u8vector-set! buf i (@char->int #\.))
+                     (buffer-write-digits buf (fx+ i 1) precision))
+                   i)))
+         (u8vector-set! buf i flonum-repr)
          (u8vector-set! buf (fx+ i 1) 0)
          buf)))
 
-   (def (buffer-cache-get-float-output-buffer (opt : FormatOpt)) => :u8vector
-     (let* ((buflen
-             (fxmax
-              (fx+ (or opt.width 6)
-                   (if opt.precision (fx+ opt.precision 1) 6)
-                   4)
-              32))
+   (def (buffer-cache-get-float-output-buffer flags width precision (flonum-repr :- :fixnum)) => :u8vector
+     (let* (;; %f/%F output can have up to 309 integer digits for IEEE double max (~1e308)
+            ;; plus sign, decimal separator, total 311 for fractional digits---plus precision.
+            ;; %e precision plus 5 for exponent (and its sign and "e" indicator),
+            ;; plus sign and decimal and leading digit, total 8---plus precision.
+            ;; %g is total 7---plus precision.
+            ;; And then, the width provides is a minimum.
+            ;; Plus, add yet another byte for terminating NUL character.
+            (int-part-reserve
+             (if (or (fx= flonum-repr (@char->int #\f))
+                     (fx= flonum-repr (@char->int #\F)))
+               311 8))
             (buflen
+             (fxmax 31
+                    (or width 0)
+                    (fx+ (or precision 6) int-part-reserve)))
+            (buflen ;; round up to next power of 2 strictly after buflen (which accounts for the NUL).
              (fxshift 1 (integer-length buflen))))
        (buffer-cache.get buflen)))
-
    (def-C (__print-float (output-buf  :- :u8vector)
                          (fmt-buf     :- :u8vector)
                          (float       :- :flonum))
      => :fixnum
      "snprintf((char*)___arg1, ___U8VECTORSIZE(___ARG1), (char*) ___arg2, ___arg3)")
-
-   (defwriter-ext (format-float writer (num : :flonum) (opt : FormatOpt))
-     (let* ((fmt-buf (buffer-cache-get-float-format-buffer opt num))
-            (str-buf (buffer-cache-get-float-output-buffer opt))
+   (defwriter-ext (format-float writer (num : :flonum) flags width precision (flonum-repr :- :fixnum))
+     (let* ((fmt-buf (buffer-cache-get-float-format-buffer flags width precision flonum-repr))
+            (str-buf (buffer-cache-get-float-output-buffer flags width precision flonum-repr))
+            (buflen  (u8vector-length str-buf))
             (wr      (__print-float str-buf fmt-buf num)))
        (defrule (release!)
          (begin
            (buffer-cache.put! str-buf)
            (buffer-cache.put! fmt-buf)))
-       (if (fx> wr 0)
+       (if (fx< 0 wr buflen) ;; success!
          (begin0
              (writer.write str-buf 0 wr)
            (release!))
          (begin
            (release!)
-           (raise-io-error format-flonum "failed to format float" error: wr))))))
+           (raise-io-error format-flonum "failed to format float"
+                           num flags width precision flonum-repr buflen wr))))))
   (else
+   (defwriter-ext (format-float writer (num : :flonum) flags width precision (flonum-repr :- :fixnum))
+     (writer.write-string-utf8 (number->string num)))
    (syntax-error "unsupported target")))
 
 (def __hvector-prefixes
@@ -216,15 +223,12 @@
        wr)))
   (write-integer
    (lambda (self writer int ctx)
-     (if (fixnum? int)
-       (do-write-integer writer int self.opt write-fixnum)
-       (do-write-integer writer int self.opt write-bignum))))
+     (do-write-integer writer int #f #f #f #f 10 #f)))
   (write-flonum
    (lambda (self writer num ctx)
      (cond
       ((##flfinite? num)
-       ;; not nan or infinity
-       (writer.format-float num self.opt))
+       (writer.write-string-utf8 (number->string num)))
       ((##flinfinite? num)
        (if (##flnegative? num)
          (writer.write (@string->utf8 "-inf.0"))
@@ -258,12 +262,11 @@
              (writer.write-u8 (@char->int #\i))
              wr))
           (else
-           (let (ctx (@format-env ctx (flags: (format-flag-set #\+ self.opt.flags))))
-
-	     (do-write (wr 0)
-	       (writer.serialize imag ctx)
-	       (writer.write-u8 (@char->int #\i))
-	       wr))))
+           (do-write (wr 0)
+             (if (not (negative? imag)) (writer.write-plus) 0)
+             (writer.serialize imag ctx)
+             (writer.write-u8 (@char->int #\i))
+             wr)))
 	 wr))))
   (write-symbol
    (lambda (self writer sym ctx)

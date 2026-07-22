@@ -9,6 +9,9 @@
     "error"
     "interface"
     "deprecation"
+    "assert"
+
+    "debug/DBG"
 
     "list/list-builder"
     "list/list"
@@ -17,40 +20,16 @@
     "list/walist"
     "list/random"
 
-    "string/path"
-    "string/utf8"
-    "string/stringer"
-
     "iter/interface"
     "iter/iterators"
     "iter/macros"
     "iter/api"
     "iter"
 
-    "struct/queue"
-
-    "sync/completion"
-    "sync/channel"
-    "sync/barrier"
-    "sync/wg"
-
-    "time/time"
-    "time/timeout"
-    "time/precise"
-
-    "make"
-    "build-script"
-
-    "test/base"
-    "test/unit"
-    "test"
-
-    "values"
-
-    "hash/misc"
-    "hash/types"
-
     "string/misc"
+    "string/path"
+    "string/utf8"
+    "string/stringer"
 
     "cli/getopt"
 
@@ -139,6 +118,52 @@
     "format/api"
     "format"
 
+    "time/time"
+    "time/timeout"
+    "time/precise"
+
+    "sync/atom"
+    "sync/channel"
+    "sync/completion"
+    "sync/barrier"
+    "sync/wg"
+
+    "make"
+    "build-script"
+
+    "test/base"
+    "test/unit"
+    "test"
+
+    "values"
+
+    "hash/types"
+    "hash/misc"
+
+    "struct/queue"
+
+    "cli/getopt"
+    "cli/multicall"
+    "cli/print-exit"
+    "cli/shell"
+
+    "text/pregexp"
+    "text/parser/char-set"
+    "text/parser/base"
+    "text/parser/ll1"
+    "text/template"
+
+    "cache"
+    "sync/rwlock"
+    "sync/spinlock"
+
+    "net/address/types"
+    "net/address/parser"
+    "net/address/stringer"
+    "net/address/resolver"
+    "net/address/api"
+    "net/address"
+
     (gxc: "crypto/libcrypto"
           "-cc-options" ,(append-options (cppflags "libcrypto" "") "-Wno-discarded-qualifiers" "-Wno-deprecated-declarations" "-Wno-implicit-function-declaration")
           "-ld-options" ,(ldflags "libcrypto" "-lcrypto"))
@@ -173,9 +198,27 @@
 
     "encoding/base64"
     "encoding/hex"
+    "encoding/json/env"
+    "encoding/json/writer"
+    "encoding/json/reader"
+    "encoding/json/io"
+    "encoding/json/util"
+    "encoding/json/api"
+    "encoding/json"
+
+    "vector/u8vector"
+    "vector/extensible"
+    "vector/vector"
+
+    "number/misc"
+    "number/prime"
+    "number/decimal"
+    "number/writer"
 
     "misc/process"
     "misc/ports"
+
+    "source"
 
     ,@(if config-enable-zlib
         `((gxc: "encoding/zlib"
@@ -223,6 +266,8 @@
     "net/http/server/server"
     "net/http/server/api"
     "net/http/server"
+
+    "net/json-rpc"
 
     "db/interface"
     "db/db"
@@ -298,19 +343,11 @@
 #;(def (build-spec . _)
   `(
     "metaclass"
-    "hash-table"
-    "interactive"
     "ssi"
     "foreign"
     ;; tests for :std/foreign
     "foreign-test-support"
     "deprecation"
-    "format"
-    "pregexp"
-    "sort"
-    "sugar"
-    "values"
-    "assert"
 
     "build-script"
     (gxc: "error" ,@(include-gambit-sharp))
@@ -333,13 +370,7 @@
     "contract"
     (gxc: "interface" ,@(include-gambit-sharp))
     "instance"
-    ;; cli
-    "cli/getopt"
-    "cli/shell"
-    "cli/print-exit"
-    "cli/multicall"
     ;; debugging
-    "debug/DBG"
     (gxc: "debug/heap" ,@(include-gambit-sharp))
     "debug/memleak"
     (gxc: "debug/threads" ,@(include-gambit-sharp))
@@ -470,7 +501,6 @@
 
     "net/uri"
     "net/request"
-    "net/json-rpc"
     "net/s3"
     "net/s3/interface"
     "net/s3/api"
@@ -595,17 +625,8 @@
     ;; :std/misc
     "misc/atom"
     "misc/dag"
-    "misc/decimal"
-    "misc/vector"
-    "misc/evector"
-    "misc/prime"
     "misc/concurrent-plan"
     "misc/timeout"
-    "misc/list-builder"
-    "misc/list"
-    "misc/alist"
-    "misc/plist"
-    "misc/walist"
     "misc/shuffle"
     "misc/uuid"
     "misc/repr"
@@ -614,12 +635,7 @@
     "misc/deque"
     "misc/rbtree"
     "misc/lru"
-    "misc/string"
     "misc/sync"
-    "misc/completion"
-    "misc/barrier"
-    "misc/channel"
-    "misc/wg"
     (gxc:  "misc/ports" ,@(include-gambit-sharp))
     (gxc:  "misc/threads" ,@(include-gambit-sharp))
     "misc/process"

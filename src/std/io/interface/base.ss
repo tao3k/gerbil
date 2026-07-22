@@ -27,9 +27,9 @@
   ;; Returns the number of bytes read; 0 denotes the end of input.
   ;; If less than the needed bytes are read, an io-error is raised.
   (read (u8v    : :u8vector)
-        (start  :~ (in-range? 0 (u8vector-length u8v))               :- :fixnum :=  0)
+        (start  :~ (in-range? 0 (u8vector-length u8v))               :- :fixnum := 0)
         (end    :~ (in-range-inclusive? start (u8vector-length u8v)) :- :fixnum := (u8vector-length u8v))
-        (need   :~ (in-range-inclusive? 0 (fx- end start))           :- :fixnum :=  0))
+        (need   :~ (in-range-inclusive? 0 (fx- end start))           :- :fixnum := 0))
   => :fixnum)
 
 
@@ -39,6 +39,6 @@
   ;; - end denotes the write region end; #f means the end of the buffer
   ;; Returns the number of bytes written.
   (write (u8v   :  :u8vector)
-         (start :~ (in-range-inclusive? 0 (u8vector-length u8v))     :- :fixnum :=  0)
+         (start :~ (in-range-inclusive? 0 (u8vector-length u8v))     :- :fixnum := 0)
          (end   :~ (in-range-inclusive? start (u8vector-length u8v)) :- :fixnum := (u8vector-length u8v)))
   => :fixnum)

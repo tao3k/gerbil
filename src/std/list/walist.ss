@@ -8,6 +8,8 @@
   AList AList?
   PureAList PureAList?
   MutAList MutAList?
+  WAList WAListq WAListv MutWAList MutWAListq MutWAListv
+  WAList? WAListq? WAListv? MutWAList? MutWAListq? MutWAListv?
   __walist
   __walistq
   __walistv

@@ -115,6 +115,28 @@
           (check (BufferedReader-read-char-utf8 brd) => char))
         (check (BufferedReader-read-char-utf8 brd) ? eof-object?)))
 
+    (test-case "4-byte char input (generic path)"
+      ;; port-input-buffer is not a basic-input-buffer so read-char-utf8 always
+      ;; uses bio-read-char-utf8-generic, including the 4-byte emoji branch.
+      (let* ((input "café 中文 \U0001F600 résumé")
+             (brd (open-buffered-reader (open-input-u8vector (string->utf8 input)))))
+        (for (char (string->list input))
+          (check (BufferedReader-read-char-utf8 brd) => char))
+        (check (BufferedReader-read-char-utf8 brd) ? eof-object?)))
+
+    (test-case "peek char input"
+      ;; peek-char-utf8 must not consume the character; subsequent peek/read must return
+      ;; the same char.  Tests both ASCII and multi-byte code points via the generic
+      ;; port-input-buffer path (not a basic-input-buffer).
+      (let* ((input "café \U0001F600")
+             (chars (string->list input))
+             (brd (open-buffered-reader (open-input-u8vector (string->utf8 input)))))
+        (for (char chars)
+          (check (BufferedReader-peek-char-utf8 brd) => char) ; peek doesn't consume
+          (check (BufferedReader-peek-char-utf8 brd) => char) ; idempotent
+          (check (BufferedReader-read-char-utf8 brd) => char)) ; now consume
+        (check (BufferedReader-peek-char-utf8 brd) ? eof-object?)))
+
     (test-case "string input"
       (let* ((input "the quick brown fox jumped over the lazy dog")
              (brd (open-buffered-reader (open-input-u8vector (string->utf8 input))))
