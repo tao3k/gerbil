@@ -207,6 +207,15 @@ TODO:
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
     (def buildspec (normalize-buildspec buildspec-in))
+    ;; detect and report duplicate files in the buildspec up front
+    (let (file-counts (make-hash-table))
+      (for (spec buildspec)
+        (let (f (spec-file spec settings))
+          (hash-put! file-counts f (+ 1 (hash-ref file-counts f 0)))))
+      (let (dups (filter-map (lambda (kv) (and (> (cdr kv) 1) (car kv)))
+                             (hash->list file-counts)))
+        (unless (null? dups)
+          (error "Duplicate files in buildspec" dups))))
     ;; mutex for imports
     (def import-mx (make-mutex 'import))
     ;; mute for dependency timestamps (mauling of load-path)
