@@ -28,13 +28,11 @@
       listen: [server-listen-address]))))
 
 (def (test-setup!)
-  (set-default-log-levels! "info")
   (create-directory log-dir)
   (using (server (force server) : Server)
     (server.start!)))
 
 (def (test-cleanup!)
-  (set-default-log-levels! "error")
   (using (server (force server) : Server)
     (server.stop!))
   (delete-file-or-directory log-dir #t))

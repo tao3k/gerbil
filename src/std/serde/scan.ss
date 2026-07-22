@@ -37,10 +37,11 @@
 
 (def (scan-object! obj (ctx : ScanContext) (path [] : :list)) => :fixnum
   (cond
-   ((or (and ctx.compress? (immediate? obj))
-	(acyclic-object? obj))
+   ((if ctx.compress?
+      (immediate? obj)
+      (acyclic-object? obj))
     -1)
-   ((hash-get ctx.scanned obj)
+   ((ctx.scanned.ref obj #f)
     => (lambda (e) => :fixnum
           (if ctx.compress?
             (using ((e             :- :pair)
@@ -61,12 +62,12 @@
                     (ctx.cycles.set! obj id)
                     (raise-contract-violation scan-object! "acyclic object" (class-of obj)))))
               id))))
-     (else
-      (let (id ctx.next)
-        (set! ctx.next (fx1+ id))
-        (hash-put! ctx.scanned obj (if ctx.compress? (cons id 1) id))
-        (apply-object-scanner obj ctx (cons obj path))
-        id))))
+   (else
+    (let (id ctx.next)
+      (set! ctx.next (fx1+ id))
+      (ctx.scanned.set! obj (if ctx.compress? (cons id 1) id))
+      (apply-object-scanner obj ctx (cons obj path))
+      id))))
 
 (def (apply-object-scanner obj (ctx : ScanContext) (path : :list)) => :void
   (__object-scan! obj ctx path))

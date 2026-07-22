@@ -1,7 +1,8 @@
 ;;; -*- Gerbil -*-
 ;;; © vyzo
 ;;; source/sink buffered io
-(import :std/interface
+(import :std/error
+        :std/interface
         ../interface
         ./types
         ./buffer
@@ -83,9 +84,20 @@
   => :void
   (__bio-close-input src __source-close!))
 
+(def (source-detach! (src : source-input-buffer))
+  => :void
+  (unless src.closed?
+    (when (fx< src.rlo src.rhi)
+      (raise-io-error source-detach! "cannot detach source; buffer contains residual data") (fx- src.rlo src.rhi))
+    (set! src.closed? #t)
+    (when src.cached?
+      (buffer-cache.put! src.buf))
+    (set! src.buf #f)
+    (set! src.reader #f)))
+
 (def (sink-write (snk   : sink-output-buffer)
                  (input : :u8vector)
-                 (start :~ (in-range? 0 (u8vector-length input))
+                 (start :~ (in-range-inclusive? 0 (u8vector-length input))
                         :- :fixnum)
                  (end   :~ (in-range-inclusive? start (u8vector-length input))
                         :- :fixnum))
@@ -171,5 +183,7 @@
      (lambda (self)
        (__sink-close! self)))))
   (DetachableBuffer
+   (source-input-buffer
+    (detach! __source-detach!))
    (sink-output-buffer
     (detach! __sink-detach!))))

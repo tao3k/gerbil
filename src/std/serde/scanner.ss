@@ -24,13 +24,17 @@
           (let loop ((rest slots) (offset 1 :- :fixnum))
 	    => :void ;; TODO BUG this should be unnecessary
 	    (unless (null? rest)
-	      (scan-object! (##structure-ref obj offset klass #f)
+              (when ctx.compress?
+                (scan-object! (##car rest) ctx path))
+              (scan-object! (##structure-ref obj offset klass #f)
 			    ctx path)
 	      (loop (##cdr rest) (fx1+ offset)))))
 	(let (slots (class-type-printable-slots klass))
 	  (let loop ((rest slots))
 	    (match rest
-	      ([[_ . offset] . rest]
+	      ([[slot . offset] . rest]
+               (when ctx.compress?
+                 (scan-object! slot ctx path))
 	       (scan-object! (##structure-ref obj offset klass #f)
 			     ctx path)
 	       (loop rest))
@@ -40,7 +44,7 @@
   (scan-object! (##type-id self) ctx path))
 
 (defscanner :object (self ctx path)
-  (let (klass (object-class self))0
+  (let (klass (object-class self))
     (scan-object! klass ctx path)
     (scan-object-slots klass self ctx path)))
 

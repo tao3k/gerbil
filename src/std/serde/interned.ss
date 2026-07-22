@@ -1,6 +1,6 @@
 ;;; -*- Gerbil -*-
 ;;; © vyzo
-;;; serialization interned represntation
+;;; serialization interned representation
 (import :std/interface
         :std/cache
         :std/sync/spinlock

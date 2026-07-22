@@ -167,7 +167,7 @@
 
 (def (port-write (pio   : port-output-buffer)
                  (input : :u8vector)
-                 (start :~ (in-range? 0 (u8vector-length input))
+                 (start :~ (in-range-inclusive? 0 (u8vector-length input))
                         :- :fixnum)
                  (end   :~ (in-range-inclusive? start (u8vector-length input))
                         :- :fixnum))

@@ -26,7 +26,6 @@
      (let* ((sys
              (SystemLogger
               mx:      (make-mutex 'logger)
-              thread:  #f
               level:   (default-log-level)
               sources: (make-hash-table)
               sinks:   (make-hash-table)))
@@ -60,10 +59,9 @@
     (do-with-lock sys.mx
       (using (sys (system-logger) :- SystemLogger)
         (let (name (sink.name))
-          (when (hash-key? sys.sinks name)
-            (raise-context-error add-system-sink! "duplicate sink" sink))
-          (hash-put! sys.sinks name sink)
-          (thread-send sys.thread (!UPDATE:add-sink sink)))))))
+          (unless (hash-key? sys.sinks name)
+            (hash-put! sys.sinks name sink)
+            (thread-send sys.thread (!UPDATE:add-sink sink))))))))
 
 ;; dynamic log options
 (def (set-system-log-level! (level : :fixnum))

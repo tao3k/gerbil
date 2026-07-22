@@ -55,6 +55,14 @@
      (else
       (raise-parse-error parse "unparsable tag" tag: next)))))
 
+(def (parse/resolve (reader : BufferedReader)
+                    (env    : UnmarshalEnv)
+                    (anchor : Anchor))
+  (let (result (parse reader env anchor))
+    (if (Anchor? result)
+      (Anchor-resolve! result env.ctx)
+      result)))
+
 (def (parse-anchor (reader : BufferedReader)
                    (env    : UnmarshalEnv)
                    (anchor : Anchor))
@@ -71,7 +79,7 @@
 (def (parse-class (reader : BufferedReader)
                   (env    : UnmarshalEnv)
                   (anchor : Anchor))
-  (let (klass (parse reader env (anchor.temporary)))
+  (let (klass (parse/resolve reader env (anchor.temporary)))
     (anchor.set!
      (env.ctx.methods.resolve-class!
       (: klass :string)
@@ -80,14 +88,14 @@
 (def (parse-object (reader : BufferedReader)
                    (env    : UnmarshalEnv)
                    (anchor : Anchor))
-  (let (klass (: (parse reader env (anchor.temporary)) class))
+  (let (klass (: (parse/resolve reader env (anchor.temporary)) class))
     (using (kons (anchor.cons! klass #f) : ObjectBuilder)
       (let loop ()
         (if (eq? (reader.peek-u8) object-end-tag)
           (begin
             (reader.read-u8)
             (kons.finish!))
-          (let* ((slot  (parse reader env (anchor.temporary)))
+          (let* ((slot  (parse/resolve reader env (anchor.temporary)))
                  (value (parse reader env (anchor.temporary))))
             (kons.push! value slot env.ctx)
             (loop)))))))
@@ -104,7 +112,7 @@
     (using (kons (anchor.cons! klass size) : ObjectBuilder)
       (let loop ((i 0 :- :fixnum))
         (if (fx< i size)
-          (let* ((key   (parse reader env (anchor.temporary)))
+          (let* ((key   (parse/resolve reader env (anchor.temporary)))
                  (value (parse reader env (anchor.temporary))))
             (kons.push! value key env.ctx)
             (loop (fx+ i 1)))
@@ -230,8 +238,9 @@
                                           (<= size env.max-elements)
                                           size))
            (let (str (make-string size))
-             (reader.read-string-utf8 str 0 size)
-             (anchor.set! (wrap str env))))))))
+             (when (fx> size 0)
+               (reader.read-string-utf8 str 0 size))
+            (anchor.set! (wrap str env))))))))
 
 (defparse-vector parse-vector ##make-vector ##vector-set!)
 (defparse-vector parse-values ##make-values ##values-set!)

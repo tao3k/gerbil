@@ -17,7 +17,7 @@
 (defstruct (sqlite-driver sqlite-pointer) ())
 (defstruct (sqlite-statement sqlite-pointer) ())
 (defstruct sqlite-query
-  ((stmt : sqlite-statement)
+  ((stmt :- sqlite-statement)
    (this :- Query))
   transparent: #f)
 

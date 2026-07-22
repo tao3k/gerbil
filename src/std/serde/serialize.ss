@@ -31,30 +31,31 @@
      (else
       (do-object obj))))
 
-  (: (let again ()
-       (cond
-        ((or (immediate? obj)
-             (not ctx))
-         (do-object obj))
-        ((ctx.written.ref obj #f)
-         => (cut do-reference <>))
-        ((ctx.scanned.ref obj #f)
-         => (lambda (e)
-              (if ctx.compress?
-                (using ((e             :- :pair)
-                        (id    (car e) :- :fixnum)
-                        (count (cdr e) :- :fixnum))
-                  (if (fx> count 1)
-                    (do-anchor! obj id)
-                    (do-object! obj)))
-                (using (id e :- :fixnum)
-                  (do-object! obj)))))
-        (else
-         (let (id (scan-object! obj ctx))
-           (if (fx< id 0)
-             (do-object obj)
-             (again))))))
-      :fixnum))
+  (def (do-scanned e)
+    (if ctx.compress?
+      (using ((e             :- :pair)
+              (id    (car e) :- :fixnum)
+              (count (cdr e) :- :fixnum))
+        (if (fx> count 1)
+          (do-anchor! obj id)
+          (do-object! obj)))
+      (using (id e :- :fixnum)
+        (do-object! obj))))
+
+  (: (cond
+      ((or (immediate? obj)
+           (not ctx))
+       (do-object obj))
+      ((ctx.written.ref obj #f)
+       => (cut do-reference <>))
+      ((ctx.scanned.ref obj #f)
+       => do-scanned)
+      (else
+       (let (id (scan-object! obj ctx))
+         (if (fx< id 0)
+           (do-object obj)
+           (do-scanned (ctx.scanned.ref obj #f))))))
+     :fixnum))
 
 (defsyntax-case @serialize! ()
   ((_ writer obj ctx rule)

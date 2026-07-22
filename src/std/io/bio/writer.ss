@@ -299,7 +299,7 @@
 (defwriter-ext (write-string-utf8 writer
                                   (str   : :string)
                                   (start 0
-                                         :~ (in-range? 0 (string-length str))
+                                         :~ (in-range-inclusive? 0 (string-length str))
                                          :- :fixnum)
                                   (end   (string-length str)
                                          :~ (in-range-inclusive? start (string-length str))

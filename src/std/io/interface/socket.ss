@@ -7,8 +7,16 @@
         ./base)
 (export #t)
 
-(interface (Socket Closer)
-  ;; the sockert's domain; AF_INET, AF_INET6, AF_LOCAL, etc ...
+(interface NetworkTimeout
+  ;; input timeout
+  (set-input-timeout! (timeo : IOTimeout))
+  => :void
+  ;; output timeout
+  (set-output-timeout! (timeo : IOTimeout))
+  => :void)
+
+(interface (Socket NetworkTimeout Closer)
+  ;; the socket's domain; AF_INET, AF_INET6, AF_LOCAL, etc ...
   (domain) => :fixnum
   ;; the socket's address
   (address) => Address
@@ -21,15 +29,10 @@
   (setsockopt (opt : SockOpt)
               (arg  :  :t))
   => :void
-  ;; input timeout
-  (set-input-timeout! (timeo : IOTimeout))
-  => :void
-  ;; output timeout
-  (set-output-timeout! (timeo : IOTimeout))
-  => :void)
+  )
 
 (interface (ClientSocket Socket)
-  ;; receives data into a buffer; it _must_ be a u8vecotr
+  ;; receives data into a buffer; it _must_ be a u8vector
   ;; - start denotes the start of the read region; it must be a fixnum within the buffer range.
   ;; - end denotes the read region end.
   ;; Returns the number of bytes read.
@@ -66,7 +69,7 @@
   (accept) => StreamSocket)
 
 (interface (DatagramSocket ClientSocket)
-  ;; receives data into a buffer; it _must_ be a u8vecotr
+  ;; receives data into a buffer; it _must_ be a u8vector
   ;; - peer is a _box_ to place the peer's address.
   ;; - start denotes the start of the read region; it must be a fixnum within the buffer range.
   ;; - end denotes the read region end

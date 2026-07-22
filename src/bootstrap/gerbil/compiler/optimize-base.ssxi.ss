@@ -470,7 +470,7 @@ package: gerbil/compiler
    (@accessor gxc#!predicate::t signature #t))
   (declare-type gxc#!predicate-id (@accessor gxc#!predicate::t id #t))
   (declare-type
-   gxc#!predicate-signature-set!
+   gxc#!predicate-unchecked-signature-set!
    (@mutator gxc#!predicate::t signature #t))
   (declare-type gxc#!predicate-id-set! (@mutator gxc#!predicate::t id #t))
   (declare-type
@@ -478,9 +478,39 @@ package: gerbil/compiler
    (@accessor gxc#!predicate::t signature #f))
   (declare-type gxc#&!predicate-id (@accessor gxc#!predicate::t id #f))
   (declare-type
-   gxc#&!predicate-signature-set!
+   gxc#&!predicate-unchecked-signature-set!
    (@mutator gxc#!predicate::t signature #f))
   (declare-type gxc#&!predicate-id-set! (@mutator gxc#!predicate::t id #f))
+  (declare-type
+   gxc#__!predicate-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!predicate-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!predicate::t #f)
+             unchecked:
+             gxc#__!predicate-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!constructor::t
    (@class gxc#!constructor::t
@@ -504,7 +534,7 @@ package: gerbil/compiler
    (@accessor gxc#!constructor::t signature #t))
   (declare-type gxc#!constructor-id (@accessor gxc#!constructor::t id #t))
   (declare-type
-   gxc#!constructor-signature-set!
+   gxc#!constructor-unchecked-signature-set!
    (@mutator gxc#!constructor::t signature #t))
   (declare-type gxc#!constructor-id-set! (@mutator gxc#!constructor::t id #t))
   (declare-type
@@ -512,9 +542,39 @@ package: gerbil/compiler
    (@accessor gxc#!constructor::t signature #f))
   (declare-type gxc#&!constructor-id (@accessor gxc#!constructor::t id #f))
   (declare-type
-   gxc#&!constructor-signature-set!
+   gxc#&!constructor-unchecked-signature-set!
    (@mutator gxc#!constructor::t signature #f))
   (declare-type gxc#&!constructor-id-set! (@mutator gxc#!constructor::t id #f))
+  (declare-type
+   gxc#__!constructor-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!constructor-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!constructor::t #f)
+             unchecked:
+             gxc#__!constructor-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!accessor::t
    (@class gxc#!accessor::t
@@ -546,7 +606,7 @@ package: gerbil/compiler
    gxc#!accessor-checked?-set!
    (@mutator gxc#!accessor::t checked? #t))
   (declare-type
-   gxc#!accessor-signature-set!
+   gxc#!accessor-unchecked-signature-set!
    (@mutator gxc#!accessor::t signature #t))
   (declare-type gxc#!accessor-id-set! (@mutator gxc#!accessor::t id #t))
   (declare-type gxc#&!accessor-slot (@accessor gxc#!accessor::t slot #f))
@@ -562,9 +622,39 @@ package: gerbil/compiler
    gxc#&!accessor-checked?-set!
    (@mutator gxc#!accessor::t checked? #f))
   (declare-type
-   gxc#&!accessor-signature-set!
+   gxc#&!accessor-unchecked-signature-set!
    (@mutator gxc#!accessor::t signature #f))
   (declare-type gxc#&!accessor-id-set! (@mutator gxc#!accessor::t id #f))
+  (declare-type
+   gxc#__!accessor-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!accessor-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!accessor::t #f)
+             unchecked:
+             gxc#__!accessor-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!mutator::t
    (@class gxc#!mutator::t
@@ -594,7 +684,7 @@ package: gerbil/compiler
    gxc#!mutator-checked?-set!
    (@mutator gxc#!mutator::t checked? #t))
   (declare-type
-   gxc#!mutator-signature-set!
+   gxc#!mutator-unchecked-signature-set!
    (@mutator gxc#!mutator::t signature #t))
   (declare-type gxc#!mutator-id-set! (@mutator gxc#!mutator::t id #t))
   (declare-type gxc#&!mutator-slot (@accessor gxc#!mutator::t slot #f))
@@ -608,9 +698,39 @@ package: gerbil/compiler
    gxc#&!mutator-checked?-set!
    (@mutator gxc#!mutator::t checked? #f))
   (declare-type
-   gxc#&!mutator-signature-set!
+   gxc#&!mutator-unchecked-signature-set!
    (@mutator gxc#!mutator::t signature #f))
   (declare-type gxc#&!mutator-id-set! (@mutator gxc#!mutator::t id #f))
+  (declare-type
+   gxc#__!mutator-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!mutator-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!mutator::t #f)
+             unchecked:
+             gxc#__!mutator-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!interface::t
    (@class gxc#!interface::t
@@ -680,7 +800,7 @@ package: gerbil/compiler
    gxc#!lambda-inline-typedecl-set!
    (@mutator gxc#!lambda::t inline-typedecl #t))
   (declare-type
-   gxc#!lambda-signature-set!
+   gxc#!lambda-unchecked-signature-set!
    (@mutator gxc#!lambda::t signature #t))
   (declare-type gxc#!lambda-id-set! (@mutator gxc#!lambda::t id #t))
   (declare-type gxc#&!lambda-arity (@accessor gxc#!lambda::t arity #f))
@@ -700,9 +820,39 @@ package: gerbil/compiler
    gxc#&!lambda-inline-typedecl-set!
    (@mutator gxc#!lambda::t inline-typedecl #f))
   (declare-type
-   gxc#&!lambda-signature-set!
+   gxc#&!lambda-unchecked-signature-set!
    (@mutator gxc#!lambda::t signature #f))
   (declare-type gxc#&!lambda-id-set! (@mutator gxc#!lambda::t id #f))
+  (declare-type
+   gxc#__!lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!lambda::t #f)
+             unchecked:
+             gxc#__!lambda-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!case-lambda::t
    (@class gxc#!case-lambda::t
@@ -732,7 +882,7 @@ package: gerbil/compiler
    gxc#!case-lambda-clauses-set!
    (@mutator gxc#!case-lambda::t clauses #t))
   (declare-type
-   gxc#!case-lambda-signature-set!
+   gxc#!case-lambda-unchecked-signature-set!
    (@mutator gxc#!case-lambda::t signature #t))
   (declare-type gxc#!case-lambda-id-set! (@mutator gxc#!case-lambda::t id #t))
   (declare-type
@@ -746,9 +896,39 @@ package: gerbil/compiler
    gxc#&!case-lambda-clauses-set!
    (@mutator gxc#!case-lambda::t clauses #f))
   (declare-type
-   gxc#&!case-lambda-signature-set!
+   gxc#&!case-lambda-unchecked-signature-set!
    (@mutator gxc#!case-lambda::t signature #f))
   (declare-type gxc#&!case-lambda-id-set! (@mutator gxc#!case-lambda::t id #f))
+  (declare-type
+   gxc#__!case-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!case-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!case-lambda::t #f)
+             unchecked:
+             gxc#__!case-lambda-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!kw-lambda::t
    (@class gxc#!kw-lambda::t
@@ -782,7 +962,7 @@ package: gerbil/compiler
    gxc#!kw-lambda-dispatch-set!
    (@mutator gxc#!kw-lambda::t dispatch #t))
   (declare-type
-   gxc#!kw-lambda-signature-set!
+   gxc#!kw-lambda-unchecked-signature-set!
    (@mutator gxc#!kw-lambda::t signature #t))
   (declare-type gxc#!kw-lambda-id-set! (@mutator gxc#!kw-lambda::t id #t))
   (declare-type gxc#&!kw-lambda-table (@accessor gxc#!kw-lambda::t table #f))
@@ -800,9 +980,39 @@ package: gerbil/compiler
    gxc#&!kw-lambda-dispatch-set!
    (@mutator gxc#!kw-lambda::t dispatch #f))
   (declare-type
-   gxc#&!kw-lambda-signature-set!
+   gxc#&!kw-lambda-unchecked-signature-set!
    (@mutator gxc#!kw-lambda::t signature #f))
   (declare-type gxc#&!kw-lambda-id-set! (@mutator gxc#!kw-lambda::t id #f))
+  (declare-type
+   gxc#__!kw-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!kw-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!kw-lambda::t #f)
+             unchecked:
+             gxc#__!kw-lambda-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!kw-lambda-primary::t
    (@class gxc#!kw-lambda-primary::t
@@ -842,7 +1052,7 @@ package: gerbil/compiler
    gxc#!kw-lambda-primary-main-set!
    (@mutator gxc#!kw-lambda-primary::t main #t))
   (declare-type
-   gxc#!kw-lambda-primary-signature-set!
+   gxc#!kw-lambda-primary-unchecked-signature-set!
    (@mutator gxc#!kw-lambda-primary::t signature #t))
   (declare-type
    gxc#!kw-lambda-primary-id-set!
@@ -866,11 +1076,41 @@ package: gerbil/compiler
    gxc#&!kw-lambda-primary-main-set!
    (@mutator gxc#!kw-lambda-primary::t main #f))
   (declare-type
-   gxc#&!kw-lambda-primary-signature-set!
+   gxc#&!kw-lambda-primary-unchecked-signature-set!
    (@mutator gxc#!kw-lambda-primary::t signature #f))
   (declare-type
    gxc#&!kw-lambda-primary-id-set!
    (@mutator gxc#!kw-lambda-primary::t id #f))
+  (declare-type
+   gxc#__!kw-lambda-primary-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!kw-lambda-primary-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!kw-lambda-primary::t #f)
+             unchecked:
+             gxc#__!kw-lambda-primary-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!primitive::t
    (@class gxc#!primitive::t () (object::t t::t) () () #f #f #f #f #f #f))
@@ -908,7 +1148,7 @@ package: gerbil/compiler
    gxc#!primitive-predicate-id
    (@accessor gxc#!primitive-predicate::t id #t))
   (declare-type
-   gxc#!primitive-predicate-signature-set!
+   gxc#!primitive-predicate-unchecked-signature-set!
    (@mutator gxc#!primitive-predicate::t signature #t))
   (declare-type
    gxc#!primitive-predicate-id-set!
@@ -920,11 +1160,41 @@ package: gerbil/compiler
    gxc#&!primitive-predicate-id
    (@accessor gxc#!primitive-predicate::t id #f))
   (declare-type
-   gxc#&!primitive-predicate-signature-set!
+   gxc#&!primitive-predicate-unchecked-signature-set!
    (@mutator gxc#!primitive-predicate::t signature #f))
   (declare-type
    gxc#&!primitive-predicate-id-set!
    (@mutator gxc#!primitive-predicate::t id #f))
+  (declare-type
+   gxc#__!primitive-predicate-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!primitive-predicate-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!primitive-predicate::t #f)
+             unchecked:
+             gxc#__!primitive-predicate-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!primitive-lambda::t
    (@class gxc#!primitive-lambda::t
@@ -981,7 +1251,7 @@ package: gerbil/compiler
    gxc#!primitive-lambda-inline-typedecl-set!
    (@mutator gxc#!primitive-lambda::t inline-typedecl #t))
   (declare-type
-   gxc#!primitive-lambda-signature-set!
+   gxc#!primitive-lambda-unchecked-signature-set!
    (@mutator gxc#!primitive-lambda::t signature #t))
   (declare-type
    gxc#!primitive-lambda-id-set!
@@ -1017,11 +1287,41 @@ package: gerbil/compiler
    gxc#&!primitive-lambda-inline-typedecl-set!
    (@mutator gxc#!primitive-lambda::t inline-typedecl #f))
   (declare-type
-   gxc#&!primitive-lambda-signature-set!
+   gxc#&!primitive-lambda-unchecked-signature-set!
    (@mutator gxc#!primitive-lambda::t signature #f))
   (declare-type
    gxc#&!primitive-lambda-id-set!
    (@mutator gxc#!primitive-lambda::t id #f))
+  (declare-type
+   gxc#__!primitive-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!primitive-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!primitive-lambda::t #f)
+             unchecked:
+             gxc#__!primitive-lambda-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-class
    gxc#!primitive-case-lambda::t
    (@class gxc#!primitive-case-lambda::t
@@ -1064,7 +1364,7 @@ package: gerbil/compiler
    gxc#!primitive-case-lambda-clauses-set!
    (@mutator gxc#!primitive-case-lambda::t clauses #t))
   (declare-type
-   gxc#!primitive-case-lambda-signature-set!
+   gxc#!primitive-case-lambda-unchecked-signature-set!
    (@mutator gxc#!primitive-case-lambda::t signature #t))
   (declare-type
    gxc#!primitive-case-lambda-id-set!
@@ -1082,11 +1382,41 @@ package: gerbil/compiler
    gxc#&!primitive-case-lambda-clauses-set!
    (@mutator gxc#!primitive-case-lambda::t clauses #f))
   (declare-type
-   gxc#&!primitive-case-lambda-signature-set!
+   gxc#&!primitive-case-lambda-unchecked-signature-set!
    (@mutator gxc#!primitive-case-lambda::t signature #f))
   (declare-type
    gxc#&!primitive-case-lambda-id-set!
    (@mutator gxc#!primitive-case-lambda::t id #f))
+  (declare-type
+   gxc#__!primitive-case-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!primitive-case-lambda-signature-set!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             void::t
+             effect:
+             #f
+             arguments:
+             (gxc#!primitive-case-lambda::t #f)
+             unchecked:
+             gxc#__!primitive-case-lambda-signature-set!
+             origin:
+             gerbil/compiler/optimize-base)))
   (declare-type
    gxc#!abort:::init!
    (@lambda 1

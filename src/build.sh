@@ -393,6 +393,10 @@ else
       "test")
          exec gerbil "$@"
          ;;
+      "gdb")
+         shift;
+         exec gdb "$@"
+         ;;
       *)
          feedback_err "Unknown command."
          feedback_err \

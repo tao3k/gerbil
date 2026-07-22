@@ -5,11 +5,14 @@
 (export #t)
 
 (def (string-utf8-length (str : :string)
-                         (start  :~ (in-range? 0 (string-length str))               :- :fixnum :=  0)
+                         (start  :~ (in-range-inclusive? 0 (string-length str))
+                                 :- :fixnum :=  0)
                          (end    :~ (in-range-inclusive? start (string-length str)) :- :fixnum := (string-length str)))
   => :fixnum
-  (: (##string->utf8-length str start end)
-     :fixnum))
+  (if (fx< start end)
+    (: (##string->utf8-length str start end)
+     :fixnum)
+    0))
 
 (def (utf8-char-length (char : :char))
   => :fixnum

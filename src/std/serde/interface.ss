@@ -219,8 +219,8 @@
   ;; - invokes deserialize! on the resulting object for validation
   ;;   and state reconciliation where appropriate
   ;; - returns the final deserialized object; the top anchor
-  ;;   also invokes validate! which ensures the object state
-  ;;   is recursively fully reconstructoed.
+  ;;   also invokes untaint! which ensures the object state
+  ;;   is recursively fully reconstructed.
   (resolve! (ctx : ReadContext))
   => :t)
 
@@ -249,12 +249,106 @@
 ;; it came from the network, can't trust it.
 (interface ObjectDeserializer
   ;; deserialize! is called after the serde stream has been parsed.
-  ;; the method if responsible for resolving anchors inside the object
+  ;; the method is responsible for resolving anchors inside the object
   (resolve! (ctx : ReadContext)) => :void
 
-  ;; validate! is called after the serde stream has been fully deserialized
+  ;; untaint! is called after the serde stream has been fully deserialized
   ;; to validate and reconstruct missing state
-  (validate! (seen : HashTable)) => :void)
+  (untaint! (seen : HashTable)) => :void)
+
+;; defines a suitable untaint! method according to class slot contracts
+(defsyntax-case defobject-untaint ()
+  ((_ klass)
+   (syntax-local-class-type-info? #'klass)
+   (with-syntax (((slot ...)
+                  (map car (!class-type-accessors (syntax-local-value #'klass)))))
+     (with-identifier (untaint! ,untaint!)
+       #'(defmethod {untaint! klass}
+           (lambda (self seen)
+             (untaint-slot! klass slot self seen)
+             ...
+             #!void)
+           interface: ObjectDeserializer
+           ))))
+  ((_ klass ...)
+   #'(begin
+       (defobject-untaint klass) ...)))
+
+(defsyntax-case untaint-slot! ()
+  ((_ klass slot self seen)
+   (syntax-local-class-type-info? #'klass)
+   (let* ((info
+           (syntax-local-value #' klass))
+          (slot-symbol
+           (stx-e #'slot))
+          (getf
+           (agetq slot-symbol (!class-type-unchecked-accessors info)))
+          (contracts
+           (!class-type-slot-contracts info))
+          (contract
+           (and contracts
+                (cond
+                 ((agetq slot-symbol contracts)
+                  => syntax-local-introduce)
+                 (else #f))))
+          (contract-predicate
+           (and contract
+                (syntax-case contract (:~)
+                  ((:~ pred . rest)
+                   #'pred)
+                  (_ #f))))
+          (contract-maybe
+           (and contract
+                (not contract-predicate)
+                (syntax-case contract (:?)
+                  ((:? . rest) #t)
+                  (_ #f))))
+          (types
+           (!class-type-slot-types info))
+          (type
+           (and types
+                (cond
+                 ((agetq slot-symbol types)
+                  => (lambda (t)
+                       (resolve-type stx (syntax-local-introduce t))))
+                 (else #f))))
+          (type-predicate
+           (and type
+                (cond
+                 ((class-type-info? type)
+                  (!class-type-predicate type))
+                 ((interface-info? type)
+                  (interface-info-instance-predicate type))
+                 (else
+                  (raise-syntax-error #f "unexpected slot type" stx #'slot type))))))
+
+     (with-identifier (untaint! ,untaint!)
+       (cond
+        ((not getf)
+         (raise-syntax-error #f "no accessor for slot" stx #'slot))
+        ((or contract-predicate type-predicate)
+         => (lambda (predicate)
+              (with-syntax* ((t::t (core-quote-syntax 't::t))
+                             (getf getf)
+                             (predicate predicate)
+                             (predicate
+                              (if contract-maybe
+                                #'(? (or not predicate))
+                                #'predicate)))
+                #'(let (value
+                        ;; prevent the compiler from assuming
+                        ;; the return type of the accessor
+                        (begin-annotation (@type t::t)
+                          (getf self)))
+                    (if (predicate value)
+                      (untaint! value seen)
+                      (raise-contract-violation untaint-slot! "slot value does not satisfy contract predicate"
+                                                slot: 'slot
+                                                value: value
+                                                predicate: 'predicate))))))
+        (else
+         (with-syntax ((getf getf))
+           #'(untaint! (getf self) seen))))))))
 
 (deferror-class (ParseError IOError) () parse-error?)
 

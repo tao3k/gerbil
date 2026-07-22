@@ -28,7 +28,8 @@
   (__check-delimited-open! delimited-read delim)
   (let (remaining delim.remaining)
     (cond
-     ((zero? remaining) 0)
+     ((and (zero? remaining) (fx= need 0))
+      0)
      ((<= need remaining)
       (let* ((want (fx- end start))
              (end
@@ -75,7 +76,7 @@
     (if (<= count remaining)
       (begin
         (__bio-input-buffer-skip delim.input count)
-        (set! delim.remaining (fx- remaining count))
+        (set! delim.remaining (- remaining count))
         (void))
       (raise-io-error BufferedReader-read-bytes "input limit exceeded" count remaining))))
 

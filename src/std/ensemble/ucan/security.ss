@@ -1,0 +1,143 @@
+;;; -*- Gerbil -*-
+;;; © vyzo
+;;; ensemble host security context
+(import :std/interface
+        :std/io/interface
+        :std/serde/marshal
+        :std/crypto/pkey
+        :std/crypto/random
+        :std/time/precise
+        ../interface
+        ./cap)
+(export new-security-context)
+
+(def nonce-length 16)
+
+(defstruct security-context
+  ((cap  : CapabilityContext))
+  final: #t)
+
+(def (new-security-context (cap : CapabilityContext))
+  => SecurityContext
+  (SecurityContext
+   (security-context cap)))
+
+(defsyntax-case sign-message! ()
+  ((_ self msg)
+   (with-identifiers ((self.cap.get-principal
+                       #'self #'self ".cap.get-principal")
+                      (msg.source.host.did
+                       #'msg #'msg ".source.host.did")
+                      (msg.nonce
+                       #'msg #'msg ".nonce")
+                      (msg.signature
+                       #'msg #'msg ".signature"))
+     #'(let* ((privk (self.cap.get-principal msg.source.host.did))
+              (nonce (random-bytes nonce-length))
+              (_ (set! msg.nonce nonce))
+              (_ (set! msg.signature #u8()))
+              (blob  (marshal msg))
+              (sig   (digest-sign! privk blob)))
+         (set! msg.signature sig)
+         #!void))))
+
+(defsyntax-case verify-message-signature ()
+  ((_ self msg)
+   (with-identifiers ((self.cap.public-key
+                       #'self #'self ".cap.public-key")
+                      (msg.source.host.did
+                       #'msg #'msg ".source.host.did")
+                      (msg.signature
+                       #'msg #'msg ".signature"))
+     #'(let* ((pubk (self.cap.public-key msg.source.host.did))
+              (sig  msg.signature)
+              (_ (set! msg.signature #u8()))
+              (blob  (marshal msg))
+              (_ (set! msg.signature sig)))
+         (if (digest-verify! pubk blob sig)
+           !VerificationOK
+           !SignatureVerificationError)))))
+
+(def (security-context-sign-message! (self : security-context)
+                                     (msg  : Message))
+  => :void
+  (sign-message! self msg))
+
+(def (security-context-verify-message (self : security-context)
+                                      (msg  : Message))
+  => VerificationResult
+  (let (result (verify-message-signature self msg))
+    (if (!VerificationOK? result)
+      (let (now (current-time-seconds))
+        (if (<= msg.expire now)
+          !MessageExpiredVerificationError
+          (let loop ((rest msg.auth))
+            => VerificationResult
+            (match rest
+              ([token . rest]
+               (using (token : Token)
+                 (cond
+                  ((not (eq? token.type INVOKE))
+                   (loop rest))
+                  ((not (equal? token.issuer msg.source.host.did))
+                   (loop rest))
+                  ((not (equal? token.audience msg.dest.host.did))
+                   (loop rest))
+                  ((not (capability-includes? token.method msg.method))
+                   (loop rest))
+                  (else
+                   (let (result (self.cap.verify token msg.dest.host.did))
+                     (if (!VerificationOK? result)
+                       !VerificationOK
+                       (loop rest)))))))
+              (else
+               !NoTokenForMessageVerificationError))))))
+    result))
+
+(def (security-context-sign-broadcast-message! (self : security-context)
+                                               (msg  : BroadcastMessage))
+  => :void
+  (sign-message! self msg))
+
+(def (security-context-verify-broadcast-message (self : security-context)
+                                                (msg  : BroadcastMessage))
+  => VerificationResult
+  (let (result (verify-message-signature self msg))
+    (if (!VerificationOK? result)
+      (let (now (current-time-seconds))
+        (if (<= msg.expire now)
+          !MessageExpiredVerificationError
+          (let loop ((rest msg.auth))
+            => VerificationResult
+            (match rest
+              ([token . rest]
+               (using (token : Token)
+                 (cond
+                  ((not (eq? token.type BROADCAST))
+                   (loop rest))
+                  ((not (equal? token.issuer msg.source.host.did))
+                   (loop rest))
+                  ((not (equal? token.audience "*"))
+                   (loop rest))
+                  ((not (capability-includes? token.group msg.dest))
+                   (loop rest))
+                  ((not (capability-includes? token.method msg.method))
+                   (loop rest))
+                  (else
+                   (let (result (self.cap.verify token))
+                     (if (!VerificationOK? result)
+                       !VerificationOK
+                       (loop rest)))))))
+              (else
+               !NoTokenForMessageVerificationError)))))
+      result)))
+
+(implement Closer security-context
+  (close void))
+
+(implement SecurityContext security-context
+  (capability-context       &security-context-cap)
+  (sign-message!            __security-context-sign-message!)
+  (verify-message           __security-context-verify-message)
+  (sign-broadcast-message!  __security-context-sign-broadcast-message!)
+  (verify-broadcast-message __security-context-verify-broadcast-message))

@@ -277,7 +277,7 @@
                 chain
                 identifier-rules
                 letrec*
-                while
+                while until
                 let-hash
                 for for* for/collect
                 begin-ffi
@@ -292,6 +292,7 @@
                 with-identifier
                 with-identifiers
                 do-write
+                spawn/name
                 )
               'scheme-indent-function 1)
   (gerbil-put '(syntax-case ast-case core-syntax-case core-ast-case
@@ -307,7 +308,11 @@
                 define-values-syntaxes
                 defcall-actor
                 defcall-interface-method
-                implement
+                implement implement-protocol
+                do-with-lock
+                do-with-read-lock
+                do-with-write-lock
+                do-with-spin-lock
                 )
               'scheme-indent-function 'defun)
   )

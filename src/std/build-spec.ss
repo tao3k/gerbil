@@ -47,8 +47,8 @@
 
     "values"
 
-    "hash/types"
     "hash/misc"
+    "hash/types"
 
     "string/misc"
 
@@ -65,6 +65,7 @@
     "net/address/parser"
     "net/address/stringer"
     "net/address/resolver"
+    "net/address/serde"
     "net/address/api"
     "net/address"
 
@@ -77,6 +78,7 @@
     "os/sockaddr"
     (gxc: "os/socket" "-cc-options" "-D _GNU_SOURCE")
     "os/sockopt"
+    "os/hostname"
 
     "io/interface/base"
     "io/interface/bio"
@@ -94,7 +96,6 @@
     "io/bio/memory"
     "io/bio/srcsnk"
     "io/bio/port"
-    ;;"io/bio/message"
     "io/bio/api"
     "io/file"
     "io/tempfile"
@@ -225,6 +226,7 @@
 
     "db/interface"
     "db/db"
+    "db/cache"
     "db/query"
     ,@(if config-enable-sqlite
         `((gxc: "db/sqlite-driver"
@@ -233,6 +235,64 @@
           "db/sqlite")
         '())
     "db"
+
+    "encoding/multibase"
+
+    "ensemble/interface/ucan"
+    "ensemble/interface/message"
+    "ensemble/interface/actor"
+    "ensemble/interface/network"
+    "ensemble/interface/address"
+    "ensemble/interface/broadcast"
+    "ensemble/interface/host"
+    "ensemble/interface/protocol"
+    "ensemble/interface/event"
+    "ensemble/interface"
+
+    "ensemble/ucan/cap"
+    "ensemble/ucan/did"
+    "ensemble/ucan/db"
+    "ensemble/ucan/context"
+    "ensemble/ucan/security"
+    "ensemble/ucan/ext"
+
+    "ensemble/actor/types"
+    "ensemble/actor/util"
+    "ensemble/actor/macros"
+    "ensemble/actor/reactor"
+    "ensemble/actor/actor"
+
+    "ensemble/config"
+
+    "ensemble/network/base"
+    "ensemble/network/connector"
+    "ensemble/network/listener"
+    "ensemble/network/handshake"
+    "ensemble/network/connection"
+    "ensemble/network/stream"
+    "ensemble/network/network"
+    "ensemble/network"
+
+    "ensemble/broadcast"
+    "ensemble/broadcast/broadcast"
+
+    "ensemble/host/types"
+    "ensemble/host/db"
+    "ensemble/host/bus"
+    "ensemble/host/actor-dispatch"
+    "ensemble/host/actor-context"
+    "ensemble/host/actor-handler"
+    "ensemble/host/actor-space"
+    "ensemble/host/monitor"
+    "ensemble/host/resolver"
+    "ensemble/host/stream-cache"
+    "ensemble/host/basic"
+    "ensemble/host/server"
+
+    "ensemble/tls"
+
+    "ensemble/svc/loader/protocol"
+    "ensemble/svc/loader/server"
     ))
 
 #;(def (build-spec . _)

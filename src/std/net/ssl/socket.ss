@@ -10,6 +10,7 @@
         :std/io/interface
         :std/io/socket/types
         :std/io/socket/basic
+        :std/net/address
         ./libssl
         ./error
         ./interface)
