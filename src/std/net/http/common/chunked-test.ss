@@ -27,12 +27,30 @@
       (buffer-detach! chunked-writer)
 
       (check (get-memory-output-string-utf8 mem-writer)
-             => "4\r\nthe \r\n6\r\nquick \r\n6\r\nbrown \r\n4\r\nfox.\r\n0\r\n"))
+             => "4\r\nthe \r\n6\r\nquick \r\n6\r\nbrown \r\n4\r\nfox.\r\n0\r\n\r\n"))
+
+    (test-case "empty writer"
+      (def mem-writer
+        (open-buffered-writer #f))
+      (def chunked-writer
+        (open-chunked-writer
+         mem-writer))
+
+      (check (Writer-write chunked-writer (string->utf8 ""))
+             => 0)
+      (check (get-memory-output-string-utf8 mem-writer #f)
+             => "")
+      (buffer-detach! chunked-writer)
+      (buffer-detach! chunked-writer)
+
+      (check (get-memory-output-string-utf8 mem-writer)
+             => "0\r\n\r\n"))
+
     (test-case "reader"
       (def mem-reader
         (open-buffered-reader
          (string->utf8
-          "4\r\nthe \r\n6\r\nquick \r\n6\r\nbrown \r\n4\r\nfox.\r\n0\r\n")))
+          "4\r\nthe \r\n6\r\nquick \r\n6\r\nbrown \r\n4\r\nfox.\r\n0\r\n\r\n")))
       (def chunked-reader
         (open-chunked-reader
          mem-reader))

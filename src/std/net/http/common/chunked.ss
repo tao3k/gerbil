@@ -111,6 +111,7 @@
   (unless self.last
     (set! self.last #t)
     (write-chunk-length! self 0)
+    (write-newline! self.writer)
     (self.writer.flush)
     (set! self.writer #f)))
 
