@@ -69,40 +69,50 @@
 
 (def (do-server-start! (self : http-server))
   => :void
+  (def (start-listener! (sock : ServerSocket))
+    (with-error (ignore-errors (sock.close))
+      (let* ((address (sock.address))
+             (thread (spawn-actor (cut server-listener self sock address)
+                                  [] 'httpd/listener self.tgroup)))
+        (self.listeners.set! sock thread))))
+
   (def (add-tcp-listener! addr)
     (syslog.info "adding tcp listener" address: addr)
-    (let* ((sock
-            (tcp-listen addr
-                        backlog: self.cfg.backlog
-                        sockopts: self.cfg.sockopts))
-           (thread (spawn-actor (cut server-listener self sock)
-                                [] 'httpd/listener self.tgroup)))
-      (self.listeners.set! sock thread)))
+    (start-listener!
+     (tcp-listen addr
+                 backlog: self.cfg.backlog
+                 sockopts: self.cfg.sockopts)))
 
   (def (add-ssl-listener! addr ssl-ctx)
     (syslog.info "adding ssl listener" address: addr)
-    (let* ((sock
-            (ssl-listen addr ssl-ctx
-                        backlog: self.cfg.backlog
-                        sockopts: self.cfg.sockopts))
-           (thread (spawn-actor (cut server-listener self sock)
-                                [] 'httpd/listener self.tgroup)))
-      (self.listeners.set! sock thread)))
+    (start-listener!
+     (ssl-listen addr ssl-ctx
+                 backlog: self.cfg.backlog
+                 sockopts: self.cfg.sockopts)))
 
   (try
    (for (addr self.cfg.listen)
-     (match addr
-       ((? InetAddress? inaddr)
-        (add-tcp-listener! inaddr))
-       ((? string? str)
-        (add-tcp-listener! (string->address str)))
-       ([ssl: (? InetAddress? inaddr) (? SSL_CTX? ssl-ctx)]
-        (add-ssl-listener! inaddr ssl-ctx))
-       ([ssl: (? string? str) (? string? cert-path) (? string? key-path)]
-        (add-ssl-listener! (string->address str)
-                           (make-server-ssl-context cert-path key-path)))
-       (else
-        (raise-bad-argument server-start! "server address" addr))))
+     (try
+      (match addr
+        ((? InetAddress? inaddr)
+         (add-tcp-listener! inaddr))
+        ((? string? str)
+         (add-tcp-listener! (string->address str)))
+        ([ssl: (? InetAddress? inaddr) (? SSL_CTX? ssl-ctx)]
+         (add-ssl-listener! inaddr ssl-ctx))
+        ([ssl: (? string? str) (? string? cert-path) (? string? key-path)]
+         (add-ssl-listener! (string->address str)
+                            (make-server-ssl-context cert-path key-path)))
+        (else
+         (raise-bad-argument server-start! "server address" addr)))
+      (catch (e)
+        (syslog.error "error starting listener"
+                      address: addr
+                      exception: (exception->string e)))))
+   (when (and (pair? self.cfg.listen)
+              (fxzero? (self.listeners.length)))
+     (raise-io-error server-start! "all configured listeners failed"
+                     addresses: self.cfg.listen))
    (self.cfg.log.start!)
    (set! self.running #t)
    (catch (e)
@@ -118,13 +128,16 @@
   (for (sock (in-hash-keys self.handlers) :- StreamSocket)
     (ignore-errors (sock.close)))
   (let (deadline (seconds->time (+ (##current-time-point) 3)))
+    (def (wait-for-change!)
+      (let (changed? (mutex-unlock! self.mx self.cv deadline))
+        (mutex-lock! self.mx)
+        (unless changed?
+          (raise-timeout server-stop! "server shutdown deadline exceeded"))))
     (try
      (while (fx> (self.listeners.length) 0)
-       (mutex-unlock! self.mx self.cv deadline)
-       (mutex-lock! self.mx))
+       (wait-for-change!))
      (while (fx> (self.handlers.length) 0)
-       (mutex-unlock! self.mx self.cv deadline)
-       (mutex-lock! self.mx))
+       (wait-for-change!))
      (catch (e)
        (for (thread (in-hash-values self.listeners))
          (syslog.warn "terminating thread" thread: thread)
@@ -147,7 +160,9 @@
   (do-with-lock self.mx :- ServerConfig
     (##structure-copy self.cfg)))
 
-(def (server-listener (self : http-server) (sock : ServerSocket))
+(def (server-listener (self : http-server)
+                      (sock : ServerSocket)
+                      (address : Address))
   => :void
   (def (accept)
     (using (cli (sock.accept) : StreamSocket)
@@ -170,19 +185,22 @@
       (self.listeners.delete! sock)
       (condition-variable-broadcast! self.cv)))
 
-  (syslog.info "listener starting"
-               address: (sock.address))
+  (syslog.info "listener starting" address: address)
   (let loop ()
     (try
      (accept)
      (catch (OSError? e)
-       (syslog.warn "error accepting connection"
-                    error: (OSError-message e)
-                    errno: (OSError-errno e))
-       (loop))
+       (cond
+        ((fx= (OSError-errno e) EBADF)
+         (syslog.info "listener closed" address: address)
+         (unregister!))
+        (else
+         (syslog.warn "error accepting connection"
+                      error: (OSError-message e)
+                      errno: (OSError-errno e))
+         (loop))))
      (catch (Closed? e)
-       (syslog.info "listener closed"
-                    address: (sock.address))
+       (syslog.info "listener closed" address: address)
        (unregister!))
      (catch (e)
        (syslog.error "unhandled exception in listener"
@@ -192,6 +210,16 @@
 (def (server-handler (self : http-server) (sock : StreamSocket))
   => :void
   (deflogger-macros self.cfg.log "/net/httpd/request")
+
+  (def (finalize-response! response)
+    (try
+     (Closer-close response)
+     (catch (OSError? e)
+       (let (errno (OSError-errno e))
+         (unless (or (fx= errno EPIPE)
+                     (fx= errno ECONNRESET))
+           (raise e))))))
+
   (using ((reader (open-buffered-reader (sock.reader) self.cfg.request-buffer)
                   :- BufferedReader)
           (writer (open-buffered-writer (sock.writer) self.cfg.response-buffer)
@@ -243,7 +271,7 @@
              (response.write! Internal-Server-Error [] #u8()))
            (finally
             (request.body.close)
-            (Closer-close response))))))
+            (finalize-response! response))))))
 
     (try
      (handle-next-request!)
