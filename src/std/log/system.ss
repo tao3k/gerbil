@@ -52,6 +52,7 @@
        (else
         (let (logger (Logger (new sys.thread)))
           (hash-put! sys.sources name logger)
+          (thread-send sys.thread (!UPDATE:add-source logger))
           logger))))))
 
 (def (add-system-sink! (sink : LogSink))
@@ -152,6 +153,10 @@
                  (do-with-lock sys.mx
                    (using (sink :- LogSink)
                      (hash-put! sinks (sink.name) sink))))
+                ((!UPDATE:add-source source)
+                 (do-with-lock sys.mx
+                   (using (source :- Logger)
+                     (hash-put! sources (source.name) source))))
                 ((!UPDATE:set-system-level system-level)
                  (do-with-lock sys.mx
                    (set! level system-level)))
