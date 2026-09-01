@@ -29,6 +29,8 @@
     "string/path"
     "string/utf8"
     "string/stringer"
+    "string/uuid"
+    "string/symbol"
 
     "cache"
     "sync/rwlock"
@@ -52,6 +54,7 @@
     (gxc: "os/socket" "-cc-options" "-D _GNU_SOURCE")
     "os/sockopt"
     "os/hostname"
+    "os/pid"
 
     "io/interface/base"
     "io/interface/bio"
@@ -132,11 +135,19 @@
     "test"
 
     "values"
+    "func"
+    "shuffle"
+    "stxparam"
 
     "hash/types"
     "hash/misc"
 
+    "struct/deque"
+    "struct/lru"
     "struct/queue"
+    "struct/pqueue"
+    "struct/rbtree"
+    "struct/dag"
 
     "cli/getopt"
     "cli/multicall"
@@ -148,6 +159,22 @@
     "text/parser/base"
     "text/parser/ll1"
     "text/template"
+    "text/include"
+
+    (gxc: "text/parser/ebnf/stream" ,@(include-gambit-sharp))
+    "text/parser/ebnf/rlang"
+    "text/parser/ebnf/lexer"
+    "text/parser/ebnf/defparser"
+    "text/parser/ebnf/rx-parser"
+    "text/parser/ebnf/deflexer"
+    "text/parser/ebnf/lang-reader"
+    "text/parser/ebnf/lang"
+    "text/parser/ebnf"
+
+    "encoding/protobuf/io"
+    "encoding/protobuf/macros"
+    "encoding/protobuf/grammar"
+    "encoding/protobuf/lang"
 
     (gxc: "crypto/libcrypto"
           "-cc-options" ,(append-options (cppflags "libcrypto" "") "-Wno-discarded-qualifiers" "-Wno-deprecated-declarations" "-Wno-implicit-function-declaration")
@@ -181,7 +208,14 @@
     "net/ssl/api"
     "net/ssl"
 
+    "net/socks/interface"
+    "net/socks/client"
+    "net/socks/server"
+    "net/socks/api"
+    "net/socks"
+
     "encoding/base64"
+    "encoding/base58"
     "encoding/hex"
     "encoding/json/env"
     "encoding/json/writer"
@@ -190,6 +224,7 @@
     "encoding/json/util"
     "encoding/json/api"
     "encoding/json"
+    "encoding/csv"
 
     "vector/u8vector"
     "vector/extensible"
@@ -324,4 +359,20 @@
 
     "ensemble/svc/loader/protocol"
     "ensemble/svc/loader/server"
+
+    "text/markup/sxml/print"
+    (gxc: "text/markup/sxml/ssax")
+    "text/markup/sxml/sxpath"
+    "text/markup/sxml/xml"
+    "text/markup/sxml/sxml-inf"
+    (gxc: "text/markup/sxml/html/parser" (extra-inputs: ("text/markup/sxml/html/html-parser.scm")))
+    "text/markup/sxml"
+    "text/markup/html"
+    "text/markup/xml"
+
+    "text/markup/sxml/tal/toplevel"
+    "text/markup/sxml/tal/iter"
+    "text/markup/sxml/tal/expander"
+    "text/markup/sxml/tal/syntax"
+    "text/markup/tal"
     ))

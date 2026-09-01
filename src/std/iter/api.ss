@@ -6,6 +6,7 @@
         ./macros)
 (export
   (import: ./interface)
+  iter
   for for*
   for/collect
   for/fold

@@ -2810,7 +2810,7 @@ package: gerbil/core
            (identifier? #'last)
            (if (symbol? tail)
              (finish pos kws #'last)
-             (syntax-error! "unpexted tail argument" #'last)))
+             (syntax-error! "unexpected tail argument" #'last)))
           (()
            (if (null? tail)
              (finish pos kws [])

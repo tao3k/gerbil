@@ -25,7 +25,7 @@
      (wrap-ast [t e] loc))
     (else tok)))
 
-(deferror-class ParseError ())
+(deferror-class ParseError () parse-error?)
 (defraise/context (raise-parse-error where msg tok rest ...)
   (ParseError msg irritants: [tok rest ...]))
 

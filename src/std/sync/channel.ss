@@ -22,7 +22,7 @@
 
 (defmethod {:init! Channel}
   (lambda (self (limit :? :fixnum := #f))
-    (set! self.q  (make-queue))
+    (set! self.q  (make-Queue))
     (set! self.mx (make-mutex 'channel))
     (set! self.cv (make-condition-variable 'channel))
     (set! self.limit limit)))
@@ -35,9 +35,9 @@
        (ch.eof
         (mutex-unlock! ch.mx)
         (raise-io-closed channel-put "channel is closed" ch))
-       ((or (not ch.limit) (fx< (queue-length ch.q) (:- ch.limit :fixnum)))
+       ((or (not ch.limit) (fx< (Queue-length ch.q) (:- ch.limit :fixnum)))
         (enqueue! ch.q val)
-        (when (fx= (queue-length ch.q) 1)
+        (when (fx= (Queue-length ch.q) 1)
           (condition-variable-broadcast! ch.cv)) ; unblock readers
         (mutex-unlock! ch.mx)
         #t)
@@ -52,9 +52,9 @@
    (ch.eof
     (mutex-unlock! ch.mx)
     (raise-io-closed channel-try-put "channel is closed" ch))
-   ((or (not ch.limit) (fx< (queue-length ch.q) (:- ch.limit :fixnum)))
+   ((or (not ch.limit) (fx< (Queue-length ch.q) (:- ch.limit :fixnum)))
     (enqueue! ch.q val)
-    (when (fx= (queue-length ch.q) 1)
+    (when (fx= (Queue-length ch.q) 1)
       (condition-variable-broadcast! ch.cv)) ; unblock readers
     (mutex-unlock! ch.mx)
     #t)
@@ -90,7 +90,7 @@
            (else default)))
          (else
           (let (next (front ch.q))
-            (when (and ch.limit (fx= (queue-length ch.q) (fx- (:- ch.limit :fixnum) 1)))
+            (when (and ch.limit (fx= (Queue-length ch.q) (fx- (:- ch.limit :fixnum) 1)))
               (condition-variable-broadcast! ch.cv)) ; unblock writers
             (mutex-unlock! ch.mx)
             next)))))))
@@ -109,7 +109,7 @@
     (if ch.eof #!eof default))
    (else
     (let (next (dequeue! ch.q))
-      (when (and ch.limit (fx= (queue-length ch.q) (fx- (:- ch.limit :fixnum) 1)))
+      (when (and ch.limit (fx= (Queue-length ch.q) (fx- (:- ch.limit :fixnum) 1)))
         (condition-variable-broadcast! ch.cv)) ; unblock writers
       (mutex-unlock! ch.mx)
       next))))

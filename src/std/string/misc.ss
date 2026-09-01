@@ -20,13 +20,16 @@
   random-string
   as-string<?
   ;; Imports from srfi-13:
+  substring/shared
   string-index-right
   string-compare string-compare-ci
   string=    string<    string>    string<=    string>=    string<>
   string-ci= string-ci< string-ci> string-ci<= string-ci>= string-ci<>
   string-prefix-length string-prefix-length-ci string-suffix-length string-suffix-length-ci
-  string-null? string-reverse string-reverse! string-every string-fold string-filter string-delete
-  )
+  string-null? string-reverse string-reverse! string-every string-any
+  string-concatenate string-concatenate/shared string-append/shared
+  string-concatenate-reverse string-concatenate-reverse/shared string-append/shared
+  string-fold string-filter string-delete)
 
 (import :std/error
         :std/iter)
@@ -299,6 +302,16 @@
   (string<? (as-string x) (as-string y)))
 
 ;;;;; SRFI-13 compatibility
+
+;;; substring/shared S START [END]
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;; All this goop is just arg parsing & checking surrounding a call to the
+;;; actual primitive, %SUBSTRING/SHARED.
+
+(def (substring/shared (s : :string) (start : :fixnum) (end : :fixnum := (string-length s)))
+  (if (and (zero? start) (= end (string-length s))) s
+      (substring s start end)))
 
 (def (char-predicate criterion) => :procedure
   (cond
@@ -601,6 +614,71 @@
           (and (pred (string-ref s i))
                (loop (fx+ i 1)))))))
 
+(def (string-any criterion
+                 (s : :string)
+                 (start : :fixnum := 0)
+                 (end : :fixnum := (string-length s))) => :t
+  (check-argument (<= 0 start (string-length s)) "string index" [start s])
+  (check-argument (<= 0 end (string-length s)) "string index" [end s])
+  (let ((pred (char-predicate criterion)))
+    (let loop ((i start :- :fixnum))
+      (and (fx< i end)
+           (or (pred (string-ref s i))
+               (loop (fx+ i 1)))))))
+
+;;; string-concatenate        string-list -> string
+;;; string-concatenate/shared string-list -> string
+;;; string-append/shared s ... -> string
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; STRING-APPEND/SHARED has license to return a string that shares storage
+;;; with any of its arguments. In particular, if there is only one non-empty
+;;; string amongst its parameters, it is permitted to return that string as
+;;; its result. STRING-APPEND, by contrast, always allocates new storage.
+;;;
+;;; STRING-CONCATENATE & STRING-CONCATENATE/SHARED are passed a list of
+;;; strings, which they concatenate into a result string. STRING-CONCATENATE
+;;; always allocates a fresh string; STRING-CONCATENATE/SHARED may (or may
+;;; not) return a result that shares storage with any of its arguments. In
+;;; particular, if it is applied to a singleton list, it is permitted to
+;;; return the car of that list as its value.
+
+(def (string-concatenate (strings : :list)) => :string
+  (let* ((n (let loop ((ss strings) (acc 0))
+               (if (pair? ss)
+                 (loop (cdr ss) (fx+ acc (string-length (car ss))))
+                 acc)))
+         (result (make-string n)))
+    (let loop ((ss strings) (i 0))
+      (if (pair? ss)
+        (let* ((s (car ss)) (slen (string-length s)))
+          (string-copy! result i s)
+          (loop (cdr ss) (fx+ i slen)))
+        result))))
+
+(def (string-append/shared . strings)
+  (string-concatenate/shared strings))
+
+(def (string-concatenate/shared (strings : :list))
+  (let lp ((strings strings) (nchars 0) (first #f))
+    (cond ((pair? strings)                ; Scan the args, add up total
+           (let* ((string  (car strings)) ; length, remember 1st
+                  (tail (cdr strings))    ; non-empty string.
+                  (slen (string-length string)))
+             (if (zero? slen)
+               (lp tail nchars first)
+               (lp tail (+ nchars slen) (or first strings)))))
+          ((zero? nchars) "")
+          ;; Just one non-empty string! Return it.
+          ((= nchars (string-length (car first))) (car first))
+          (else (let ((ans (make-string nchars)))
+                  (let lp ((strings first) (i 0))
+                    (if (pair? strings)
+                      (let* ((s (car strings))
+                             (slen (string-length s)))
+                        (string-copy! ans i s 0 slen)
+                        (lp (cdr strings) (+ i slen)))))
+                  ans)))))
+
 (def (string-fold (kons : :procedure)
                   knil
                   (s : :string)
@@ -610,6 +688,62 @@
     (if (fx< i end)
       (lp (kons (string-ref s i) v) (fx+ i 1))
       v)))
+
+;;; string-concatenate-reverse        string-list [final-string end] -> string
+;;; string-concatenate-reverse/shared string-list [final-string end] -> string
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Return
+;;;   (string-concatenate
+;;;     (reverse
+;;;       (cons (substring final-string 0 end) string-list)))
+
+(def (string-concatenate-reverse
+      (string-list : :list)
+      (final : :string := "")
+      (end : :fixnum := (string-length final)))
+  (let ((len (let lp ((sum 0) (lis string-list))
+               (if (pair? lis)
+                 (lp (+ sum (string-length (car lis))) (cdr lis))
+                 sum))))
+    (%finish-string-concatenate-reverse len string-list final end)))
+
+(def (string-concatenate-reverse/shared
+      (string-list : :list)
+      (final : :string := "")
+      (end : :fixnum := (string-length final)))
+  ;; Add up the lengths of all the strings in STRING-LIST; also get a
+  ;; pointer NZLIST into STRING-LIST showing where the first non-zero-length
+  ;; string starts.
+  (let lp ((len 0) (nzlist #f) (lis string-list))
+    (if (pair? lis)
+	  (let ((slen (string-length (car lis))))
+	    (lp (+ len slen)
+            (if (or nzlist (zero? slen)) nzlist lis)
+            (cdr lis)))
+	  (cond
+           ((zero? len) (substring/shared final 0 end))
+           ;; LEN > 0, so NZLIST is non-empty.
+           ((and (zero? end) (= len (string-length (car nzlist))))
+            (car nzlist))
+           (else
+            (%finish-string-concatenate-reverse len nzlist final end))))))
+
+(def (%finish-string-concatenate-reverse
+      (len : :fixnum)
+      (string-list : :list)
+      (final : :string)
+      (end : :fixnum))
+  (let ((ans (make-string (+ end len))))
+    (string-copy! ans len final 0 end)
+    (let lp ((i len) (lis string-list))
+      (if (pair? lis)
+        (let* ((s   (car lis))
+               (lis (cdr lis))
+               (slen (string-length s))
+               (i (- i slen)))
+          (string-copy! ans i s 0 slen)
+          (lp i lis))))
+    ans))
 
 ;;; Filtering strings
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

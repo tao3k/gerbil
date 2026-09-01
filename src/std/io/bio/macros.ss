@@ -33,6 +33,12 @@
            body ...)
          (export checked-macro unchecked-macro checked-method unchecked-method)))))
 
+(defrules defreader-ext* ()
+  ((_ (method reader . args) body ...)
+   (identifier? #'method)
+   (definterface-extension-method BufferedReader (method reader . args)
+     body ...)))
+
 (defsyntax-case defwriter-ext ()
   ((_ (method writer . args) body ...)
    (identifier? #'method)
@@ -46,3 +52,10 @@
            => :fixnum
            body ...)
          (export checked-macro unchecked-macro checked-method unchecked-method)))))
+
+(defrules defwriter-ext* ()
+  ((_ (method writer . args) body ...)
+   (identifier? #'method)
+   (definterface-extension-method BufferedWriter (method writer . args)
+           => :fixnum
+           body ...)))

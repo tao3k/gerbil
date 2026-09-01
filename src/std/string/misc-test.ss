@@ -280,6 +280,66 @@
         char-alphabetic? "abc1" 0 3  => #t  ; end cutoff
         char-alphabetic? "a1bc" 1 2  => #f))
 
+    (test-case "string-any"
+      (check-function string-any
+        char-alphabetic? ""          => #f  ; vacuously false on empty range
+        char-alphabetic? "abc"       => #t
+        char-alphabetic? "123"       => #f
+        char-alphabetic? "1a2"       => #t
+        #\a              "bba"       => #t  ; char criterion
+        #\a              "bbb"       => #f
+        char-alphabetic? "1abc" 0 1  => #f  ; end cutoff
+        char-alphabetic? "1abc" 1    => #t  ; start offset
+        char-alphabetic? "1a2b" 0 1  => #f  ; only non-alpha
+        char-alphabetic? "1a2b" 0 2  => #t))
+
+    (test-case "string-concatenate"
+      (check-function string-concatenate
+        '()                        => ""
+        '("")                      => ""
+        '("a")                     => "a"
+        '("a" "b")                 => "ab"
+        '("hello" " " "world")     => "hello world"
+        '("foo" "\n" "bar" "\n")   => "foo\nbar\n"))
+
+    (test-case "string-concatenate/shared"
+      ;; Same content as string-concatenate
+      (check-function string-concatenate/shared
+        '()                        => ""
+        '("")                      => ""
+        '("" "")                   => ""
+        '("a")                     => "a"
+        '("a" "b")                 => "ab"
+        '("hello" " " "world")     => "hello world"
+        '("" "abc" "")             => "abc"
+        '("foo" "\n" "bar" "\n")   => "foo\nbar\n")
+      ;; Sharing: single non-empty string returned eq? to input
+      (let (s "hello")
+        (check (eq? (string-concatenate/shared (list s)) s) => #t)
+        (check (eq? (string-concatenate/shared (list "" s)) s) => #t)
+        (check (eq? (string-concatenate/shared (list "" s "")) s) => #t))
+      ;; No sharing when multiple non-empty strings are present
+      (let (r (string-concatenate/shared '("foo" "bar")))
+        (check r => "foobar")))
+
+    (test-case "string-append/shared"
+      ;; Same content as string-append
+      (check (string-append/shared) => "")
+      (check-function string-append/shared
+        ""                   => ""
+        "a"                  => "a"
+        "a" "b"              => "ab"
+        "hello" " " "world"  => "hello world"
+        "" "abc" ""          => "abc")
+      ;; Sharing: single non-empty string returned eq? to input
+      (let (s "hello")
+        (check (eq? (string-append/shared s) s) => #t)
+        (check (eq? (string-append/shared "" s) s) => #t)
+        (check (eq? (string-append/shared "" s "") s) => #t))
+      ;; No sharing when multiple non-empty strings are present
+      (let (r (string-append/shared "foo" "bar"))
+        (check r => "foobar")))
+
     (test-case "string-fold"
       (check-function string-fold
         cons '() ""    => '()

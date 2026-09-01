@@ -32,8 +32,8 @@
         get-memory-output-string-utf8
         ;;open-message-buffered-reader
         ;;open-message-buffered-writer
-        defreader-ext
-        defwriter-ext
+        defreader-ext defreader-ext*
+        defwriter-ext defwriter-ext*
         very-small-buffer-size
         small-buffer-size
         default-buffer-size
@@ -113,13 +113,12 @@
     (let ((buffer (get-u8vector-buffer buffer-or-size))
           (reader (Reader pre-reader)))
       (open-source-buffered-reader reader buffer (not (u8vector? buffer-or-size)))))
-   ((and (input-port? pre-reader)
-         (binary-port? pre-reader))
+   ((input-port? pre-reader)
     (open-input-port-buffered-reader pre-reader))
    ((string? pre-reader)
     (open-memory-buffered-reader (string->utf8 pre-reader) #f))
    (else
-    (raise-bad-argument open-buffered-reader "readable object or u8vector" pre-reader))))
+    (raise-bad-argument open-buffered-reader "readable object, input port, or u8vector" pre-reader))))
 
 (def (open-buffered-writer pre-writer (buffer-or-size default-buffer-size))
   => BufferedWriter
@@ -137,11 +136,10 @@
    ((not pre-writer)
     (let (buffer (get-u8vector-buffer buffer-or-size))
       (open-memory-buffered-writer buffer (not (u8vector? buffer-or-size)))))
-   ((and (output-port? pre-writer)
-         (binary-port? pre-writer))
+   ((output-port? pre-writer)
     (open-output-port-buffered-writer pre-writer))
    (else
-    (raise-bad-argument open-buffered-writer "writable object, u8vector or #f" pre-writer))))
+    (raise-bad-argument open-buffered-writer "writable object, output port, u8vector or #f" pre-writer))))
 
 (def (get-memory-output-u8vector (inst : interface-instance) (done? #t))
   => :u8vector

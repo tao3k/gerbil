@@ -251,4 +251,22 @@
         (let* ((port (open-output-u8vector))
                (bwr (open-buffered-writer port)))
           (check (BufferedWriter-write-line-utf8 bwr input '(#\return #\newline)) => (fx+ (string-length input) 2))
-          (check (get-output-u8vector port) => output2))))))
+          (check (get-output-u8vector port) => output2))))
+
+    (test-case "textual port output"
+      ;; open-buffered-writer must accept textual (non-binary) output ports
+      (let* ((input "héllo wörld")
+             (port  (open-output-string))
+             (bwr   (open-buffered-writer port)))
+        (BufferedWriter-write-string-utf8 bwr input)
+        (BufferedWriter-flush bwr)
+        (check (get-output-string port) => input)))
+
+    (test-case "textual port input"
+      ;; open-buffered-reader must accept textual (non-binary) input ports symmetrically
+      (let* ((input "héllo wörld")
+             (port  (open-input-string input))
+             (brd   (open-buffered-reader port))
+             (buf   (make-string (string-length input))))
+        (check (BufferedReader-read-string-utf8 brd buf) => (string-length input))
+        (check buf => input)))))

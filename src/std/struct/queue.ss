@@ -3,17 +3,20 @@
 ;;; imperative queues
 (import :std/error
         :std/interface
-        :std/iter/interface)
+        :std/iter/interface
+        :std/iter/iterators)
 (export Queue Queue?
-        (rename: make-Queue make-queue)
-        (rename: Queue-length queue-length)
+        make-Queue
+        Queue-length
         queue-empty?
         non-empty-queue?
         enqueue!
         enqueue-front!
         dequeue!
         queue-peek
-        queue->list)
+        queue->list
+        QueueIterator QueueIterator?
+        in-queue)
 
 (defstruct Queue ((front  :- :list)
                   (back   :- :pair)
@@ -86,7 +89,31 @@
   => :list
   (list-copy q.front))
 
-(implement Iterator Queue
+(defstruct QueueIterator ((q :- Queue))
+  final: #t)
+
+(implement Iterator QueueIterator
   (next!
    (lambda (self)
-     (dequeue! self '#!eof))))
+     (if (queue-empty? self.q)
+       #!eof
+       (dequeue! self.q)))))
+
+(def (queue-copy (q : Queue))
+  => Queue
+  (using (nq (make-Queue) :- Queue)
+    (let (front* (list-copy q.front))
+      (set! nq.front front*)
+      (set! nq.length q.length)
+      (when (pair? front*)
+        (set! nq.back (last-pair front*)))
+      nq)))
+
+(def (in-queue (q : Queue))
+  => Iterator
+  (Iterator (make-QueueIterator (queue-copy q))))
+
+(implement Iterable Queue
+  (iter
+   (lambda (self)
+     (Iterator (make-QueueIterator self)))))
