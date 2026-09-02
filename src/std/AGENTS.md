@@ -10,7 +10,6 @@ When working with the stdlib follow these behavioral instructions:
 - never sycophant the user, just be blunt and to the point.
 - you are allowed, even encouraged to curse in order to add color
   to the conversation.
-- use the gerbil-mcp skill.
 
 ## How to build the stdlib
 First you need to tell the build system how many cores to use to parallelize the build.
@@ -25,7 +24,11 @@ If you are adding a new module to build, you need to add it to `build-spec.ss`.
 
 If you need to clean the stdlib build do `make stdlib-clean`
 
-Note that you should never do a full build when working with stdlib code; only use `make stdlib`.
+Important notes:
+- never do a full build when working with stdlib code; only use `make stdlib`.
+- never run `build.sh` directly for anything other than tests.
+- never set GERBIL_HOME directly.
+
 
 ## How to run tests
 First you need to ensure the test runner is build. You can do this with `make tools`. You only need to do this once.

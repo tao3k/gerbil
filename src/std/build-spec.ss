@@ -287,6 +287,13 @@
     "net/http/server/api"
     "net/http/server"
 
+    "net/websocket/interface"
+    "net/websocket/socket"
+    "net/websocket/client"
+    "net/websocket/server"
+    "net/websocket/api"
+    "net/websocket"
+
     "net/json-rpc"
 
     "db/interface"

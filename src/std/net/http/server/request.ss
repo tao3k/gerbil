@@ -190,7 +190,7 @@
      (response-handler-act! self 'upgrade!)
      (using (status Switching-Protocols : Status)
        (write-status-line! self.ctx.writer self.proto status.code status.text)
-       (write-header! self.ctx.writer "Connection" "ugrade")
+       (write-header! self.ctx.writer "Connection" "upgrade")
        (write-headers! self.ctx.writer headers)
        (write-newline! self.ctx.writer)
        (self.ctx.writer.flush)

@@ -138,7 +138,7 @@
 
 (def (__request-connect (url :- URL) (ssl-ctx :- :foreign))
   => StreamSocket
-  (unless (member url.proto '("http" "https"))
+  (unless (member url.proto '("http" "https" "ws" "wss"))
     (raise-bad-argument http-request "unknown protocol" url))
   (cond
    ((http-connect)
@@ -150,7 +150,7 @@
                                  context: ssl-ctx
                                  host: (resolve->host url.address))
              sock))))
-   ((equal? url.proto "https")
+   ((member url.proto '("https" "wss"))
     (ssl-connect url.address context: ssl-ctx))
    (else
     (tcp-connect (resolve->endpoint url.address)))))
