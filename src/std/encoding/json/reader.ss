@@ -6,7 +6,13 @@
         :std/io/bio/api
         :std/list/walist
         :std/encoding/hex
-        :std/text/parser/char-set
+        (only-in :std/text/parser/char-set
+                 char-strict-whitespace?
+                 codepoint-high-surrogate?
+                 codepoint-low-surrogate?
+                 codepoint-surrogate?
+                 codepoint-surrogate-pair?
+                 surrogates->char)
         (only-in :std/text/parser/ll1 ll1-skip-space*)
         ./env)
 (export parse-json
@@ -216,41 +222,45 @@
 ;;; a valid high- then low- surrogate pair.)
 ;;; We throw an error on invalid \u escape sequences, including invalid UTF-16 surrogate sequences.
 
-(def (read-json-string (reader : BufferedReader))
-  (def (read-escape-char)
-    (let (char (reader.read-char-utf8))
-      (case char
-        ((#\" #\\ #\/) char)
-        ((#\n) #\newline)
-        ((#\r) #\return)
-        ((#\t) #\tab)
-        ((#\b) #\backspace)
-        ((#\f) #\page)
-        ((#\u) (read-escape-unicode))
-        (else
-         (raise-invalid-json-token read-escape-char reader char)))))
+(def (read-json-string (reader : BufferedReader)) => :string
+  (def (read-escape-char) => :char
+    (:-
+     (let (char (reader.read-char-utf8))
+       (case char
+         ((#\" #\\ #\/) char)
+         ((#\n) #\newline)
+         ((#\r) #\return)
+         ((#\t) #\tab)
+         ((#\b) #\backspace)
+         ((#\f) #\page)
+         ((#\u) (read-escape-unicode))
+         (else
+          (raise-invalid-json-token read-escape-char reader char))))
+     :char))
 
-  (def (read-escape-unicode)
-    (let ((codepoint (read-escape-hex)))
-      (cond
-       ((not (codepoint-surrogate? codepoint))
-        (integer->char codepoint))
-       ((fx>= codepoint #xdc00) ;; low surrogate forbidden in first position
-        (raise-invalid-json-token read-escape-unicode reader codepoint))
-       ((fx< codepoint #xdc00) ;; high surrogate, must be followed by low surrogate
-        (defrule (expect x)
-          (let (char (reader.read-char-utf8))
-            (unless (eqv? char x)
-              (raise-invalid-json-token read-escape-unicode reader char))))
-        (expect #\\)
-        (expect #\u)
-        (let ((hi codepoint) (lo (read-escape-hex)))
-          (unless (fx<= #xdc00 lo #xdfff)
-            (raise-invalid-json-token read-escape-unicode reader lo))
-          (surrogates->char hi lo))))))
+  (def (read-escape-unicode) => :char
+    (:-
+     (let ((codepoint (read-escape-hex)))
+       (cond
+        ((not (codepoint-surrogate? codepoint))
+         (integer->char codepoint))
+        ((codepoint-low-surrogate? codepoint) ;; low surrogate forbidden in first position
+         (raise-invalid-json-token read-escape-unicode reader codepoint))
+        ((codepoint-high-surrogate? codepoint) ;; high surrogate, must be followed by low surrogate
+         (defrule (expect x)
+           (let (char (reader.read-char-utf8))
+             (unless (eqv? char x)
+               (raise-invalid-json-token read-escape-unicode reader char))))
+         (expect #\\)
+         (expect #\u)
+         (let ((hi codepoint) (lo (read-escape-hex)))
+           (unless (codepoint-surrogate-pair? hi lo)
+             (raise-invalid-json-token read-escape-unicode reader lo))
+           (surrogates->char hi lo)))))
+     :char))
 
   ;; read 16-bit big-endian hex integer
-  (def (read-escape-hex)
+  (def (read-escape-hex) => :fixnum
     ;; read 4 hex digits, accumulate MSB-first
     (let* ((h1 (read-hex)) (h2 (read-hex)) (h3 (read-hex)) (h4 (read-hex)))
       (fx+ (fxarithmetic-shift-left h1 12)
@@ -258,12 +268,12 @@
            (fxarithmetic-shift-left h3 4)
            h4)))
 
-  (def (read-hex)
-    (let ((char (reader.read-char-utf8)))
-      (cond
-       ((unhex* char))
-       (else
-        (raise-invalid-json-token hex-value reader char)))))
+  (def (read-hex) => :fixnum
+    (let* ((char (reader.read-char-utf8))
+           (digit (unhex* char)))
+      (if digit
+        (:- digit :fixnum)
+        (raise-invalid-json-token hex-value reader char))))
 
   (let (root [#f])
     (let lp ((tl root))

@@ -227,6 +227,10 @@
     "encoding/csv"
 
     "vector/u8vector"
+
+    "encoding/utf16"
+    "encoding/utf32"
+
     "vector/extensible"
     "vector/vector"
 

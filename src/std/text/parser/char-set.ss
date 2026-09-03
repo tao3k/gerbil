@@ -54,16 +54,32 @@
 (def-codepoint (bmp? c) ;; in the Unicode Basic Multilingual Plane (BMP)
   (<= 0 c #xffff))
 
+;;; UTF-16 surrogate infrastructure
+
 ;; : Codepoint -> Bool
-(def (codepoint-surrogate? (c : :fixnum)) => :boolean ;; Unicode surrogate for UTF-16
-  (<= #xd800 c #xdfff))
+(definline (codepoint-high-surrogate? (c : :fixnum)) => :boolean
+  (fx<= #xd800 c #xdbff))
+
+;; : Codepoint -> Bool
+(definline (codepoint-low-surrogate? (c : :fixnum)) => :boolean
+  (fx<= #xdc00 c #xdfff))
+
+;; : Codepoint -> Bool
+(definline (codepoint-surrogate? (c : :fixnum)) => :boolean
+  (or (codepoint-high-surrogate? c)
+      (codepoint-low-surrogate? c)))
+
+;; : Codepoint Codepoint -> Bool
+(definline (codepoint-surrogate-pair? (hi : :fixnum) (lo : :fixnum)) => :boolean
+  (and (codepoint-high-surrogate? hi)
+       (codepoint-low-surrogate? lo)))
 
 ;; : Codepoint -> (Values Codepoint Codepoint)
-(def (codepoint-surrogates (c : :fixnum)) => :values
-  (check-argument (<= #x10000 c #x10FFFF) "Unicode codepoint beyond the BMP" c)
+(definline (codepoint-surrogates (c : :fixnum)) => :values
+  (check-argument (fx<= #x10000 c #x10ffff) "Unicode codepoint beyond the BMP" c)
   (using (o (fx- c #x10000) :- :fixnum)
     (values (fx+ #xd800 (fxarithmetic-shift-right o 10))
-            (fx+ #xdc00 (bitwise-and o #x3FF)))))
+            (fx+ #xdc00 (fxand o #x03ff)))))
 
 ;; char-surrogates returns two codepoints (not chars), or #f if the character is outside the BMP.
 ;; Surrogates are not valid codepoints for Gambit characters, so we cannot return chars.
@@ -73,14 +89,14 @@
          (and (fx<= #x10000 codepoint)
               (codepoint-surrogates codepoint)))))
 
-(def (surrogates->codepoint (hi : :fixnum) (lo : :fixnum)) => :fixnum
-  (check-argument (fx<= #xd800 hi #xdbff) "Unicode codepoint in high surrogate range" hi)
-  (check-argument (fx<= #xdc00 lo #xdfff) "Unicode codepoint in low surrogate range" lo)
-  (+ #x10000
-     (fxarithmetic-shift-left (bitwise-and hi #x3ff) 10)
-     (bitwise-and lo #x3ff)))
+(definline (surrogates->codepoint (hi : :fixnum) (lo : :fixnum)) => :fixnum
+  (check-argument (codepoint-high-surrogate? hi) "Unicode codepoint in high surrogate range" hi)
+  (check-argument (codepoint-low-surrogate? lo) "Unicode codepoint in low surrogate range" lo)
+  (fx+ #x10000
+       (fxarithmetic-shift-left (fxand hi #x03ff) 10)
+       (fxand lo #x03ff)))
 
-(def (surrogates->char (hi : :fixnum) (lo : :fixnum)) => :char
+(definline (surrogates->char (hi : :fixnum) (lo : :fixnum)) => :char
   (integer->char (surrogates->codepoint hi lo)))
 
 
