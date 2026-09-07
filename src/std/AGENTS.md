@@ -43,8 +43,10 @@ If you want to run all tests in the stdlib do `./build.sh test std/...`
 ## Running a build-local gxi
 
 If you need to use `gxi` in the build environment, use the `run.sh`
-script in the the opt of the gerbil source tree. It runs `gxi` with
-the appropriate environment variables and accepts the same arguments.
+script in the the opt of the gerbil source tree. If you want a REPL,
+just `./run.sh`, It runs `gxi` by default with the appropriate
+environment variables. For more advanced `gxi` usage with arguments,
+use `./run.sh gxi arg ...`.
 
 ## Code conventions
 

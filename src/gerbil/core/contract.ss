@@ -2802,7 +2802,7 @@ package: gerbil/core
                (syntax-error! "duplicate keyword argument" key))
               ((pgetq key keywords)
                => (lambda (contract)
-                    (loop #'rest-args rest-pos args
+                    (loop #'rest-args rest-pos pos
                           (cons* (lambda-argument-contract #'arg contract) key kws))))
               (else
                (syntax-error! "unexpected keyword argument" key)))))

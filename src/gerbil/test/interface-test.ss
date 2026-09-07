@@ -38,8 +38,25 @@
   (lambda (self arg)
     (* (X-x self) (Y-y self) arg)))
 
+(interface KeywordMethod
+  (combine (a : :fixnum) (b : :fixnum)
+           scale: (scale : :fixnum := 2))
+  => :fixnum)
+
+(defmethod {combine X}
+  (lambda (self a b scale: scale)
+    (fx* (fx+ a b) scale))
+  interface: KeywordMethod)
+
+(@implement KeywordMethod X)
+
 (def interface-test
   (test-suite "test :std/interface"
+    (test-case "typed method positional and keyword arguments"
+      (using (obj (KeywordMethod (make-X 0)) : KeywordMethod)
+        (check (obj.combine 3 4) => 14)
+        (check (obj.combine 3 4 scale: 3) => 21)))
+
     (test-case "test dispatch"
       (def x (make-X 1))
       (def y (make-Y 1 y: 2))

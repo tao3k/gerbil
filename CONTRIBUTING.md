@@ -181,7 +181,7 @@ generally not be imported by other modules.
 An example of this structure can be observed with the S3 module:
 
 - Module reexport: [`s3.ss`](https://git.cons.io/mighty-gerbils/gerbil/blob/master/src/std/net/s3.ss)
-- API: [`api.ss`](https://git.cons.io/mighty-gerbils/gerbil/blob/master/src/std/net/s3/api.ss)
+- Client API: [`client.ss`](https://git.cons.io/mighty-gerbils/gerbil/blob/master/src/std/net/s3/client.ss)
 - Interface: [`interface.ss`](https://git.cons.io/mighty-gerbils/gerbil/blob/master/src/std/net/s3/interface.ss)
 
 ### Testing

@@ -9,6 +9,7 @@
     "interactive"
     "error"
     "interface"
+    "instance"
     "deprecation"
 
     "debug/DBG"
@@ -36,6 +37,7 @@
     "cache"
     "sync/rwlock"
     "sync/spinlock"
+    "sync/threads"
 
     "net/address/types"
     "net/address/parser"
@@ -221,6 +223,15 @@
     "net/ssl/api"
     "net/ssl"
 
+    "net/smtp/interface"
+    "net/smtp/data"
+    "net/smtp/session"
+    "net/smtp/client"
+    "net/smtp/connection"
+    "net/smtp/headers"
+    "net/smtp/api"
+    "net/smtp"
+
     "net/socks/interface"
     "net/socks/client"
     "net/socks/server"
@@ -287,6 +298,8 @@
     "log/compress"
     "log/api"
     "log"
+
+    (gxc: "net/repl" ,@(include-gambit-sharp))
 
     "net/mime/struct"
     "net/mime/types"
@@ -407,6 +420,11 @@
     "text/markup/sxml"
     "text/markup/html"
     "text/markup/xml"
+
+    "net/s3/interface"
+    "net/s3/sigv4"
+    "net/s3/client"
+    "net/s3"
 
     "text/markup/sxml/tal/toplevel"
     "text/markup/sxml/tal/iter"

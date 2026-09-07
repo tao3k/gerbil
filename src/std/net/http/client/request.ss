@@ -132,9 +132,10 @@
 
 (def (Request-content (req : Request))
   => :u8vector
-  (begin0
+  (: (try
       (read-all-from-reader req.reader)
-    (Request-close req)))
+      (finally (Request-close req)))
+     :u8vector))
 
 (def (__request-connect (url :- URL) (ssl-ctx :- :foreign))
   => StreamSocket
