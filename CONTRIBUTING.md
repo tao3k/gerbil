@@ -2,6 +2,21 @@
 
 Gerbil is a growing open source project, your contributions are welcome and appreciated!
 
+## LLM Assistance
+
+Before we start, let's get the elephant out of the room:
+*LLM assistance is perfectly acceptable, even encouraged*.
+Simple as that, it is late 2026 now and leading models (open and
+closed) are pretty good at Gerbil. We use them too.
+
+Nonetheless, you are still expected to understand and own code you
+submit. It should be clean, concise, and follow idiomatic gerbil
+conventions. It must be easy to read and understand for humans; we
+still have to maintain it.
+
+Finally, when submitting a PR please disclose LLM assistance and the
+model you used.
+
 ## Getting Started
 
 To get started contributing to Gerbil, follow the
