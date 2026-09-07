@@ -16,6 +16,10 @@
   acyclic: #t
   final: #t)
 
+(def (current-time-seconds)
+  => :integer
+  (:- (exact (floor (##current-time-point)))
+      :integer))
 
 (def (current-time-inexact) => InexactTime
   (InexactTime (##current-time-point)))

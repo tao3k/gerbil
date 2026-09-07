@@ -366,7 +366,7 @@
                        ;; iterators
                        "for" "for*" "for/collect" "for/fold"
                        ;; actor messaging
-                       "<-" "<<" "->" "->>" "-->" "-->?"
+                       "<-" "<<" "->" "->>" "->>>" "-->" "-->>" "--->" "-->?"
                        "with-result"
                        ;; test
                        "run-tests!" "test-suite" "test-case"

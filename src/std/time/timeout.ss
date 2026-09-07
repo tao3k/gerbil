@@ -49,7 +49,8 @@
     => (lambda (t) (IOTimeout (InexactTime t))))
    (else !NoTimeout)))
 
-(def (timeout->abs-timeout timeo (none #!void))
+(def (timeout->abs-timeout timeo (none #!void)
+                           value: (value : :procedure := identity))
   (defrule (no-timeout)
     (if (void? none)
       absent-obj
@@ -58,6 +59,6 @@
   (if timeo
     (let (timeo (__abs-timeout timeo))
       (if timeo
-        (: timeo :flonum)
+        (value (: timeo :flonum))
         (no-timeout)))
     (no-timeout)))

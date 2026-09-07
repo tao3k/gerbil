@@ -3,25 +3,24 @@
 ;;; PostgreSQL driver
 ;; https://www.postgresql.org/docs/current/protocol-message-formats.html
 
-(import :std/actor
+(import :std/error
+        :std/os/sockopt
+        :std/net/address
+        :std/net/address/types
         :std/io
-        :std/io/bio/util
-        :std/misc/bytes
-        :std/misc/channel
-        :std/misc/list
-        :std/misc/timeout
+        :std/string/utf8
+        :std/list/list
+        :std/sync/channel
+        :std/time/timeout
         :std/net/sasl
         :std/net/ssl
-        :std/os/socket
-        :std/text/utf8
-        :std/text/hex
-        :std/crypto
-        :std/logger
-        :std/sugar
-        :std/error
-        :std/db/dbi
-        (only-in :std/srfi/1 reverse!))
-(export postgresql-connect!
+        :std/encoding/hex
+        :std/crypto/digest
+        :std/vector/u8vector
+        :std/log
+        :std/db/interface
+        :std/actor)
+(export start-postgresql-driver!
         postgresql-prepare-statement!
         postgresql-close-statement!
         postgresql-exec!
@@ -30,202 +29,162 @@
         postgresql-continue!
         postgresql-reset!
         postgresql-close!
-        postgresql-message
-        postgresql-message-name
-        postgresql-message-args
-        postgresql-RowDescription?
-        postgresql-CommandComplete?
+        (struct-out PGMessage PGRowDescription PGCommandComplete)
         postgresql-current-notice-handler
         postgresql-current-notice-handler-set!
         with-postgresql-notice-handler
         (rename: !token? query-token?))
 
-(deflogger postgres)
+(def proto:/std/db/postgres "/std/db/postgres/v0")
+
+;; base connection and statement types used by driver macros
+(deflogger postgres-log name: "/db/postgres")
 
 (defstruct !token ()
-  final: #t)
+  final: #t
+  transparent: #f)
 
-;;; driver interface
-(defmessage !prepare (name sql))
-(defmessage !exec (name params))
-(defmessage !query (name params))
-(defmessage !simple-query (str))
-(defmessage !current-notice-handler (proc))
-(defmessage !continue (token))
-(defmessage !reset (token))
-(defmessage !close (name))
+;;; driver message types
+(defstruct !prepare (name sql) final: #t)
+(defstruct !exec (name params) final: #t)
+(defstruct !query (name params) final: #t)
+(defstruct !simple-query (str) final: #t)
+(defstruct !current-notice-handler (proc) final: #t)
+(defstruct !continue (token) final: #t)
+(defstruct !reset (token) final: #t)
+(defstruct !close (name) final: #t)
 
-(defstruct postgresql-message (name args)
+(defstruct PGMessage (name args)
   print: (args))
 
-(defstruct (postgresql-RowDescription postgresql-message) ()
+(defstruct (PGRowDescription PGMessage) ()
   constructor: :init!
   final: #t)
-(defmethod {:init! postgresql-RowDescription}
+(defmethod {:init! PGRowDescription}
   (lambda (self desc)
-    (struct-instance-init! self 'RowDescription desc)))
+    (set! self.name 'RowDescription)
+    (set! self.args desc)))
 
-(defstruct (postgresql-CommandComplete postgresql-message) ()
+(defstruct (PGCommandComplete PGMessage) ()
   constructor: :init!
   final: #t)
-(defmethod {:init! postgresql-CommandComplete}
+(defmethod {:init! PGCommandComplete}
   (lambda (self desc)
-    (struct-instance-init! self 'CommandComplete desc)))
-
-(defrules with-driver ()
-  ((_ conn driver body ...)
-   (cond
-    ((thread? conn)
-     (let (driver conn)
-       body ...))
-    ((connection-e conn)
-     => (lambda (driver) body ...))
-    (else
-     (raise-io-closed postgresql-driver "connection has been closed" conn)))))
-
-(defrules get-driver ()
-  ((_ conn)
-   (if (thread? conn) conn (connection-e conn))))
+    (set! self.name 'CommandComplete)
+    (set! self.args desc)))
 
 (def current-notice-handler
   (make-parameter
    (lambda (msg irritants)
-     (warnf "NoticeResponse: ~a ~a" msg irritants))))
-
-#;(import (rename-in :std/debug/DBG (DBG DEBUG)))
-
-(defrules DEBUG ()
-  ((_ what arg ...)
-   (void)))
-
-(defcall-actor (postgresql-prepare-statement! conn name sql)
-  (with-driver conn driver
-    (->> driver (!prepare name sql)))
-  error: "error preparing statement" sql)
-
-(def (postgresql-close-statement! conn name)
-  (alet (driver (get-driver conn))
-    (-> driver (!close name))))
-
-(defcall-actor (postgresql-exec! conn name bind)
-  (with-driver conn driver
-    (->> driver (!exec name bind)))
-  error: "error executing statement")
-
-(defcall-actor (postgresql-query! conn name bind)
-  (with-driver conn driver
-    (->> driver (!query name bind)))
-  error: "error executing query")
-
-(defcall-actor (postgresql-simple-query! conn str)
-  (with-driver conn driver
-    (->> driver (!simple-query str)))
-  error: "error executing query")
-
-(def (postgresql-continue! conn token)
-  (if (!token? token)
-    (with-driver conn driver
-      (-> driver (!continue token)))
-    (raise-bad-argument postgreql "query token" token)))
-
-(def (postgresql-reset! conn token)
-  (if (!token? token)
-    (alet (driver (get-driver conn))
-      (-> driver (!reset token)))
-    (raise-bad-argument postgreql "query token" token)))
-
-(defcall-actor (postgresql-current-notice-handler conn)
-  (cond
-   ((get-driver conn)
-    => (cut ->> <> (!current-notice-handler #f)))
-   (else
-    (!ok (void))))
-  error: "error retrieving notice handler")
+      (postgres-log.warnf "NoticeResponse: %a %a" msg irritants))))
 
 
-(defcall-actor (postgresql-current-notice-handler-set! conn handler)
-  (cond
-   ((get-driver conn)
-    => (cut ->> <> (!current-notice-handler handler)))
-   (else
-    (!ok (void))))
-  error: "error setting notice handler")
+(defcall-actor (postgresql-prepare-statement! (driver : LocalActor) name sql)
+  (->> driver (!prepare name sql) proto:/std/db/postgres))
 
-(def (with-postgresql-notice-handler conn handler thunk)
-  (let (pren (postgresql-current-notice-handler conn))
+(def (postgresql-close-statement! (driver : LocalActor) name)
+  (-> driver (!close name) proto:/std/db/postgres))
+
+(defcall-actor (postgresql-exec! (driver : LocalActor) name bind)
+  (->> driver (!exec name bind) proto:/std/db/postgres))
+
+(defcall-actor (postgresql-query! (driver : LocalActor) name bind)
+  (->> driver (!query name bind) proto:/std/db/postgres))
+
+(defcall-actor (postgresql-simple-query! (driver : LocalActor) str)
+  (->> driver (!simple-query str) proto:/std/db/postgres))
+
+(def (postgresql-continue! (driver : LocalActor) (token : !token))
+  (-> driver (!continue token) proto:/std/db/postgres))
+
+(def (postgresql-reset! (driver : LocalActor) (token : !token))
+  (-> driver (!reset token) proto:/std/db/postgres))
+
+(defcall-actor (postgresql-current-notice-handler (driver : LocalActor))
+  (->> driver (!current-notice-handler #f) proto:/std/db/postgres))
+
+(def (postgresql-current-notice-handler-set! (driver : LocalActor) handler)
+  (-> driver (!current-notice-handler handler) proto:/std/db/postgres))
+
+(def (with-postgresql-notice-handler (driver : LocalActor) handler thunk)
+  (let (pren (postgresql-current-notice-handler driver))
     (try
-     (set! (postgresql-current-notice-handler conn)
+     (postgresql-current-notice-handler-set! driver
        (lambda args (apply handler args) (apply pren args)))
      (thunk)
      (finally
-      (set! (postgresql-current-notice-handler conn) pren)))))
+      (postgresql-current-notice-handler-set! driver pren)))))
 
-(defcall-actor (postgresql-close! conn)
-  (cond
-   ((get-driver conn)
-    => (cut ->> <> (!shutdown)))
-   (else
-    (!ok (void))))
-  error: "error closing connection")
+(def (postgresql-close! (driver : LocalActor))
+  (shutdown-actor driver))
 
 ;;; driver implementation
-(def (postgresql-connect! host port user passwd db ssl ssl-context timeout)
+(def (start-postgresql-driver! (address : Address)
+                              (user   : :string)
+                              (passwd : :string)
+                              (db     : :string)
+                              ssl:   (ssl?   :~ (one-of #t #f maybe) := #f)
+                              ssl-context: (ssl-context :~ (? (not SSL_CTX?)) := #f)
+                              timeout: (timeo  : IOTimeout := default-connect-timeout))
+  => LocalActor
   (def sock
-    (tcp-connect (cons host port)))
+    (tcp-connect (resolve->endpoint address) timeo))
 
   (try
-
-   (start-logger!)
-   (DEBUG "STARTUP")
-
-   (when ssl
+   (postgres-log.debugf "STARTUP")
+   (when ssl?
      ;; Send magic SSLRequest message with non-version 80877103, instead of StartupMessage
      ;; https://www.postgresql.org/docs/current/protocol-flow.html
-     (StreamSocket-send sock #u8(0 0 0 8 4 210 22 47) 0 8 0)
+      (using (sock : StreamSocket)
+        (sock.send #u8(0 0 0 8 4 210 22 47) 0 8 0))
      (let* ((buf (make-u8vector 1 0))
-            (count (StreamSocket-recv sock buf 0 1 MSG_WAITALL))
+            (count (using (sock : StreamSocket)
+                     (sock.recv buf 0 1 MSG_WAITALL)))
             (response (u8vector-ref buf 0)))
        (cond
         ((not (= count 1))
          (error "Postgres connection failed immediately"))
         ((= response 78) ;; (char->integer #\N)
          ;; Exceptionally (see URL above), this N isn't followed by a notice message
-         (when (eq? ssl #t)
+         (when (eq? ssl? #t)
            (error "Postgres Server does not support SSL encryption.")))
         ((= response 83) ;; (char->integer #\S)
-         (set! sock (ssl-client-upgrade sock (make-timeout timeout #f)
+         (set! sock (ssl-client-upgrade sock
+                                        timeout: timeo
                                         context: ssl-context
-                                        host: host)))
+                                        host: (resolve->host address))))
         (else
          ;; read as much as we can from the server response to give the best error context
          (let* ((buf (make-u8vector 2048 0))
-                (len (StreamSocket-recv sock buf 1 2048 MSG_DONTWAIT))
+                (len (using (sock : StreamSocket)
+                      (sock.recv buf 1 2048 MSG_DONTWAIT)))
                 (len (if (positive? len) (1+ len) 1)))
            (u8vector-set! buf 0 response)
            (error "Invalid server response" (subu8vector buf 0 len)))))))
 
    (def reader
      (open-buffered-reader
-      (StreamSocket-reader sock)))
+      (using (sock : StreamSocket) (sock.reader))))
 
    (def writer
      (open-buffered-writer
-      (StreamSocket-writer sock)))
+      (using (sock : StreamSocket) (sock.writer))))
 
    (def (start-driver!)
-     (DEBUG "STARTING DRIVER")
-     (let lp ()
-       (match (postgresql-recv! reader)
-         (['ReadyForQuery _]
-          (spawn/name 'postgresql-connection postgresql-driver sock reader writer))
-         (['ErrorResponse msg . irritants]
-          (raise-io-error postgresql-connect! msg irritants))
-         (['NoticeResponse msg . irritants]
-          ((current-notice-handler) msg irritants)
-          (lp))
-         (other
-          (DEBUG "unprocessed message" other)
-          (lp)))))
+     (postgres-log.debugf "STARTING DRIVER")
+     (LocalActor
+      (let lp ()
+        (match (postgresql-recv! reader)
+          (['ReadyForQuery _]
+           (spawn/name 'postgresql-connection postgresql-driver sock reader writer))
+          (['ErrorResponse msg . irritants]
+           (raise-io-error postgresql-connect! msg irritants))
+          (['NoticeResponse msg . irritants]
+           ((current-notice-handler) msg irritants)
+           (lp))
+          (other
+           (postgres-log.debugf "unprocessed message: %a" other)
+           (lp))))))
 
    (defrules send! ()
      ((_ msg)
@@ -240,21 +199,21 @@
         (unexpected
          (raise-io-error postgresql-connect! "unexpected message" unexpected)))))
 
-   (def (authen-pass pass)
-     (send! ['PasswordMessage pass])
-     (recv!
-      (['AuthenticationRequest 'AuthenticationOk]
-       (start-driver!))))
+    (def (authen-pass pass)
+      (send! ['PasswordMessage pass])
+      (recv!
+       (['AuthenticationRequest 'AuthenticationOk]
+        (start-driver!))))
 
    (def (authen-cleartext)
-     (DEBUG "AUTHEN CLEARTEXT")
+     (postgres-log.debugf "AUTHEN CLEARTEXT")
      (authen-pass passwd))
 
    (def (authen-md5 salt)
      (def (md5-hex data)
        (hex-encode (md5 data)))
 
-     (DEBUG "AUTHEN MD5")
+     (postgres-log.debugf "AUTHEN MD5")
      (let* ((word1 (string-append passwd user))
             (word2 (md5-hex word1))
             (word3 (u8vector-append (string->utf8 word2) salt))
@@ -262,42 +221,43 @@
             (pass (string-append "md5" word4)))
        (authen-pass pass)))
 
-   (def (authen-sasl mechanisms)
-     (DEBUG "AUTHEN SASL")
-     (unless (member "SCRAM-SHA-256" mechanisms)
-       (raise-io-error postgresql-connect! "unknown SASL authentication mechanisms" mechanisms))
-     (let* ((ctx (scram-sha-256-begin "" passwd))
-            (msg (scram-client-first-message ctx)))
-       (send! ['SASLInitialResponse "SCRAM-SHA-256" msg])
-       (recv!
-        (['AuthenticationRequest 'AuthenticationSASLContinue msg]
-         (scram-client-first-server-message! ctx msg)
-         (let (msg (scram-client-final-message ctx))
-           (send! ['SASLResponse msg])
-           (recv!
-            (['AuthenticationRequest 'AuthenticationSASLFinal msg]
-             (scram-client-final-server-message! ctx msg)
-             (recv!
-              (['AuthenticationRequest 'AuthenticationOk]
-               (start-driver!))))))))))
+    (def (authen-sasl mechanisms)
+      (postgres-log.debugf "AUTHEN SASL")
+      (unless (member "SCRAM-SHA-256" mechanisms)
+        (raise-io-error postgresql-connect! "unknown SASL authentication mechanisms" mechanisms))
+      (let* ((ctx (scram-sha-256-begin "" passwd))
+             (msg (scram-client-first-message ctx)))
+        (send! ['SASLInitialResponse "SCRAM-SHA-256" msg])
+        (recv!
+         (['AuthenticationRequest 'AuthenticationSASLContinue msg]
+          (scram-client-first-server-message! ctx msg)
+          (let (msg (scram-client-final-message ctx))
+            (send! ['SASLResponse msg])
+            (recv!
+             (['AuthenticationRequest 'AuthenticationSASLFinal msg]
+              (scram-client-final-server-message! ctx msg)
+              (recv!
+               (['AuthenticationRequest 'AuthenticationOk]
+                (start-driver!))))))))))
 
    (send! ['StartupMessage ["user" . user] (if db [["database" . db]] []) ...])
-   (recv!
-    (['AuthenticationRequest what . rest]
-     (DEBUG "AUTHENTICATION REQUEST " what)
-     (case what
-       ((AuthenticationOk)
-        (start-driver!))
-       ((AuthenticationCleartextPassword)
-        (authen-cleartext))
-       ((AuthenticationMD5Password)
-        (authen-md5 (car rest)))
-       ((AuthenticationSASL)
-        (authen-sasl rest))
-       (else
-        (raise-io-error postgresql-connect! "unsupported authentication mechanism" what)))))
+   (: (recv!
+       (['AuthenticationRequest what . rest]
+        (postgres-log.debugf "AUTHENTICATION REQUEST %a" what)
+        (case what
+          ((AuthenticationOk)
+           (start-driver!))
+          ((AuthenticationCleartextPassword)
+           (authen-cleartext))
+          ((AuthenticationMD5Password)
+           (authen-md5 (car rest)))
+          ((AuthenticationSASL)
+           (authen-sasl rest))
+          (else
+           (raise-io-error postgresql-connect! "unsupported authentication mechanism" what)))))
+      LocalActor)
    (catch (e)
-     (StreamSocket-close sock)
+     (using (sock : StreamSocket) (ignore-errors (sock.close)))
      (raise e))))
 
 (def (postgresql-driver sock reader writer)
@@ -452,7 +412,7 @@
                (channel-sync query-output cols query-token)
                (break))))
             (['CommandComplete tag]
-             (channel-sync query-output (postgresql-CommandComplete tag))
+             (channel-sync query-output (PGCommandComplete tag))
              (void))
             ([(or 'PortalSuspended 'EmptyQueryResponse)]
              (void))
@@ -479,10 +439,10 @@
           (let ((r (recv!)))
             (match r
               (['RowDescription . fields]
-               (channel-sync query-output (postgresql-RowDescription fields))
+               (channel-sync query-output (PGRowDescription fields))
                (lp))
               (['CommandComplete tag]
-               (channel-sync query-output (postgresql-CommandComplete tag))
+               (channel-sync query-output (PGCommandComplete tag))
                (lp))
               (['DataRow . cols]
                (cond                                        ;
@@ -492,7 +452,7 @@
                  (channel-sync query-output cols query-token) ;
                  (break))))
               (['ReadyForQuery _]
-               (channel-sync query-output (eof-object)))
+               (channel-sync query-output #!eof))
               (['EmptyQueryResponse]
                (lp))
               (['ErrorResponse msg . irritants]
@@ -520,7 +480,7 @@
           (['CloseComplete]
            (void))
           (['ErrorResponse msg . irritants]
-           (warnf "error closing statement ~a: ~a" name msg)))
+           (postgres-log.warnf "error closing statement %a: %a" name msg)))
         (resync!))))
 
   (def (shutdown! exit)
@@ -533,9 +493,9 @@
     ((_ action)
      (try
       (let (res action)
-        (--> (!ok res)))
+        (--> (!OK res)))
       (catch (e)
-        (--> (!error (error-message e)))
+        (--> (!Error (error-message e)))
         (unless (sql-error? e)
           (raise e)))))
     ((recur action continue ...)
@@ -546,7 +506,8 @@
   (def (loop)
     (let/cc exit
       (while #t
-        (<- ((!prepare name sql)
+        (<- protocol: proto:/std/db/postgres
+            ((!prepare name sql)
              (do-action (prepare name sql)))
             ((!exec name params)
              (do-action (exec name params)))
@@ -564,21 +525,20 @@
              (do-action (if proc
                           (current-notice-handler proc)
                           (current-notice-handler))))
+            protocol: proto:/actor/control
             ,(@ping)
-            ,(@shutdown
-              (shutdown! exit))
-            ,(@unexpected warnf)))))
+            ,(@shutdown (shutdown! exit))))))
 
   (try
    (loop)
    (catch (e)
-     (errorf "unhandled exception: ~a" e)
+     (postgres-log.errorf "unhandled exception: %a" e)
      (raise e))
    (finally
     (when query-output
       (channel-sync query-output (SQLError "connection error" where: 'postgresql-driver))
       (channel-close query-output))
-    (StreamSocket-close sock))))
+     (using (sock : StreamSocket) (ignore-errors (sock.close))))))
 
 ;;; Protocol I/O
 (def (postgresql-send! writer msg)
@@ -591,7 +551,7 @@
         (writer.write payload)
         (writer.flush)))
 
-    (DEBUG "SEND " msg)
+    (postgres-log.debugf "SEND %a" msg)
     (with ([tag . body] msg)
       (cond
        ((hash-get +frontend-messages+ tag)
@@ -604,7 +564,7 @@
         (raise-io-error postgresql-send! "cannot marshal; unknown message tag" msg))))))
 
 (def (postgresql-recv! reader)
-  (DEBUG "RECEIVE!")
+  (postgres-log.debugf "RECEIVE!")
   (using (reader :- BufferedReader)
     (let* ((tid (reader.read-u8))
            (_ (when (eof-object? tid)
@@ -614,22 +574,23 @@
            (payload-reader (reader.delimit payload-len)))
 
       (using (payload-reader :- BufferedReader)
-        (DEBUG "READ MESSAGE " tid payload-len)
+        (postgres-log.debugf "READ MESSAGE %a %a" tid payload-len)
         (cond
          ((vector-ref +backend-messages+ tid)
           => (match <>
                ([tag . unmarshal]
-                (DEBUG "UNMARSHAL " tag)
+                (postgres-log.debugf "UNMARSHAL %a" tag)
                 (let* ((body (unmarshal payload-reader))
                        (msg (cons tag body)))
                   ;; skip left-over input in the delimited reader
                   (while (not (eof-object? (payload-reader.read-u8))))
-                  (DEBUG "RECEIVE " msg)
+                  (postgres-log.debugf "RECEIVE %a" msg)
                   msg))))
          (else
-          (let (buffer (reader.read-available 5 2048))
+          (let (buffer (make-u8vector 2048))
             (u8vector-set! buffer 0 tid)
             (u8vector-uint-set! buffer 1 (+ payload-len 4) big 4)
+            (reader.read buffer 5 2048 2048)
             (raise-io-error postgresql-recv! "unexpected backend message" buffer))))))))
 
 ;;; message unmarshaling
@@ -682,7 +643,7 @@
         (begin
           (buf.read-u8)
           (list->string (reverse! chars)))
-        (let (next (buf.read-char))
+        (let (next (buf.read-char-utf8))
           (lp (cons next chars)))))))
 
 (def (unmarshal-bytes-rest buf)
@@ -696,7 +657,7 @@
 (def (unmarshal-string-rest buf)
   (using (buf :- BufferedReader)
     (let lp ((chars []))
-      (let (next (buf.read-char))
+      (let (next (buf.read-char-utf8))
         (if (eof-object? next)
           (list->string (reverse! chars))
           (lp (cons next chars)))))))
@@ -769,17 +730,14 @@
 
 (def (marshal-string buf str)
   (using (buf :- BufferedWriter)
-    (buf.write-string str)
+    (buf.write-string-utf8 str)
     (buf.write-u8 0)))
 
 (defrule (with-buffered-writer writer body ...)
-  (let* ((buffer (cache-get-buffer))
-         (writer (open-buffered-writer #f buffer)))
+  (let ((writer (open-buffered-writer #f small-buffer-size)))
     (using (writer :- BufferedWriter)
       (let () body ...))
-    (let (result (get-buffer-output-u8vector writer))
-      (cache-put-buffer buffer)
-      result)))
+    (get-memory-output-u8vector writer)))
 
 (def (marshal-startup body)
   (with ([[param . value] ...] body)
@@ -807,7 +765,7 @@
            ((string? param)
             (let (len (string-utf8-length param))
               (buf.write-u32 len)
-              (buf.write-string param)))
+              (buf.write-string-utf8 param)))
            ((u8vector? param)
             (buf.write-u32 (u8vector-length param))
             (buf.write param))
@@ -855,32 +813,12 @@
       (if data
         (let (len (string-utf8-length data))
           (buf.write-u32 len)
-          (buf.write-string data))
+          (buf.write-string-utf8 data))
         (buf.write-s32 -1)))))
 
 (def (marshal-sasl-response body)
   (with ([data] body)
     (string->utf8 data)))
-
-;;; marshal buffer cache
-(def +buffer-cache+ [])
-(def +buffer-cache-mx+ (make-mutex 'buffer-cache))
-
-(def (cache-get-buffer)
-  (mutex-lock! +buffer-cache-mx+)
-  (match +buffer-cache+
-    ([buf . rest]
-     (set! +buffer-cache+ rest)
-     (mutex-unlock! +buffer-cache-mx+)
-     buf)
-    (else
-     (mutex-unlock! +buffer-cache-mx+)
-     (make-u8vector 4096))))
-
-(def (cache-put-buffer buf)
-  (mutex-lock! +buffer-cache-mx+)
-  (set! +buffer-cache+ (cons buf +buffer-cache+))
-  (mutex-unlock! +buffer-cache-mx+))
 
 ;;; dispatch tables
 (def +backend-messages+

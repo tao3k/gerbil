@@ -40,6 +40,12 @@ If you want to run all the tests in a directory and
 it's subdirectory recursively, do `./build.sh test your-directory/...`.
 If you want to run all tests in the stdlib do `./build.sh test std/...`
 
+## Running a build-local gxi
+
+If you need to use `gxi` in the build environment, use the `run.sh`
+script in the the opt of the gerbil source tree. It runs `gxi` with
+the appropriate environment variables and accepts the same arguments.
+
 ## Code conventions
 
 Try to follow these conventions:

@@ -3,7 +3,9 @@
 ;;; DB aggregate interface
 (import ./db/interface
         ./db/db
-        ./db/cache)
+        ./db/cache
+        ./db/connpool)
 (export (import: ./db/interface
                  ./db/db
-                 ./db/cache))
+                 ./db/cache
+                 ./db/connpool))

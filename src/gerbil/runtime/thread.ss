@@ -50,7 +50,7 @@ namespace: #f
          (tgroup (or tgroup (current-thread-group))))
     (thread-start!
      (thread-init!
-      (construct-actor-thread #f #f 0)
+      (construct-actor-thread #f #f)
       (cut thread-main thunk) name tgroup))))
 
 (def (spawn-thread thunk (name absent-obj) (tgroup absent-obj))
@@ -192,12 +192,10 @@ namespace: #f
 (extern
   actor-thread? construct-actor-thread
   actor-thread-state actor-thread-state-set!
-  actor-thread-locals actor-thread-locals-set!
-  actor-thread-nonce actor-thread-nonce-set!)
+  actor-thread-locals actor-thread-locals-set!)
 (begin-foreign
   (define-type-of-thread actor-thread
     constructor: construct-actor-thread
     id: actor::t
     state
-    locals
-    nonce))
+    locals))
