@@ -1,4 +1,5 @@
 ;; -*- Gerbil -*-
+;; (C) Gerbil contributors
 ;; gerbil stdlib build spec
 (def (gerbil-libdir) (path-expand "lib" (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
 
@@ -55,6 +56,12 @@
     "os/sockopt"
     "os/hostname"
     "os/pid"
+    "os/signal"
+    ,@(cond-expand
+        (linux '("os/signalfd"))
+        (bsd '("os/kqueue"))
+        (else '()))
+    "os/signal-handler"
 
     "io/interface/base"
     "io/interface/bio"
