@@ -50,6 +50,11 @@
     (gxc: "os/device" ,@(include-gambit-sharp))
     (gxc: "os/file" "-cc-options" "-D_LARGEFILE64_SOURCE")
     "os/fcntl"
+    "os/flock"
+    (gxc: "os/pipe" "-cc-options" "-D _GNU_SOURCE")
+    ,@(cond-expand
+        (linux '("os/inotify"))
+        (else '()))
     "os/time"
     "os/sockaddr"
     (gxc: "os/socket" "-cc-options" "-D _GNU_SOURCE")

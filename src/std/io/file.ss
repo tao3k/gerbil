@@ -7,31 +7,39 @@
         :std/os/device
         :std/os/file
         :std/os/fcntl
+        :std/os/flock
         ./interface)
 (export open-file-reader
+        open-file-reader/lock
         open-file-writer
+        open-file-writer/lock
         call-with-file-reader
+        call-with-file-reader/lock
         call-with-file-writer
+        call-with-file-writer/lock
         default-file-reader-flags
         default-file-writer-flags
-        (struct-out file-io
-                    input-file-io
-                    output-file-io
-                    input-output-file-io)
+        (struct-out FileIO
+                    InputFileIO
+                    OutputFileIO
+                    InputOutputFileIO)
         open-input-file-io
+        open-input-file-io/lock
         open-output-file-io
-        open-input-output-file-io)
+        open-output-file-io/lock
+        open-input-output-file-io
+        open-input-output-file-io/lock)
 (declare (not safe))
 
-(defstruct file-io
+(defstruct FileIO
   ((dev :- FileDevice))
   transparent:  #f)
 
-(defclass (input-file-io file-io) ())
-(defclass (output-file-io file-io) ())
-(defclass (input-output-file-io input-file-io output-file-io) ())
+(defclass (InputFileIO FileIO) ())
+(defclass (OutputFileIO FileIO) ())
+(defclass (InputOutputFileIO InputFileIO OutputFileIO) ())
 
-(defmethod {read input-file-io}
+(defmethod {read InputFileIO}
   (lambda (self output output-start output-end input-need)
     (do-check-device-input file-io-read self.dev
       (let loop ((output-start output-start :- :fixnum)
@@ -55,15 +63,15 @@
           result))))
   interface: Reader)
 
-(defmethod {close input-file-io}
+(defmethod {close InputFileIO}
   (lambda (self)
     (device-close self.dev DIRECTION-IN))
   interface: Closer)
 
-(@implement Closer input-file-io)
-(@implement Reader input-file-io)
+(@implement Closer InputFileIO)
+(@implement Reader InputFileIO)
 
-(defmethod {write output-file-io}
+(defmethod {write OutputFileIO}
   (lambda (self input input-start input-end)
     (do-check-device-output file-io-write self.dev
       (let loop ((input-start input-start :- :fixnum)
@@ -80,40 +88,79 @@
           result))))
   interface: Writer)
 
-(defmethod {close output-file-io}
+(defmethod {close OutputFileIO}
   (lambda (self)
     (device-close self.dev DIRECTION-OUT))
   interface: Closer)
 
-(@implement Closer output-file-io)
-(@implement Writer output-file-io)
+(@implement Closer OutputFileIO)
+(@implement Writer OutputFileIO)
 
-(defmethod {seek file-io}
+(defmethod {seek FileIO}
   (lambda (self position whence)
     (file-device-seek self.dev position whence))
   interface: Seeker)
 
-(@implement Seeker input-file-io)
-(@implement Seeker output-file-io)
+(@implement Seeker InputFileIO)
+(@implement Seeker OutputFileIO)
 
-(defmethod {close input-output-file-io}
+(defmethod {close InputOutputFileIO}
   (lambda (self)
     (device-close self.dev DIRECTION-INOUT))
   interface: Closer)
 
-(@implement Closer input-output-file-io)
+(@implement Closer InputOutputFileIO)
 
 (defrule (open-file-io path flags mode make)
   (make dev: (open-file-device path flags mode)))
 
-(def (open-input-file-io path flags mode)
-  (open-file-io path flags mode make-input-file-io))
+(defrule (open-file-io/lock path flags mode timeo op direction make)
+  (make dev: (open-file/lock path op timeo
+                             direction: direction
+                             flags: flags
+                             mode: mode)))
 
-(def (open-output-file-io path flags mode)
-  (open-file-io path flags mode make-output-file-io))
+(def (open-input-file-io (path  : :string)
+                         (flags : :fixnum)
+                         (mode  : :fixnum))
+  => InputFileIO
+  (open-file-io path flags mode make-InputFileIO))
 
-(def (open-input-output-file-io path flags mode)
-  (open-file-io path flags mode make-input-output-file-io))
+(def (open-input-file-io/lock (path  : :string)
+                              (flags : :fixnum)
+                              (mode  : :fixnum)
+                              (timeo : :t := !NoTimeout)
+                              op: (op : :fixnum := LOCK_SH))
+  => InputFileIO
+  (open-file-io/lock path flags mode timeo op DIRECTION-IN make-InputFileIO))
+
+(def (open-output-file-io (path  : :string)
+                          (flags : :fixnum)
+                          (mode  : :fixnum))
+  => OutputFileIO
+  (open-file-io path flags mode make-OutputFileIO))
+
+(def (open-output-file-io/lock (path  : :string)
+                               (flags : :fixnum)
+                               (mode  : :fixnum)
+                               (timeo : :t := !NoTimeout)
+                               op: (op : :fixnum := LOCK_EX))
+  => OutputFileIO
+  (open-file-io/lock path flags mode timeo op DIRECTION-OUT make-OutputFileIO))
+
+(def (open-input-output-file-io (path  : :string)
+                                (flags : :fixnum)
+                                (mode  : :fixnum))
+  => InputOutputFileIO
+  (open-file-io path flags mode make-InputOutputFileIO))
+
+(def (open-input-output-file-io/lock (path  : :string)
+                                     (flags : :fixnum)
+                                     (mode  : :fixnum)
+                                     (timeo : :t := !NoTimeout)
+                                     op: (op : :fixnum := LOCK_EX))
+  => InputOutputFileIO
+  (open-file-io/lock path flags mode timeo op DIRECTION-INOUT make-InputOutputFileIO))
 
 (def default-file-reader-flags O_NOATIME)
 
@@ -122,6 +169,16 @@
   => Reader
   (let* ((flags (fxior flags O_RDONLY))
          (io    (open-input-file-io (path-expand path) flags 0)))
+    (Reader io)))
+
+(def (open-file-reader/lock (path  : :string)
+                            (timeo : :t := !NoTimeout)
+                            op:    (op    : :fixnum := LOCK_SH)
+                            flags: (flags : :fixnum := default-file-reader-flags))
+  => Reader
+  (let* ((flags (fxior flags O_RDONLY))
+         (io    (open-input-file-io/lock
+                 (path-expand path) flags 0 timeo op: op)))
     (Reader io)))
 
 (def default-file-writer-flags
@@ -135,10 +192,34 @@
          (io (open-output-file-io (path-expand path) flags mode)))
     (Writer io)))
 
+(def (open-file-writer/lock (path  : :string)
+                            (timeo : :t := !NoTimeout)
+                            op:    (op    : :fixnum := LOCK_EX)
+                            flags: (flags : :fixnum := default-file-writer-flags)
+                            mode:  (mode  : :fixnum := #o644))
+  => Writer
+  (let* ((flags (fxior flags O_WRONLY))
+         (io    (open-output-file-io/lock
+                 (path-expand path) flags mode timeo op: op)))
+    (Writer io)))
+
 (def (call-with-file-reader (path : :string)
                             (proc : :procedure)
                             flags: (flags : :fixnum := default-file-reader-flags))
+  => :t
   (using (reader (open-file-reader path flags: flags)
+                 : Reader)
+    (unwind-protect
+      (proc reader)
+      (reader.close))))
+
+(def (call-with-file-reader/lock (path  : :string)
+                                 (proc  : :procedure)
+                                 (timeo : :t := !NoTimeout)
+                                 op:    (op    : :fixnum := LOCK_SH)
+                                 flags: (flags : :fixnum := default-file-reader-flags))
+  => :t
+  (using (reader (open-file-reader/lock path timeo op: op flags: flags)
                  : Reader)
     (unwind-protect
       (proc reader)
@@ -148,7 +229,22 @@
                             (proc : :procedure)
                             flags: (flags : :fixnum := default-file-writer-flags)
                             mode:  (mode  : :fixnum := #o644))
+  => :t
   (using (writer (open-file-writer path flags: flags mode: mode)
+                 : Writer)
+    (unwind-protect
+     (proc writer)
+     (writer.close))))
+
+(def (call-with-file-writer/lock (path  : :string)
+                                 (proc  : :procedure)
+                                 (timeo : :t := !NoTimeout)
+                                 op:    (op    : :fixnum := LOCK_EX)
+                                 flags: (flags : :fixnum := default-file-writer-flags)
+                                 mode:  (mode  : :fixnum := #o644))
+  => :t
+  (using (writer (open-file-writer/lock
+                  path timeo op: op flags: flags mode: mode)
                  : Writer)
     (unwind-protect
      (proc writer)

@@ -38,7 +38,7 @@
    prefix
    (lambda (tmp)
      (using (io (open-input-output-file-io tmp flags #o600)
-                : input-output-file-io)
+                : InputOutputFileIO)
        (unwind-protect
          (proc io)
          (device-close io.dev DIRECTION-INOUT))))
