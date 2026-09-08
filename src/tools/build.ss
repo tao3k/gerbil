@@ -7,6 +7,7 @@
   '("env"
     "gxtest"
     "gxpkg"
+    "gxtags"
 
     "gxhttpd/opt"
     "gxhttpd/config"
@@ -21,7 +22,6 @@
 #;(defbuild-script
   '(
     "gxprof"
-    "gxtags"
 
     "gxensemble/opt"
     "gxensemble/util"

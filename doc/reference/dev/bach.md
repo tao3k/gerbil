@@ -209,20 +209,29 @@ Arguments:
 ```
 
 ### `gerbil tags`
+
+`gerbil tags` (or `gxtags`) generates Emacs or Vim tags for exported bindings and module identifiers. Inputs may be source files or directories; directories are traversed recursively for `.ss` and `.ssi` files. With no inputs, it scans the current directory. The default output file is `TAGS`.
+
 ```shell
 $ gerbil help tags
-gxtags: generate emacs tags for Gerbil code
+gxtags: generate emacs/vim tags for Gerbil code
 
 Usage: gxtags [option ...] <input> ...
 
 Options:
+ -g --global-env                  use the user global env even in local package context
  -a                               append to existing tag file
  -o  <output>                     explicit name of file for tag table [default: TAGS]
+ -t --tag-format <format>         TAGS index format; emacs or vim; uses the GERBIL_TAGS_FORMAT environment variable, with default value of emacs if it is not set [default: emacs]
  -h --help                        display help
 
 Arguments:
  input                            source file or directory
 ```
+
+Use `-t vim` or `GERBIL_TAGS_FORMAT=vim` for Vim output; an explicit `-t` overrides the environment. Vim output is sorted, including existing entries when appending. By default, the tool uses the local package environment when one is present; `-g` disables that selection. Files that cannot be imported are reported as `SKIP`.
+
+The `:gerbil/tools/gxtags` module also exports `(make-tags inputs tagfile [append? #f] [format 'emacs])`. It uses the same format validation and output behavior as the command, including sorting Vim tags. Unlike the command, the procedure accepts its format directly rather than consulting `GERBIL_TAGS_FORMAT`, and leaves package environment setup to the caller.
 
 ### `gerbil prof`
 ```shell
