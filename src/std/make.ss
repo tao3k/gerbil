@@ -222,8 +222,6 @@ TODO:
     (def dependency-mx (make-mutex 'dependency))
     ;; table of module id -> completion, indicating completion of a build
     (def completions (make-hash-table-eq))
-    ;; table of in tree module timestamps
-    (def timestamps (make-hash-table-eq))
     ;; the build coordinator barrier
     (def build-barrier
       (make-barrier (length buildspec)))
@@ -265,6 +263,8 @@ TODO:
           (let* ((id (expander-context-id in))
                  (ts (and id (with-catch false (lambda () (dependency-timestamp id))))))
             (and id
+                 ;; Imports from this file are not external build dependencies.
+                 (not (eq? (module-strip-nesting id) (expander-context-id mod)))
                  (if ts
                    (ormap (lambda (output) (> ts (file-timestamp output))) outputs)
                    #t))))
@@ -303,7 +303,7 @@ TODO:
       (let* ((file (spec-file spec settings))
              (mod (import/mx file)))
         (for (in (module-context-import mod))
-          (consider in))
+          (consider in (expander-context-id mod)))
         (if (or (build? spec)
                 (build-dependent? spec mod))
           ;; it needs to be built, put it to the work channel
@@ -313,20 +313,24 @@ TODO:
         ;; clear the barrrier
         (barrier-post! build-barrier)))
 
-    (def (consider in)
+    (def (consider in self)
       (cond
-       ((module-context? in)  (wait-for in))
-       ((prelude-context? in) (wait-for in))
-       ((module-import? in)   (consider (module-import-source in)))
-       ((module-export? in)   (consider (module-export-context in)))
-       ((import-set? in)      (consider (import-set-source in)))
+       ((module-context? in)  (wait-for in self))
+       ((prelude-context? in) (wait-for in self))
+       ((module-import? in)   (consider (module-import-source in) self))
+       ((module-export? in)   (consider (module-export-context in) self))
+       ((import-set? in)      (consider (import-set-source in) self))
        (else
         (error "unexpected import" in))))
 
-    (def (wait-for ctx)
+    (def (wait-for ctx self)
       (alet* ((id (expander-context-id ctx)) ; :<root> prelude has no id
-              (completion (hash-get completions id))) ; outside deps not in the table
-        (completion-wait! completion)))
+              ;; Nested modules are built with their enclosing file.
+              (id (module-strip-nesting id)))
+        ;; A module may import its own nested modules; never wait on itself.
+        (unless (eq? id self)
+          (alet (completion (hash-get completions id))
+            (completion-wait! completion)))))
 
     ;; prepare the build
     (create-directory* (settings-bindir settings))
@@ -335,10 +339,8 @@ TODO:
 
     ;; prepare the completion table
     (for (spec buildspec)
-      (let ((file (spec-file spec settings))
-            (id (module-id spec)))
-        (hash-put! completions id (make-completion `(build ,id)))
-        (hash-put! timestamps id (file-timestamp file))))
+      (let (id (module-id spec))
+        (hash-put! completions id (make-completion `(build ,id)))))
 
     ;; spawn a thread for each spec that waits for the dependency completions
     ;; and pushes to the work channel if necessary.
@@ -355,26 +357,15 @@ TODO:
       ;; and wait for the workers to complete
       (for-each thread-join! workers))))
 
-(def __timestamps (make-hash-table))
-(def __timestamps-mx (make-mutex))
+;; Dependencies may have been rebuilt since an earlier freshness check, including
+;; in this invocation. Always observe the current file and library timestamps.
+(def (file-timestamp (file : :string))
+  => :flonum
+  (time->seconds (file-info-last-modification-time (file-info file))))
 
-(def (file-timestamp file)
-  (with-lock __timestamps-mx
-    (lambda ()
-      (cond
-       ((hash-get __timestamps file))
-       (else
-        (let (ts (time->seconds (file-info-last-modification-time (file-info file))))
-          (hash-put! __timestamps file ts)
-          ts))))))
-
-(def (library-timestamp id)
-  (cond
-   ((with-lock __timestamps-mx (cut hash-get __timestamps id)))
-   (else
-    (let (ts (file-timestamp (core-resolve-library-module-path (library-symbol id))))
-      (with-lock __timestamps-mx (cut hash-put! __timestamps id ts))
-      ts))))
+(def (library-timestamp (id : :symbol))
+  => :flonum
+  (file-timestamp (core-resolve-library-module-path (library-symbol id))))
 
 (def (module-strip-nesting id)
   (let (name (symbol->string id))
