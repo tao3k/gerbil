@@ -9,6 +9,10 @@ lib
 *.o?
 *.so
 
+src/gerbil/test/test-program.bin*
+src/gerbil/test/test-program.opt*
+src/gerbil/test/test-program.static*
+
 src/TAGS
 .build*
 doc/node_modules

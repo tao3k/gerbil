@@ -270,9 +270,7 @@ build_stdlib () {
 }
 
 debug_stdlib () {
-  pushd std
-  gdb gxi ./build.ss
-  popd
+  ( cd std && gdb --args gxi ./build.ss ) || die
 }
 
 build_libgerbil () {
