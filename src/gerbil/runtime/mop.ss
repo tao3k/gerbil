@@ -283,16 +283,26 @@ namespace: #f
               (error "metaclass is not a class type" class: type-id metaclass: metaclass))
             metaclass))
          (system? (agetq system: properties))
-         ;; opaque? iff every own field has non-equalable (bit 2) set in its flags,
-         ;; AND the super (if any) is also opaque — recursive definition.
+         ;; opaque? iff this level itself opts for eq? (equal: #f, or transparent: #f
+         ;; when equal: isn't separately given), OR any direct parent is opaque.
+         ;; eq?, once required, subsumes every per-slot test, so opacity is sticky:
+         ;; it propagates via `or` down the whole descendant chain and cannot be
+         ;; lifted by a later equal:/transparent: -- direct parents suffice (not the
+         ;; full precedence-list) since each parent's own opaque? already transitively
+         ;; reflects its own ancestry.
          ;; This allows Gambit to optimize equal? into eq?
+         ;; TODO: direct-supers reaches this function only by way of the
+         ;; direct-supers: entry that make-class-type happens to stuff into
+         ;; `properties` for an unrelated reason (subclass tracking); it should
+         ;; be its own explicit parameter to make-class-type-descriptor instead
+         ;; of an incidental, easy-to-miss alist key.
          (opaque?
-          (and (or (not type-super) (type-opaque? type-super))
-               (let loop ((j 1))
-                 (if (##fx>= j field-info-length)
-                   #t
-                   (and (##fx= (##fxand (vector-ref field-info j) 4) 4)
-                        (loop (##fx+ j 3)))))))
+          (or (let (eq-entry (assq equal: properties))
+                (if eq-entry
+                  (not (cdr eq-entry))
+                  (let (tr-entry (assq transparent: properties))
+                    (and tr-entry (not (cdr tr-entry))))))
+              (ormap type-opaque? (agetq direct-supers: properties []))))
          (acyclic? (agetq acyclic: properties))
          (type-flags
           (##fxior type-flag-id type-flag-concrete
