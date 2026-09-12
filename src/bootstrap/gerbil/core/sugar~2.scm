@@ -7519,13 +7519,13 @@
                   (lambda (_%datums10655%_)
                     (foldl (lambda (_%lst10658%_ _%r10660%_)
                              (foldl min _%r10660%_ _%lst10658%_))
-                           ##max-fixnum
+                           (let () (declare (not safe)) (##greatest-fixnum))
                            _%datums10655%_)))
                  (_%max-fixnum9744%_
                   (lambda (_%datums10648%_)
                     (foldl (lambda (_%lst10651%_ _%r10653%_)
                              (foldl max _%r10653%_ _%lst10651%_))
-                           ##min-fixnum
+                           (let () (declare (not safe)) (##least-fixnum))
                            _%datums10648%_)))
                  (_%generate-fixnum-dispatch-table9745%_
                   (lambda (_%indexes10630%_)

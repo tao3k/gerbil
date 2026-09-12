@@ -302,9 +302,6 @@ package: gerbil/runtime
       origin:
       gerbil/runtime/util))))
   (declare-type
-   absent-value
-   (optimizer-resolve-class '(typedecl absent-value) 'vector::t))
-  (declare-type
    true
    (@lambda (0)
             #f

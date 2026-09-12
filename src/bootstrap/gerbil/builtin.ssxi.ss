@@ -1064,7 +1064,8 @@ package: gerbil
                ((procedure::t t::t thread-group::t) thread::t effect: (alloc))])
  (make-thread-group [(() thread-group::t effect: (io))
                      ((t::t) thread-group::t effect: (io))
-                     ((t::t thread-group::t) thread-group::t effect: (io))])
+                     ;; Parent can be a thread group or #f (detached).
+                     ((t::t t::t) thread-group::t effect: (io))])
  ;;make-tls-context
  (make-u16vector [((fixnum::t) u16vector::t effect: (alloc) unchecked:)
                   ((fixnum::t fixnum::t) u16vector::t effect: (alloc) unchecked:)])
@@ -1645,7 +1646,8 @@ package: gerbil
  (thread-group->thread-list (thread-group::t) list::t effect: (io))
  (thread-group->thread-vector (thread-group::t) vector::t effect: (io))
  (thread-group-name (thread-group::t) t::t effect: (pure))
- (thread-group-parent (thread-group::t) thread-group::t effect: (pure))
+ ;; A detached thread group has no parent and returns #f.
+ (thread-group-parent (thread-group::t) t::t effect: (pure))
  (thread-group-resume! (thread-group::t) void::t effect: (io))
  (thread-group-specific (thread-group::t) t::t effect: (pure))
  (thread-group-specific-set! (thread-group::t t::t) void::t effect: (mut))

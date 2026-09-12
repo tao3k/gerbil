@@ -9893,7 +9893,7 @@
                                                (_%loop85821%_
                                                 _%$%g8584185927%_
                                                 _%rest-pos85826%_
-                                                _%args85811%_
+                                                _%pos85827%_
                                                 (cons (_%lambda-argument-contract84304%_
                                                        _%$%g8584285929%_
                                                        _%$e85949%_)
@@ -9910,7 +9910,7 @@
                                         _%kws85828%_
                                         _%$%g8585085885%_)
                                        (_%syntax-error!85817%_
-                                        '"unpexted tail argument"
+                                        '"unexpected tail argument"
                                         _%$%g8585085885%_))))
                                 (_%__kont103953103954%_
                                  (lambda ()

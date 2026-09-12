@@ -132,7 +132,5 @@ namespace: #f
           (actor-thread-state actor-thread-state)
           (actor-thread-state-set! actor-thread-state-set!)
           (actor-thread-locals actor-thread-locals)
-          (actor-thread-locals-set! actor-thread-locals-set!)
-          (actor-thread-nonce actor-thread-nonce)
-          (actor-thread-nonce-set! actor-thread-nonce-set!)))
+          (actor-thread-locals-set! actor-thread-locals-set!)))
 (%#call (%#ref load-module) (%#quote "gerbil/runtime/thread~0"))
