@@ -742,11 +742,11 @@ package: gerbil/core
 
     (define (min-fixnum datums)
       (foldl (lambda% (lst r) (foldl min r lst))
-             ##max-fixnum datums))
+             (##greatest-fixnum) datums))
 
     (define (max-fixnum datums)
       (foldl (lambda% (lst r) (foldl max r lst))
-             ##min-fixnum datums))
+             (##least-fixnum) datums))
 
     (define (generate-fixnum-dispatch-table indexes)
       (let* ((ixs (map car indexes))

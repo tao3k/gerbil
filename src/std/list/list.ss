@@ -70,7 +70,7 @@
             ((fxzero? n) #f)
             (else (loop (cdr x) (fx- n 1)))))))
    ((integer? n)
-    (and (<= 0 n ##max-fixnum)
+    (and (<= 0 n (##greatest-fixnum))
          (length=n? x (inexact->exact n))))
    ((number? n) #f)
    (else (raise-bad-argument length=n? "number" n))))
@@ -97,7 +97,7 @@
             (else (loop (cdr x) (fx- n 1)))))))
    ((real? n)
     (and (positive? n)
-         (or (< ##max-fixnum n)
+         (or (< (##greatest-fixnum) n)
              (length<=n? x (inexact->exact (floor n))))))
    (else (raise-bad-argument length<=n? "real number" n))))
 
@@ -108,7 +108,7 @@
     (and (fxpositive? n) (length<=n? x (fx- n 1))))
    ((real? n)
     (and (positive? n)
-         (or (< ##max-fixnum n)
+         (or (< (##greatest-fixnum) n)
              (length<n? x (inexact->exact (ceiling n))))))
    (else (raise-bad-argument length<n? "real number" n))))
 

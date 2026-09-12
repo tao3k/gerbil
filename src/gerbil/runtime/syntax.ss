@@ -299,7 +299,7 @@ namespace: #f
   (macro-readtable-brace-handler-set! rt kw))
 (def (__read-sharp-bang re next start-pos)
   (if (eq? start-pos 0)
-    (let* ((line (##read-line (macro-readenv-port re) #\newline #f ##max-fixnum))
+    (let* ((line (##read-line (macro-readenv-port re) #\newline #f (##greatest-fixnum)))
            (script-line (substring line 1 (string-length line))))
       (macro-readenv-script-line-set! re script-line)
       (##script-marker))
