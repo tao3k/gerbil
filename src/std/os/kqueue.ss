@@ -6,7 +6,8 @@
 (import :std/ffi
         ./device
         ./error
-        ./fcntl)
+        ./fcntl
+        ./time)
 
 (export kqueue kqueue-close
         make-kevents kevent-set!
@@ -52,8 +53,9 @@
            "<sys/time.h>"
            "<errno.h>")
 
-(def-C-type/pointer kevent "struct kevent" release: "ffi_free")
-(def-C-type/pointer timespec "struct timespec" release: "ffi_free")
+(C-declare "typedef struct kevent ffi_kevent;")
+
+(def-C-type/pointer kevent "ffi_kevent" release: "ffi_free")
 (def-C-type uintptr_t unsigned-long)
 (def-C-type void* (pointer "void"))
 
@@ -65,18 +67,13 @@
                           (nchanges : int)
                           (events   : kevent*)
                           (nevents  : int)
-                          (timeout  : timespec*))
+                          (timeout  : scheme-object))
   => int
-  "___return (___TRAP_ERRNO(kevent(___arg1, ___arg2, ___arg3, ___arg4, ___arg5, ___arg6)));")
+  "___return (___TRAP_ERRNO(kevent(___arg1, ___arg2, ___arg3, ___arg4, ___arg5,
+                                ___U8VECTOR_AS(struct timespec*,___ARG6))));")
 
 (def-C-lambda ffi-make-kevents (int) kevent*
   "___return ((struct kevent*)calloc(___arg1, sizeof(struct kevent)));")
-(def-C-lambda ffi-make-timespec () timespec*
-  "___return ((struct timespec*)malloc(sizeof(struct timespec)));")
-(def-C-lambda ffi-timespec-seconds-set! (timespec* int64) void
-  "___arg1->tv_sec = ___arg2; ___return;")
-(def-C-lambda ffi-timespec-nanoseconds-set! (timespec* long) void
-  "___arg1->tv_nsec = ___arg2; ___return;")
 
 (def-C-lambda ffi-kevent-ident (kevent* int) uintptr_t
   "___return ((uintptr_t)___arg1[___arg2].ident);")
@@ -165,7 +162,9 @@
              (nevents     :  :fixnum))
   => :fixnum
   (do-check-device-open kevent kq
-    (do-syscall (ffi-kevent kq.fd changes nchanges events nevents timespec-zero))))
+    (do-syscall
+     (ffi-kevent kq.fd changes nchanges events nevents
+                 (raw-c-struct-body timespec-zero)))))
 
 (def (kqueue-poll (kq :~ KQueueDevice? :- OSDevice)
                   (events :~ kevent? :- :foreign)
@@ -233,15 +232,8 @@
         (thread-local-set! kevent-ptr-key event)
         event))))
 
-(def (make-timespec (seconds : :integer) (nanoseconds : :integer))
-  => :foreign
-  (let (timespec (check-pointer make-timespec (ffi-make-timespec)))
-    (ffi-timespec-seconds-set! timespec seconds)
-    (ffi-timespec-nanoseconds-set! timespec nanoseconds)
-    timespec))
-
 (def timespec-zero
-  (make-timespec 0 0))
+  (make-timespec))
 
 (def (kevent-ident (events :~ kevent? :- :foreign) (index : :fixnum))
   => :integer

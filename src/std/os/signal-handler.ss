@@ -19,7 +19,7 @@
 (deflogger log name: "/os/signal")
 
 (def system-signal-handler
-  (delay (make-signal-handler)))
+  (delay-atomic (make-signal-handler)))
 
 (def (check-signal-number (where : :procedure) (signo : :fixnum))
   => :void

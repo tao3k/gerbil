@@ -138,9 +138,10 @@
 
 (def-C-type/pointer sigset_t release: "ffi_free")
 
-(def-C-syscall (ffi-kill (pid   :- :fixnum)
-                         (signo :- :fixnum))
-  "kill(___arg1, ___arg2)")
+(def-C-lambda (ffi-kill (pid   : int)
+                        (signo : int))
+  => int
+  "___return (___TRAP_ERRNO(kill(___arg1, ___arg2)));")
 
 (def-C-lambda (ffi-sigprocmask (how        : int)
                                (sigset     : sigset_t*)

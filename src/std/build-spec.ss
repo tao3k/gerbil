@@ -64,6 +64,7 @@
     "os/hostname"
     "os/pid"
     "os/signal"
+    (gxc: "os/signal-test-support" (extra-inputs: ("os/signal.ss")))
     ,@(cond-expand
         (linux '("os/signalfd"))
         (bsd '("os/kqueue"))
