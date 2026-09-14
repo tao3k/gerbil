@@ -98,6 +98,9 @@ namespace: gerbil/core/more-sugar
          (%#define-syntax
           unwind-protect
           |gerbil/core/more-sugar[:0:]#unwind-protect|)
+         (%#define-syntax
+          unwind-protect!
+          |gerbil/core/more-sugar[:0:]#unwind-protect!|)
          (%#define-syntax do |gerbil/core/more-sugar[:0:]#do|)
          (%#define-syntax do-while |gerbil/core/more-sugar[:0:]#do-while|)
          (%#define-syntax while |gerbil/core/more-sugar[:0:]#while|)

@@ -184,10 +184,10 @@ package: gerbil/runtime
              gerbil/runtime/init)))
   (declare-type
    __expander-loaded
-   (optimizer-resolve-class '(typedecl __expander-loaded) 'boolean::t))
+   (optimizer-resolve-type-expression 'typedecl '(nullable true::t)))
   (declare-type
    __runtime-initialized
-   (optimizer-resolve-class '(typedecl __runtime-initialized) 'boolean::t))
+   (optimizer-resolve-type-expression 'typedecl '(nullable true::t)))
   (declare-type
    gerbil-load-expander!
    (@lambda 0

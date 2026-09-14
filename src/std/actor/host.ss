@@ -18,7 +18,7 @@
   ;; lookup a local actor by name
   ;; returns the handle of the actor or #f
   (lookup (name : :string))
-  => :t
+  => (Maybe Handle)
 
   ;; send a message to an ensemble actor
   (send! (e : Envelope))

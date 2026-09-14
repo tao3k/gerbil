@@ -652,13 +652,43 @@ package: gerbil/core
              #f
              origin:
              gerbil/core/contract~TypeReference)))
+  (declare-type
+   |gerbil/core/contract~TypeReference[1]#resolve-return-type|
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/core/contract~TypeReference)))
+  (declare-type
+   |gerbil/core/contract~TypeReference[1]#resolve-return-type->type-descriptor|
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/core/contract~TypeReference)))
   (declare-class
    gerbil/core/contract~TypeEnv#type-env::t
    (@class gerbil/core/contract~TypeEnv#type-env::t
            ()
            (object::t t::t)
-           (var type checked? super)
-           (var type checked? super)
+           (var type checked? nullable? super)
+           (var type checked? nullable? super)
            #f
            #t
            #t
@@ -686,6 +716,9 @@ package: gerbil/core
    gerbil/core/contract~TypeEnv#type-env-checked?
    (@accessor gerbil/core/contract~TypeEnv#type-env::t checked? #t))
   (declare-type
+   gerbil/core/contract~TypeEnv#type-env-nullable?
+   (@accessor gerbil/core/contract~TypeEnv#type-env::t nullable? #t))
+  (declare-type
    gerbil/core/contract~TypeEnv#type-env-super
    (@accessor gerbil/core/contract~TypeEnv#type-env::t super #t))
   (declare-type
@@ -697,6 +730,9 @@ package: gerbil/core
   (declare-type
    gerbil/core/contract~TypeEnv#type-env-checked?-set!
    (@mutator gerbil/core/contract~TypeEnv#type-env::t checked? #t))
+  (declare-type
+   gerbil/core/contract~TypeEnv#type-env-nullable?-set!
+   (@mutator gerbil/core/contract~TypeEnv#type-env::t nullable? #t))
   (declare-type
    gerbil/core/contract~TypeEnv#type-env-super-set!
    (@mutator gerbil/core/contract~TypeEnv#type-env::t super #t))
@@ -710,6 +746,9 @@ package: gerbil/core
    gerbil/core/contract~TypeEnv#&type-env-checked?
    (@accessor gerbil/core/contract~TypeEnv#type-env::t checked? #f))
   (declare-type
+   gerbil/core/contract~TypeEnv#&type-env-nullable?
+   (@accessor gerbil/core/contract~TypeEnv#type-env::t nullable? #f))
+  (declare-type
    gerbil/core/contract~TypeEnv#&type-env-super
    (@accessor gerbil/core/contract~TypeEnv#type-env::t super #f))
   (declare-type
@@ -721,6 +760,9 @@ package: gerbil/core
   (declare-type
    gerbil/core/contract~TypeEnv#&type-env-checked?-set!
    (@mutator gerbil/core/contract~TypeEnv#type-env::t checked? #f))
+  (declare-type
+   gerbil/core/contract~TypeEnv#&type-env-nullable?-set!
+   (@mutator gerbil/core/contract~TypeEnv#type-env::t nullable? #f))
   (declare-type
    gerbil/core/contract~TypeEnv#&type-env-super-set!
    (@mutator gerbil/core/contract~TypeEnv#type-env::t super #f))
@@ -815,6 +857,21 @@ package: gerbil/core
              origin:
              gerbil/core/contract~Using)))
   (declare-type
+   |gerbil/core/contract~Using[1]#!class-slot-nullable?|
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/core/contract~Using)))
+  (declare-type
    |gerbil/core/contract~Using[1]#!class-slot-checked-mutator-contract?|
    (@lambda 2
             #f
@@ -860,7 +917,22 @@ package: gerbil/core
              origin:
              gerbil/core/contract~Using)))
   (declare-type
-   |gerbil/core/contract~Using[1]#get-slot-accessor|
+   |gerbil/core/contract~Using[1]#get-slot-accessor__%|
+   (@lambda 4
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/core/contract~Using)))
+  (declare-type
+   |gerbil/core/contract~Using[1]#get-slot-accessor__0|
    (@lambda 3
             #f
             signature:
@@ -874,6 +946,35 @@ package: gerbil/core
              #f
              origin:
              gerbil/core/contract~Using)))
+  (declare-type
+   |gerbil/core/contract~Using[1]#get-slot-accessor|
+   (@case-lambda
+    (3
+     |gerbil/core/contract~Using[1]#get-slot-accessor__0|
+     signature:
+     (return:
+      t::t
+      effect:
+      #f
+      arguments:
+      #f
+      unchecked:
+      #f
+      origin:
+      gerbil/core/contract~Using))
+    (4
+     |gerbil/core/contract~Using[1]#get-slot-accessor__%|
+     signature:
+     (return:
+      t::t
+      effect:
+      #f
+      arguments:
+      #f
+      unchecked:
+      #f
+      origin:
+      gerbil/core/contract~Using))))
   (declare-type
    |gerbil/core/contract~Using[1]#get-slot-mutator|
    (@lambda 4

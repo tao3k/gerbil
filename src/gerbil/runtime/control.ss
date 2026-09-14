@@ -46,6 +46,29 @@ namespace: #f
             (error "Cannot re-enter unwind protected block")))
         K fini)))
 
+;; same as unwind-protect but it does not protect against
+;; continuation escapes, only raised exceptions.
+;; use with care, you must be certain that K does not escape.
+;; Cleanup runs at most once; a cleanup exception supersedes a body exception.
+(def (with-unwind-protect! (K : :procedure) (fini : :procedure))
+  (let (unwinding #f)
+    (let (E (current-exception-handler))
+      (with-exception-handler
+       (lambda (e)
+         ;; Forward under E as well, so its exceptions cannot reenter us.
+         (##with-exception-handler E
+           (lambda ()
+             (unless unwinding
+               (set! unwinding #t)
+               (fini))
+             (E e))))
+       (lambda ()
+         (let (result (K))
+           (unless unwinding
+             (set! unwinding #t)
+             (fini))
+           result))))))
+
 ;; kwt: #f or a vector as a perfect hash-table for expected keywords
 (def (keyword-dispatch kwt K . all-args)
   (when kwt

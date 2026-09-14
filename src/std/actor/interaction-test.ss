@@ -4,14 +4,49 @@
 
 (import :std/test
         :std/error
+        :std/interface
         ./api
+        ./host
+        ./state
         ./message)
 (export interaction-test)
 
 (def proto:/test "/test/v0")
 
+(defstruct LookupTestHost ((handle : Handle))
+  final: #t)
+
+(implement ActorHost LookupTestHost
+  (name (lambda (self) "test"))
+  (register! (lambda (self name) (error "not implemented")))
+  (lookup
+   (lambda (self name)
+     (and (equal? name (Handle-actor self.handle)) self.handle)))
+  (send! (lambda (self e) (error "not implemented")))
+  (send-reply! (lambda (self msg in-reply continue) (error "not implemented")))
+  (broadcast! (lambda (self e) (error "not implemented"))))
+
 (def interaction-test
   (test-suite "test :std/actor/interaction"
+
+    (test-case "nullable actor host lookup"
+      (def handle (Handle "test" "present"))
+      (def host (ActorHost (LookupTestHost handle)))
+      (check (ActorHost-lookup host "missing") => #f)
+      (check (ActorHost-lookup host "present") => handle))
+
+    (test-case "nullable local host adapts raw implementations"
+      (thread-join!
+       (spawn
+        (lambda ()
+          (parameterize ((current-actor-host #f))
+            (check (actor-local-host?) => #f))
+          (parameterize ((current-actor-host (LookupTestHost (Handle "test" "present"))))
+            (def host (actor-local-host?))
+            (check (ActorHost? host) => #t)
+            (check (ActorHost-name host) => "test")
+            (actor-local-host)
+            (check (ActorHost? (actor-local-host?)) => #t))))))
 
     (test-case "test -> and <- send/receive"
       (let (thread

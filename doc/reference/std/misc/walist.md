@@ -1,4 +1,17 @@
 # Wrapped Association List utilities
+
+The current module is `:std/list/walist`. Its pair lookups declare nullable
+returns in both `AListOps` and the concrete API:
+
+```text
+(wassoc wa key) => (Maybe :pair)
+(wassf wa predicate) => (Maybe :pair)
+```
+
+They return the matching association pair, or `#f` when absent. Value lookups
+such as `waget`, `waref`, and `wagetf` remain generic: stored values and custom
+defaults need not be pairs. The older API examples below predate the module move.
+
 Utilities for using wrapped alists: objects that wrap an [alist](alist.md)
 to provide an API similar to that of mutable hash-tables.
 

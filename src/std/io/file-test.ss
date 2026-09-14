@@ -19,7 +19,7 @@
 (def file-lock-test-mode #o600)
 
 (def (try-file-lock (path : :string) (op : :fixnum))
-  => :t
+  => (Maybe :fixnum)
   (let (dev (open-file-device path file-lock-test-flags file-lock-test-mode))
     (unwind-protect
       (flock dev op)

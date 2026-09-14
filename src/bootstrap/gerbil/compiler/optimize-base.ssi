@@ -85,6 +85,23 @@ namespace: gxc
          (%#define-runtime &!alias-id gxc#&!alias-id)
          (%#define-runtime &!alias-id-set! gxc#&!alias-id-set!)
          (%#define-syntax !alias |gxc[:0:]#!alias|)
+         (%#define-runtime !nullable-type::t gxc#!nullable-type::t)
+         (%#define-runtime !nullable-type? gxc#!nullable-type?)
+         (%#define-runtime make-!nullable-type gxc#make-!nullable-type)
+         (%#define-runtime !nullable-type-base gxc#!nullable-type-base)
+         (%#define-runtime !nullable-type-id gxc#!nullable-type-id)
+         (%#define-runtime
+          !nullable-type-base-set!
+          gxc#!nullable-type-base-set!)
+         (%#define-runtime !nullable-type-id-set! gxc#!nullable-type-id-set!)
+         (%#define-runtime &!nullable-type-base gxc#&!nullable-type-base)
+         (%#define-runtime &!nullable-type-id gxc#&!nullable-type-id)
+         (%#define-runtime
+          &!nullable-type-base-set!
+          gxc#&!nullable-type-base-set!)
+         (%#define-runtime &!nullable-type-id-set! gxc#&!nullable-type-id-set!)
+         (%#define-syntax !nullable-type |gxc[:0:]#!nullable-type|)
+         (%#define-runtime nullable-type gxc#nullable-type)
          (%#define-runtime !signature::t gxc#!signature::t)
          (%#define-runtime !signature? gxc#!signature?)
          (%#define-runtime make-!signature gxc#make-!signature)
@@ -793,6 +810,14 @@ namespace: gxc
          (%#define-runtime
           optimizer-lookup-class-name
           gxc#optimizer-lookup-class-name)
+         (%#define-runtime
+          optimizer-resolve-type-expression
+          gxc#optimizer-resolve-type-expression)
+         (%#define-runtime
+          optimizer-type-expression
+          gxc#optimizer-type-expression)
+         (%#define-runtime type-expression->datum gxc#type-expression->datum)
+         (%#define-runtime map-type-expressions gxc#map-type-expressions)
          (%#define-runtime optimizer-lookup-method gxc#optimizer-lookup-method)
          (%#define-runtime
           optimizer-top-level-method?

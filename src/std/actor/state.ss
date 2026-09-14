@@ -51,7 +51,7 @@
       (raise-contract-violation actor-local-host "actor host not set")))))
 
 (def (actor-local-host?)
-  => :t
+  => (Maybe ActorHost)
   (using (state (actor-local-state) : ActorState)
     (or state.host
         (current-actor-host)

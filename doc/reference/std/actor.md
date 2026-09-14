@@ -2,6 +2,21 @@
 
 Actor-oriented concurrent and distributed programming.
 
+## Nullable Host Results
+
+The current `:std/actor/host` and `:std/actor/state` APIs declare:
+
+```text
+(ActorHost-lookup host name) => (Maybe Handle)
+(actor-local-host?) => (Maybe ActorHost)
+```
+
+Lookup returns `#f` when the name is absent. `actor-local-host?` returns `#f` when
+no host is configured; otherwise its return contract provides an `ActorHost`
+interface view, adapting a raw implementation when necessary. It does not cache
+the host. `actor-local-host` remains the nonnullable, caching accessor and raises
+when no host is configured. The historical messaging API is documented below.
+
 ::: tip to use bindings from this package
 (import :std/actor)
 :::

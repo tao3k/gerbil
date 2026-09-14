@@ -15,7 +15,7 @@
                             (wd : :fixnum)
                             (name : :string)
                             (mask : :fixnum))
-     => :t
+     => (Maybe InotifyEvent)
      (cond
       ((null? events) #f)
       (else
@@ -30,7 +30,7 @@
                                 (wd : :fixnum)
                                 (name : :string)
                                 (mask : :fixnum))
-     => :t
+     => (Maybe InotifyEvent)
      (let (deadline (timeout->deadline 1))
        (let loop ()
          (let (events (inotify in deadline))

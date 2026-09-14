@@ -1008,7 +1008,7 @@ package: gerbil/core
   (defsystem-class-info :thread thread::t (:structure) thread?)
   (defsystem-class-info :thread-group thread-group::t (:subtyped) thread-group?)
   (defsystem-class-info :mutex mutex::t (:subtyped) mutex?)
-  (defsystem-class-info :condvar condvar::t (:subtyped) condvar?)
+  (defsystem-class-info :condvar condvar::t (:subtyped) condition-variable?)
   (defsystem-class-info :port port::t (:subtyped) port?)
   (defsystem-class-info :object-port object-port::t (:port) object-port?)
   (defsystem-class-info :character-port character-port::t (:object-port) character-port?)

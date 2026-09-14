@@ -39,6 +39,17 @@ namespace: gxc
 (defstruct (!alias !type) ()
   equal: #t)
 
+;; A value type, not a class or a callable descriptor.
+(defstruct (!nullable-type !type) (base)
+  equal: #t)
+
+(def (nullable-type type)
+  (cond
+   ((not type) #f)
+   ((!nullable-type? type) type)
+   ((memq (!type-id type) '(t false)) type)
+   (else (make-!nullable-type 'nullable type))))
+
 (defclass !signature (return effect arguments unchecked origin)
   final: #t equal: #t print: #t)
 
@@ -334,7 +345,18 @@ namespace: gxc
 (def (!type-subtype? type-a type-b)
   (and type-a type-b
        (or (eq? type-a type-b)
-           (eq? (!type-id type-b) 't)
+            (eq? (!type-id type-b) 't)
+            (and (!nullable-type? type-a)
+                 (not (!nullable-type? type-b))
+                 (!type-subtype? (!nullable-type-base type-a) type-b)
+                 (!type-subtype? (optimizer-resolve-class 'subtype 'false::t) type-b))
+            (and (!nullable-type? type-b)
+                 (or (eq? (!type-id type-a) 'false)
+                     (!type-subtype?
+                      (if (!nullable-type? type-a)
+                        (!nullable-type-base type-a)
+                        type-a)
+                      (!nullable-type-base type-b))))
            (and (!procedure? type-a)
                 (eq? (!type-id type-b) 'procedure))
            (and (!class? type-a)
@@ -448,6 +470,40 @@ namespace: gxc
 (def (optimizer-lookup-class-name klass)
   (hash-get (optimizer-info-classes (current-compile-optimizer-info)) klass))
 
+;; Type expressions are deliberately separate from class descriptor names.
+(def (optimizer-resolve-type-expression where expr)
+  (match expr
+    (['nullable base]
+     (nullable-type (optimizer-resolve-type-expression where base)))
+    (#f #f)
+    (else (optimizer-resolve-class where expr))))
+
+(def (optimizer-type-expression type)
+  (cond
+   ((!nullable-type? type)
+    (alet (base (optimizer-type-expression (!nullable-type-base type)))
+      ['nullable base]))
+   ((!procedure? type) 'procedure::t)
+   (else (optimizer-lookup-class-name type))))
+
+(def (type-expression->datum stx)
+  (ast-case stx ()
+    ((head base)
+     (eq? (stx-e #'head) 'nullable)
+     ['nullable (type-expression->datum #'base)])
+    (_ (identifier-symbol stx))))
+
+;; A compound rest type is one type expression, not two positional entries.
+(def (map-type-expressions proc types)
+  (ast-case types ()
+    ((head base)
+     (eq? (stx-e #'head) 'nullable)
+     (proc types))
+    ((head . tail)
+     (cons (proc #'head) (map-type-expressions proc #'tail)))
+    (() [])
+    (_ (proc types))))
+
 (def (optimizer-lookup-method type-t method)
   (!class-lookup-method (optimizer-resolve-class 'lookup-method type-t) method))
 
@@ -469,6 +525,8 @@ namespace: gxc
       (cons 'procedure
             (using (t :- !procedure)
               (and t.signature t.signature.return))))
+     ((!nullable-type? t)
+      (optimizer-type-expression t))
      ((!type? t)
       (!type-id t))
      (else #f)))

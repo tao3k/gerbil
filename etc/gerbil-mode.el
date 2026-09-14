@@ -250,6 +250,7 @@
                 cond-expand
                 for-each map foldl foldr
                 unwind-protect
+                unwind-protect!
                 )
               'scheme-indent-function 0)
 
@@ -346,7 +347,7 @@
                        "alet" "alet*"
                        "error" "raise"
                        "let/cc" "let/esc"
-                       "unwind-protect"
+                       "unwind-protect" "unwind-protect!"
                        "begin-foreign" "begin-ffi"
                        "cut"
                        "with" "with*"

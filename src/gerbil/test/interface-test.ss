@@ -2,7 +2,8 @@
 ;;; © vyzo
 ;;; interface unit-test
 (import :std/test
-        :std/interface)
+        :std/interface
+        (only-in :gerbil/runtime/error contract-violation-error?))
 (export interface-test)
 
 (defstruct X (x))
@@ -52,6 +53,21 @@
 
 (def interface-test
   (test-suite "test :std/interface"
+    (test-case "nullable interface binding"
+      (def evaluations 0)
+      (def bodies 0)
+      (for-each
+        (lambda (value)
+          (using (obj (begin (set! evaluations (+ evaluations 1)) value) :? A)
+            (set! bodies (+ bodies 1))
+            (check (if obj (obj.a 1) #f) => (and value 2))
+            (check (not obj) => (not value))))
+        (list #f (make-X 1) (A (make-X 1))))
+      (check evaluations => 3)
+      (check bodies => 3)
+      (check (:? #f A) => #f)
+      (check-exception (using (obj 42 :? A) obj) interface-cast-error?)
+      (check-exception (using (obj #f :? A) (obj.?a 1)) contract-violation-error?))
     (test-case "typed method positional and keyword arguments"
       (using (obj (KeywordMethod (make-X 0)) : KeywordMethod)
         (check (obj.combine 3 4) => 14)

@@ -1260,7 +1260,7 @@
   (define |gerbil/core/mop~MOP-system-classes[1]#_g29043_|
     (##structure
      gx#syntax-quote::t
-     'condvar?
+     'condition-variable?
      #f
      (gx#current-expander-context)
      '()))

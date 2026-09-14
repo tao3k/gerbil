@@ -160,6 +160,59 @@ package: gerbil/compiler
   (declare-type gxc#&!alias-id (@accessor gxc#!alias::t id #f))
   (declare-type gxc#&!alias-id-set! (@mutator gxc#!alias::t id #f))
   (declare-class
+   gxc#!nullable-type::t
+   (@class gxc#!nullable-type::t
+           (gxc#!type::t)
+           (gxc#!type::t object::t t::t)
+           (base)
+           (id base)
+           #f
+           #t
+           #f
+           #f
+           #f
+           #f))
+  (declare-type
+   gxc#!nullable-type::t
+   (optimizer-resolve-class '(typedecl gxc#!nullable-type::t) 'class::t))
+  (declare-type gxc#!nullable-type? (@predicate gxc#!nullable-type::t))
+  (declare-type gxc#make-!nullable-type (@constructor gxc#!nullable-type::t))
+  (declare-type
+   gxc#!nullable-type-base
+   (@accessor gxc#!nullable-type::t base #t))
+  (declare-type gxc#!nullable-type-id (@accessor gxc#!nullable-type::t id #t))
+  (declare-type
+   gxc#!nullable-type-base-set!
+   (@mutator gxc#!nullable-type::t base #t))
+  (declare-type
+   gxc#!nullable-type-id-set!
+   (@mutator gxc#!nullable-type::t id #t))
+  (declare-type
+   gxc#&!nullable-type-base
+   (@accessor gxc#!nullable-type::t base #f))
+  (declare-type gxc#&!nullable-type-id (@accessor gxc#!nullable-type::t id #f))
+  (declare-type
+   gxc#&!nullable-type-base-set!
+   (@mutator gxc#!nullable-type::t base #f))
+  (declare-type
+   gxc#&!nullable-type-id-set!
+   (@mutator gxc#!nullable-type::t id #f))
+  (declare-type
+   gxc#nullable-type
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-class
    gxc#!signature::t
    (@class gxc#!signature::t
            ()
@@ -283,7 +336,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (t::t #f)
+             (t::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__make-!procedure
              origin:
@@ -313,7 +366,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!procedure::t #f)
+             (gxc#!procedure::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!procedure-signature-set!
              origin:
@@ -506,7 +559,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!predicate::t #f)
+             (gxc#!predicate::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!predicate-signature-set!
              origin:
@@ -570,7 +623,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!constructor::t #f)
+             (gxc#!constructor::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!constructor-signature-set!
              origin:
@@ -650,7 +703,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!accessor::t #f)
+             (gxc#!accessor::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!accessor-signature-set!
              origin:
@@ -726,7 +779,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!mutator::t #f)
+             (gxc#!mutator::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!mutator-signature-set!
              origin:
@@ -848,7 +901,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!lambda::t #f)
+             (gxc#!lambda::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!lambda-signature-set!
              origin:
@@ -924,7 +977,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!case-lambda::t #f)
+             (gxc#!case-lambda::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!case-lambda-signature-set!
              origin:
@@ -1008,7 +1061,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!kw-lambda::t #f)
+             (gxc#!kw-lambda::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!kw-lambda-signature-set!
              origin:
@@ -1106,7 +1159,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!kw-lambda-primary::t #f)
+             (gxc#!kw-lambda-primary::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!kw-lambda-primary-signature-set!
              origin:
@@ -1190,7 +1243,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!primitive-predicate::t #f)
+             (gxc#!primitive-predicate::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!primitive-predicate-signature-set!
              origin:
@@ -1317,7 +1370,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!primitive-lambda::t #f)
+             (gxc#!primitive-lambda::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!primitive-lambda-signature-set!
              origin:
@@ -1412,7 +1465,7 @@ package: gerbil/compiler
              effect:
              #f
              arguments:
-             (gxc#!primitive-case-lambda::t #f)
+             (gxc#!primitive-case-lambda::t (nullable gxc#!signature::t))
              unchecked:
              gxc#__!primitive-case-lambda-signature-set!
              origin:
@@ -2035,6 +2088,66 @@ package: gerbil/compiler
   (declare-type
    gxc#optimizer-lookup-class-name
    (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#optimizer-resolve-type-expression
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#optimizer-type-expression
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#type-expression->datum
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#map-type-expressions
+   (@lambda 2
             #f
             signature:
             (return:

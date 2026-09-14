@@ -1644,7 +1644,7 @@ package: gerbil/compiler
             #f
             signature:
             (return:
-             builtin::t
+             (nullable string::t)
              effect:
              #f
              arguments:

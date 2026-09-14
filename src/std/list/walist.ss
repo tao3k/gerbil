@@ -83,8 +83,8 @@
 (interface AListOps
   (wrap) => :procedure
   (test) => :procedure
-  (assoc k) => :t
-  (assf (f : :procedure)) => :t
+  (assoc k) => (Maybe :pair)
+  (assf (f : :procedure)) => (Maybe :pair)
   )
 
 (interface PureAListOps
@@ -194,11 +194,11 @@
   wa)
 
 (def (wassoc (wa : AList) k)
-  ;; => Maybe :pair
+  => (Maybe :pair)
   (__wa-assoc wa k))
 
 (def (wassf (wa : AList) (proc : :procedure))
-  ;; => Maybe :pair
+  => (Maybe :pair)
   (__wa-assf wa proc))
 
 (def (wakey? (w : ConcreteAList) k) => :boolean

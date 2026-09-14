@@ -49,7 +49,8 @@ namespace: gxc
         ((hash-get special-procedure-optimizers rator-id)
          => (lambda (optimize)
               (optimize self stx)))
-        ((or (not rator-type)
+         ((or (not rator-type)
+              (!nullable-type? rator-type)
              (eq? (!type-id rator-type) 't))
          (xform-call% self stx))
         ((!procedure? rator-type)
@@ -144,7 +145,8 @@ namespace: gxc
                  (compile-e self #'rator)
                  (map (cut compile-e self <>) #'(rand ...)))
           stx))
-        ((or (not rator-type) (memq (!type-id rator-type) '(t procedure)))
+         ((or (not rator-type) (!nullable-type? rator-type)
+              (memq (!type-id rator-type) '(t procedure)))
          (xform-call% self stx))
         (else
          (raise-compile-error "illegal application; not a procedure" stx rator-type)))))))
@@ -158,8 +160,9 @@ namespace: gxc
        (cond
         ((not (!interface? descriptor-type))
          (raise-compile-error "illegal cast; not an interface type" stx descriptor-type))
-        ((and object-type
-              (eq? (!type-id descriptor-type) (!type-id object-type)))
+         ((and object-type
+               (!type-subtype? object-type
+                 (optimizer-resolve-class stx (!type-id descriptor-type))))
          ;; eliminate the cast
          (compile-e self #'object))
         (else
@@ -204,7 +207,7 @@ namespace: gxc
     (alet* ((signature self.signature)
             (argument-types (!signature-arguments signature)))
       (let (argument-types
-            (map* (lambda (t) (and t (optimizer-resolve-class stx t)))
+             (map-type-expressions (lambda (t) (and t (optimizer-resolve-type-expression stx t)))
                   argument-types))
         (let loop ((rest-args args) (rest-types argument-types) (result #t))
           (match rest-args
@@ -239,7 +242,7 @@ namespace: gxc
               ['%#begin object '(%#quote #t)])
             stx))
 	  (incompatible?
-	   ['%#quote #f])
+	   (xform-wrap-source ['%#begin object '(%#quote #f)] stx))
 	  (else
            (xform-call% ctx stx))))))))
 
@@ -263,7 +266,7 @@ namespace: gxc
                 ['%#begin object '(%#quote #t)])
               stx))
 	    (incompatible?
-	     ['%#quote #f])
+	     (xform-wrap-source ['%#begin object '(%#quote #f)] stx))
             (klass.final?
              (xform-wrap-source
               ['%#struct-direct-instance? ['%#quote klass.id] object]
@@ -323,6 +326,7 @@ namespace: gxc
 
        ((!type-subtype? expr-type type)
 	#f)				; happy!
+       ((or (!nullable-type? expr-type) (!nullable-type? type)) #f)
 
        ;; fuzzy rules for types that might be compatible and should be checked
        ;; at runtime -- we have incomplete type info in general, and runtime
@@ -363,6 +367,7 @@ namespace: gxc
        ((!abort? expr-type)) ; runtime error, type is satisfied because there is no value
 
        ((!type-subtype? expr-type type)) ; happy!
+       ((or (!nullable-type? expr-type) (!nullable-type? type)) #f)
 
        ;; fuzzy rules for types that might be compatible and should be checked
        ;; at runtime -- we have incomplete type info in general, and runtime
@@ -743,12 +748,27 @@ namespace: gxc
     (xform-call% ctx stx)))
 
 (def (apply-check-return-type-begin-annotation% self stx)
-  (ast-case stx (@type.signature)
+  (ast-case stx (@type.signature @type.return)
+    ((_ (@type.return declared) body)
+     (let ((type (optimizer-resolve-type-expression stx (type-expression->datum #'declared)))
+           (expr-type (apply-basic-expression-type #'body)))
+       (cond
+        ((!nullable-type? type)
+         ;; Check before adaptation, allowing false overlap and interface casts.
+         (unless (and expr-type
+                      (!type-subtype? (optimizer-resolve-class stx 'false::t) expr-type))
+           (check-expression-type! stx #'body (!nullable-type-base type))))
+        ((memq (!type-id type) '(t void)))
+        ;; Preserve typed def/c's existing ordinary return assertions, except
+        ;; that nullable evidence cannot prove an ordinary nonnullable result.
+        ((and expr-type (!nullable-type? expr-type))
+         (check-return-type! stx #'body type)))
+       (compile-e self #'body)))
     ((_ (@type.signature signature ...) body)
      (cond
       ((member return: #'(signature ...) stx-eq?)
        => (lambda (tail)
-            (let (type (optimizer-resolve-class stx (identifier-symbol (cadr tail))))
+             (let (type (optimizer-resolve-type-expression stx (type-expression->datum (cadr tail))))
               (check-return-type! stx #'body type)
               (compile-e self #'body))))
       (else
@@ -792,43 +812,23 @@ namespace: gxc
       (if (stx-e #'val)
 	(compile-e self #'K)
 	(compile-e self #'E)))
-     ((_ (%#call (%#ref pred) (%#ref obj)) K E)
-      (cond
-       ((optimizer-lookup-type (identifier-symbol #'pred))
-	=> (lambda (pred-type)
-             (if (or (!predicate? pred-type)
-                     (!primitive-predicate? pred-type))
-               (let* ((test
-                       (xform-wrap-apply #'(%#call (%#ref pred) (%#ref obj))
-                                         stx self))
-                      (K
-                       (delay
-                         (parameterize ((current-compile-path-type
-                                         (cons (cons (identifier-symbol #'obj)
-                                                     (optimizer-resolve-class stx (!type-id pred-type)))
-                                               (current-compile-path-type))))
-                           (compile-e self #'K))))
-                      (E (delay (compile-e self #'E))))
-                 (ast-case test (%#quote)
-                   ((%#quote val)
-                    (if (stx-e #'val)
-                      (force K)
-                      (force E)))
-                   (_ (xform-wrap-source
-                       ['%#if test (force K) (force E)]
-                       stx))))
-               (xform-operands self stx))))
-       (else
-	(xform-operands self stx))))
-     ((_ (%#call (%#ref -not) expr) K E)
+      ((_ (%#call (%#ref -not) expr) K E)
       (runtime-identifier=? #'-not 'not)
       (optimize-if%
        self
        (xform-wrap-source
 	#'(%#if expr E K)
 	stx)))
-     ((_ test K E)
-      (xform-operands self stx)))))
+      ((_ test K E)
+       (let-values (((true-path false-path) (expression-path-types #'test)))
+         (let ((test (compile-e self #'test))
+               (K (delay (parameterize ((current-compile-path-type true-path))
+                           (compile-e self #'K))))
+               (E (delay (parameterize ((current-compile-path-type false-path))
+                           (compile-e self #'E)))))
+           (ast-case test (%#quote)
+             ((%#quote val) (if (stx-e #'val) (force K) (force E)))
+             (_ (xform-wrap-source ['%#if test (force K) (force E)] stx)))))))))
 
 (def (check-contract-violation! stx expr)
   (ast-case expr (%#begin-annotation @contract-violation)

@@ -15,7 +15,7 @@
         LOCK_SH LOCK_EX LOCK_UN)
 
 (def (flock (dev : OSDevice) (op : :fixnum))
-  => :t
+  => (Maybe :fixnum)
   (do-check-device-open flock dev
     (flock-fd dev.fd op)))
 
@@ -28,7 +28,7 @@
   (flock-poll (lambda () (flock dev op)) op timeo dev))
 
 (def (flock-fd (fd : :fixnum) (op : :fixnum))
-  => :t
+  => (Maybe :fixnum)
   (let (result
         (do-syscall (__flock-syscall fd (fxior op LOCK_NB))
                     EAGAIN EWOULDBLOCK))

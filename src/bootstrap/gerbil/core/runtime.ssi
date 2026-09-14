@@ -1611,6 +1611,7 @@ namespace: gerbil/core/runtime
                     (make-atomic-promise make-atomic-promise)
                     (call-with-parameters call-with-parameters)
                     (with-unwind-protect with-unwind-protect)
+                    (with-unwind-protect! with-unwind-protect!)
                     (keyword-dispatch keyword-dispatch)
                     (keyword-rest keyword-rest)
                     (gerbil-system-manifest gerbil-system-manifest)

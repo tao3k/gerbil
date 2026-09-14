@@ -1,22 +1,22 @@
 (declare (block) (standard-bindings) (extended-bindings))
 (begin
-  (define gerbil/core/contract~TypeEnv::timestamp 1789188899)
+  (define gerbil/core/contract~TypeEnv::timestamp 1789371509)
   (begin
     (define gerbil/core/contract~TypeEnv#type-env::t
       (make-class-type
        'gerbil/core/contract~TypeEnv#type-env::t
        'type-env
        (list)
-       '(var type checked? super)
+       '(var type checked? nullable? super)
        (cons (cons 'struct: '#t) (cons (cons 'final: '#t) '()))
        '#f))
     (define gerbil/core/contract~TypeEnv#type-env?
       (make-class-predicate gerbil/core/contract~TypeEnv#type-env::t))
     (define gerbil/core/contract~TypeEnv#make-type-env
-      (lambda _%$args55834%_
+      (lambda _%$args56440%_
         (apply make-instance
                gerbil/core/contract~TypeEnv#type-env::t
-               _%$args55834%_)))
+               _%$args56440%_)))
     (define gerbil/core/contract~TypeEnv#type-env-var
       (make-class-slot-accessor gerbil/core/contract~TypeEnv#type-env::t 'var))
     (define gerbil/core/contract~TypeEnv#type-env-type
@@ -27,6 +27,10 @@
       (make-class-slot-accessor
        gerbil/core/contract~TypeEnv#type-env::t
        'checked?))
+    (define gerbil/core/contract~TypeEnv#type-env-nullable?
+      (make-class-slot-accessor
+       gerbil/core/contract~TypeEnv#type-env::t
+       'nullable?))
     (define gerbil/core/contract~TypeEnv#type-env-super
       (make-class-slot-accessor
        gerbil/core/contract~TypeEnv#type-env::t
@@ -39,6 +43,10 @@
       (make-class-slot-mutator
        gerbil/core/contract~TypeEnv#type-env::t
        'checked?))
+    (define gerbil/core/contract~TypeEnv#type-env-nullable?-set!
+      (make-class-slot-mutator
+       gerbil/core/contract~TypeEnv#type-env::t
+       'nullable?))
     (define gerbil/core/contract~TypeEnv#type-env-super-set!
       (make-class-slot-mutator
        gerbil/core/contract~TypeEnv#type-env::t
@@ -55,6 +63,10 @@
       (make-class-slot-unchecked-accessor
        gerbil/core/contract~TypeEnv#type-env::t
        'checked?))
+    (define gerbil/core/contract~TypeEnv#&type-env-nullable?
+      (make-class-slot-unchecked-accessor
+       gerbil/core/contract~TypeEnv#type-env::t
+       'nullable?))
     (define gerbil/core/contract~TypeEnv#&type-env-super
       (make-class-slot-unchecked-accessor
        gerbil/core/contract~TypeEnv#type-env::t
@@ -71,6 +83,10 @@
       (make-class-slot-unchecked-mutator
        gerbil/core/contract~TypeEnv#type-env::t
        'checked?))
+    (define gerbil/core/contract~TypeEnv#&type-env-nullable?-set!
+      (make-class-slot-unchecked-mutator
+       gerbil/core/contract~TypeEnv#type-env::t
+       'nullable?))
     (define gerbil/core/contract~TypeEnv#&type-env-super-set!
       (make-class-slot-unchecked-mutator
        gerbil/core/contract~TypeEnv#type-env::t
@@ -79,22 +95,22 @@
       (lambda ()
         (gx#syntax-local-value (gx#syntax-local-introduce '@@type) false)))
     (define gerbil/core/contract~TypeEnv#type-env-lookup
-      (lambda (_%var55824%_)
-        (let _%loop55826%_ ((_%te55828%_
+      (lambda (_%var56430%_)
+        (let _%loop56432%_ ((_%te56434%_
                              (gerbil/core/contract~TypeEnv#current-type-env)))
-          (if (not _%te55828%_)
-              '#f
+          (if _%te56434%_
               (if (gx#free-identifier=?
-                   _%var55824%_
+                   _%var56430%_
                    (##direct-structure-ref
-                    _%te55828%_
+                    _%te56434%_
                     '1
                     gerbil/core/contract~TypeEnv#type-env::t
                     '#f))
-                  _%te55828%_
-                  (_%loop55826%_
+                  _%te56434%_
+                  (_%loop56432%_
                    (##direct-structure-ref
-                    _%te55828%_
-                    '4
+                    _%te56434%_
+                    '5
                     gerbil/core/contract~TypeEnv#type-env::t
-                    '#f)))))))))
+                    '#f)))
+              '#f))))))

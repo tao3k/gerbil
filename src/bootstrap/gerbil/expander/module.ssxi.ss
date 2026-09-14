@@ -596,7 +596,7 @@ package: gerbil/expander
             #f
             signature:
             (return:
-             builtin::t
+             (nullable string::t)
              effect:
              #f
              arguments:
@@ -1040,7 +1040,7 @@ package: gerbil/expander
             #f
             signature:
             (return:
-             builtin::t
+             (nullable string::t)
              effect:
              #f
              arguments:

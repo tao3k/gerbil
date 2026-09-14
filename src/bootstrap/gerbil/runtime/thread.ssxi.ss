@@ -227,7 +227,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (procedure::t list::t t::t #f)
+             (procedure::t list::t t::t (nullable thread-group::t))
              unchecked:
              __spawn-actor
              origin:
@@ -466,16 +466,14 @@ package: gerbil/runtime
    (optimizer-resolve-class '(typedecl __thread-locals-mutex) 'mutex::t))
   (declare-type
    __unhandled-actor-exception-hook
-   (optimizer-resolve-class
-    '(typedecl __unhandled-actor-exception-hook)
-    'builtin::t))
+   (optimizer-resolve-type-expression 'typedecl '(nullable procedure::t)))
   (declare-type
    unhandled-actor-exception-hook
    (@lambda 0
             #f
             signature:
             (return:
-             builtin::t
+             (nullable procedure::t)
              effect:
              #f
              arguments:
@@ -509,7 +507,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (#f)
+             ((nullable procedure::t))
              unchecked:
              __unhandled-actor-exception-hook-set!
              origin:

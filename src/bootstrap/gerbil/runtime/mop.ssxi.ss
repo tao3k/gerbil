@@ -164,7 +164,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (t::t)
+             (#f)
              unchecked:
              __type-opaque?
              origin:
@@ -224,7 +224,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (t::t)
+             (#f)
              unchecked:
              __type-extensible?
              origin:
@@ -835,7 +835,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (symbol::t symbol::t list::t list::t list::t t::t)
+             (symbol::t symbol::t list::t list::t list::t #f)
              unchecked:
              __make-class-type
              origin:

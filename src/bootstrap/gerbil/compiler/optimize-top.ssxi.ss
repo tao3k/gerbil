@@ -804,6 +804,21 @@ package: gerbil/compiler
              origin:
              gerbil/compiler/optimize-top)))
   (declare-type
+   gxc#expression-path-types
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             values::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-top)))
+  (declare-type
    gxc#refine-type-define-values%
    (@lambda 2
             #f
@@ -1449,7 +1464,7 @@ package: gerbil/compiler
             #f
             signature:
             (return:
-             boolean::t
+             (nullable true::t)
              effect:
              #f
              arguments:
@@ -1464,7 +1479,7 @@ package: gerbil/compiler
             #f
             signature:
             (return:
-             boolean::t
+             (nullable true::t)
              effect:
              #f
              arguments:
@@ -1479,7 +1494,7 @@ package: gerbil/compiler
             #f
             signature:
             (return:
-             boolean::t
+             (nullable true::t)
              effect:
              #f
              arguments:

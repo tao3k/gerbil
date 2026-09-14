@@ -200,9 +200,9 @@ namespace: gxc
          (lambda (assertion)
            (ast-case assertion ()
              ((id type)
-              (and (identifier? #'id) (identifier? #'type))
+               (identifier? #'id)
               (optimizer-declare-type! (identifier-symbol #'id)
-                                       (optimizer-resolve-class stx (identifier-symbol #'type))
+                                        (optimizer-resolve-type-expression stx (type-expression->datum #'type))
                                        #t))
              (_ (raise-compile-error "malformed type assertion" stx assertion))))
          #'(assertion ...))
@@ -327,32 +327,40 @@ namespace: gxc
        (compile-e self #'expr)))))
 
 (def (apply-path-type-if% self stx)
-  (ast-case stx (%#call %#ref)
-    ((_ (%#call (%#ref pred) (%#ref obj)) K E)
-     (cond
-      ((optimizer-lookup-type (identifier-symbol #'pred))
-       => (lambda (pred-type)
-            (if (or (!predicate? pred-type)
-                    (!primitive-predicate? pred-type))
-              (begin
-                (parameterize ((current-compile-path-type
-                                (cons (cons (identifier-symbol #'obj)
-                                            (optimizer-resolve-class stx (!type-id pred-type)))
-                                      (current-compile-path-type))))
-                  (compile-e self #'K))
-                (compile-e self #'E))
-              (apply-operands self stx))))
-      (else
-       (apply-operands self stx))))
-    ((_ (%#call (%#ref -not) expr) K E)
-     (runtime-identifier=? #'-not 'not)
-     (apply-path-type-if%
-      self
-      (xform-wrap-source
-       #'(%#if expr E K)
-       stx)))
+  (ast-case stx ()
     ((_ test K E)
-     (apply-operands self stx))))
+     (let-values (((true-path false-path) (expression-path-types #'test)))
+       (compile-e self #'test)
+       (parameterize ((current-compile-path-type true-path))
+         (compile-e self #'K))
+       (parameterize ((current-compile-path-type false-path))
+         (compile-e self #'E))))))
+
+;; Facts apply only to stable bindings, including when a branch creates a closure.
+(def (expression-path-types test)
+  (def path (current-compile-path-type))
+  (ast-case test (%#call %#ref)
+    ((%#call (%#ref -not) expr)
+     (runtime-identifier=? #'-not 'not)
+     (let-values (((true-path false-path) (expression-path-types #'expr)))
+       (values false-path true-path)))
+    ((%#ref obj)
+     (not (mutable-binding? #'obj))
+     (let (type (optimizer-resolve-type (identifier-symbol #'obj)))
+       (if (!nullable-type? type)
+         (values (cons (cons (identifier-symbol #'obj) (!nullable-type-base type)) path)
+                 (cons (cons (identifier-symbol #'obj)
+                             (optimizer-resolve-class test 'false::t)) path))
+         (values path path))))
+    ((%#call (%#ref pred) (%#ref obj))
+     (not (mutable-binding? #'obj))
+     (let (type (optimizer-resolve-type (identifier-symbol #'pred)))
+       (if (or (!predicate? type) (!primitive-predicate? type))
+         (values (cons (cons (identifier-symbol #'obj)
+                             (optimizer-resolve-class test (!type-id type))) path)
+                 path)
+         (values path path))))
+    (_ (values path path))))
 
 ;; apply-refine-type-info
 (def (refine-type-define-values% self stx)
@@ -446,7 +454,7 @@ namespace: gxc
 (def (basic-expression-type-annotation-typedecl stx ann)
   (ast-case ann ()
     ((_ type-id)
-     (optimizer-resolve-class stx (identifier-symbol #'type-id)))))
+     (optimizer-resolve-type-expression stx (type-expression->datum #'type-id)))))
 
 (def (basic-expression-type-annotation-mop.class stx ann)
   (ast-case ann ()
@@ -581,7 +589,7 @@ namespace: gxc
              signature: signature)))
 
   (def (return-type-e clauses)
-    (let loop ((rest clauses) (result #f))
+    (let loop ((rest clauses) (result (make-!abort)))
       (match rest
         ([clause . rest]
          (using (clause :- !lambda)
@@ -589,11 +597,10 @@ namespace: gxc
                    (using (signature clause.signature :- !signature)
                      (and signature
                           signature.return
-                          (optimizer-resolve-class stx signature.return))))
-                  (result
-                   (if (and result return)
-                     (greatest-common-type stx result return)
-                     (or result return))))
+                           (optimizer-resolve-type-expression stx signature.return))))
+                   (result
+                    (greatest-common-type stx result
+                      (or return (optimizer-resolve-class stx 't::t)))))
              (loop rest result))))
         (else result))))
 
@@ -604,7 +611,7 @@ namespace: gxc
        (make-!case-lambda
         clauses
         signature: (and return
-                        (alet (return-type (optimizer-lookup-class-name return))
+                         (alet (return-type (optimizer-type-expression return))
                           (make-!signature return: return-type))))))))
 
 (def basic-expression-type-special (make-hash-table-eq))
@@ -634,7 +641,7 @@ namespace: gxc
 (defmethod {return-type !procedure}
   (lambda (self ctx stx args)
     (and self.signature
-         (optimizer-resolve-class stx self.signature.return))))
+         (optimizer-resolve-type-expression stx self.signature.return))))
 
 (defmethod {apply-return-type !procedure}
   !procedure::return-type)
@@ -751,45 +758,14 @@ namespace: gxc
      (optimizer-resolve-type (identifier-symbol #'id)))))
 
 (def (basic-expression-type-if% self stx)
-  (def (type-e type-K type-E)
-    (cond
-     ((!abort? type-E) type-K)
-     ((!abort? type-K) type-E)
-     (else
-      (greatest-common-type stx type-K type-E))))
-
-  (def (basic-type-e K E)
-    (let ((type-K (apply-basic-expression-type K))
-          (type-E (apply-basic-expression-type E)))
-      (type-e type-K type-E)))
-
-  (ast-case stx (%#call %#ref)
-    ((_ (%#call (%#ref pred) (%#ref obj)) K E)
-     (cond
-      ((optimizer-lookup-type (identifier-symbol #'pred))
-       => (lambda (pred-type)
-            (if (or (!predicate? pred-type)
-                    (!primitive-predicate? pred-type))
-              (let* ((type-K
-                      (parameterize ((current-compile-path-type
-                                      (cons (cons (identifier-symbol #'obj)
-                                                  (optimizer-resolve-class stx (!type-id pred-type)))
-                                            (current-compile-path-type))))
-                        (apply-basic-expression-type #'K)))
-                     (type-E (apply-basic-expression-type #'E)))
-                (type-e type-K type-E))
-              (basic-type-e #'K #'E))))
-      (else
-       (basic-type-e #'K #'E))))
-    ((_ (%#call (%#ref -not) expr) K E)
-     (runtime-identifier=? #'-not 'not)
-     (basic-expression-type-if%
-      self
-      (xform-wrap-source
-       #'(%#if expr E K)
-       stx)))
+  (ast-case stx ()
     ((_ test K E)
-     (basic-type-e #'K #'E))))
+     (let-values (((true-path false-path) (expression-path-types #'test)))
+       (greatest-common-type stx
+         (parameterize ((current-compile-path-type true-path))
+           (apply-basic-expression-type #'K))
+         (parameterize ((current-compile-path-type false-path))
+           (apply-basic-expression-type #'E)))))))
 
 (def (greatest-common-type stx type-a type-b)
   (def (common-e left right)
@@ -821,11 +797,20 @@ namespace: gxc
 
   (cond
    ((or (not type-a) (not type-b))
-    (optimizer-resolve-class stx 't::t))
+     (optimizer-resolve-class stx 't::t))
+   ((!abort? type-a) type-b)
+   ((!abort? type-b) type-a)
    ((!type-subtype? type-a type-b)
     type-b)
    ((!type-subtype? type-b type-a)
-    type-a)
+     type-a)
+   ((eq? (!type-id type-a) 'false) (nullable-type type-b))
+   ((eq? (!type-id type-b) 'false) (nullable-type type-a))
+   ((or (!nullable-type? type-a) (!nullable-type? type-b))
+    (nullable-type
+     (greatest-common-type stx
+       (if (!nullable-type? type-a) (!nullable-type-base type-a) type-a)
+       (if (!nullable-type? type-b) (!nullable-type-base type-b) type-b))))
    ((and (!class? type-a) (!class? type-b))
     (let* ((precedence-list-a (!class-precedence-list type-a))
            (precedence-list-b (!class-precedence-list type-b)))
@@ -944,7 +929,7 @@ namespace: gxc
              ((!procedure? return-type)
               (make-!signature return: 'procedure::t
                                origin: (expander-context-id (current-expander-context))))
-             ((optimizer-lookup-class-name return-type)
+              ((optimizer-type-expression return-type)
               => (lambda (return-type-name)
                    (make-!signature return: return-type-name
                                     origin: (expander-context-id (current-expander-context)))))
@@ -960,13 +945,13 @@ namespace: gxc
           (case (stx-e key)
             ((return:)
              (loop rest
-                   (cons* return: (identifier-symbol arg) result)))
+                    (cons* return: (type-expression->datum arg) result)))
             ((effect:)
              (loop rest
                    (cons* effect: (and arg (map stx-e arg)) result)))
             ((arguments:)
              (loop rest
-                   (cons* arguments: (map* identifier-symbol arg) result)))
+                    (cons* arguments: (map-type-expressions type-expression->datum arg) result)))
             ((unchecked:)
              (loop rest
                    (cons* unchecked: (identifier-symbol arg) result)))

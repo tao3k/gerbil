@@ -214,6 +214,7 @@ namespace: gxc
           gxc#collect-top-level-type-call%)
          (%#define-runtime collect-type-setq% gxc#collect-type-setq%)
          (%#define-runtime apply-path-type-if% gxc#apply-path-type-if%)
+         (%#define-runtime expression-path-types gxc#expression-path-types)
          (%#define-runtime
           refine-type-define-values%
           gxc#refine-type-define-values%)

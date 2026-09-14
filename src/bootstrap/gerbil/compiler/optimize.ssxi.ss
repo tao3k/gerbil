@@ -236,6 +236,21 @@ package: gerbil/compiler
              origin:
              gerbil/compiler/optimize)))
   (declare-type
+   gxc#!nullable-type::typedecl
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             (t::t)
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize)))
+  (declare-type
    gxc#!alias::typedecl
    (@lambda 1
             #f

@@ -12,7 +12,7 @@
 (def !NoTimeout (IOTimeout #f))
 
 (interface AbsTimeout
-  (abs-timeout) => :t ;; (Maybe :flonum)
+  (abs-timeout) => :t ;; false, absolute seconds, or a time object
   )
 
 (defcall-interface-method AbsTimeout abs-timeout

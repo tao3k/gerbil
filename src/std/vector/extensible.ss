@@ -90,7 +90,7 @@
 (def (ExtensibleVector-set-fill-pointer! (e : ExtensibleVector)
                                          (fp :~ nonnegative-fixnum? :- :fixnum)
                                          (iv #f)
-                                         (extend #t)) => :fixnum
+                                         (extend #t)) => (Maybe :fixnum)
   (let (l (vector-length e.vector))
     (let/cc return
       (when (fx> fp l)
@@ -107,7 +107,7 @@
                              x
                              (iv #f)
                              (extend #t))
-  => :fixnum
+  => (Maybe :fixnum)
   (let (i e.fill-pointer)
     (and (__ExtensibleVector-set-fill-pointer! e (fx1+ i) iv extend)
          (begin
@@ -244,7 +244,7 @@
 (def (ExtensibleBitVector-set-fill-pointer! (e : ExtensibleBitVector)
                                             (fp :~ nonnegative-fixnum?)
                                             (iv :~ uint1? :- :fixnum := 0)
-                                            (extend #t)) => :fixnum
+                                            (extend #t)) => (Maybe :fixnum)
   (let ((l (u8vector-length e.bits))
         (bl (n-bits->n-u8 fp)))
     (let/cc return
@@ -261,7 +261,7 @@
 (def (ExtensibleBitVector-push! (e : ExtensibleBitVector)
                                 (x :~ uint1? :- :fixnum)
                                 (iv :~ uint1? :- :fixnum := 0)
-                                (extend #t)) => :fixnum
+                                (extend #t)) => (Maybe :fixnum)
   (let (i e.fill-pointer)
     (and (__ExtensibleBitVector-set-fill-pointer! e (fx1+ i) iv extend)
          (begin

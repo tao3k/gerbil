@@ -2333,7 +2333,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (t::t t::t)
+             (t::t #f)
              unchecked:
              __display-as-string
              origin:
@@ -2895,7 +2895,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (string::t t::t t::t t::t)
+             (string::t #f #f t::t)
              unchecked:
              __substring->bytes
              origin:
@@ -3071,7 +3071,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (string::t t::t t::t #f)
+             (string::t t::t #f (nullable fixnum::t))
              unchecked:
              __string-index
              origin:
@@ -3584,7 +3584,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (u8vector::t t::t t::t t::t)
+             (u8vector::t #f #f #f)
              unchecked:
              __read-u8vector
              origin:
@@ -3758,7 +3758,7 @@ package: gerbil/runtime
              effect:
              #f
              arguments:
-             (u8vector::t t::t t::t t::t)
+             (u8vector::t #f t::t #f)
              unchecked:
              __write-u8vector
              origin:

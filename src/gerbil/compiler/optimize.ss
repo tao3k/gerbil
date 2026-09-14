@@ -258,6 +258,10 @@ namespace: gxc
     ((_ ann body) '(begin))))
 
 ;; typedecls
+(defmethod {typedecl !nullable-type}
+  (lambda (self)
+    `(optimizer-resolve-type-expression 'typedecl ',(optimizer-type-expression self))))
+
 (defmethod {typedecl !alias}
   (lambda (self)
     ['@alias self.id]))

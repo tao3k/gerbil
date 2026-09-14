@@ -95,6 +95,8 @@ package: gerbil/core
   (import (phi: +1 InterfaceInfo))
   (export #t (phi: +1 #t))
 
+  (defrules Maybe ())
+
   (begin-syntax
     (defclass type-reference (identifier))
 
@@ -138,7 +140,25 @@ package: gerbil/core
          ((interface-info? t)
           (!runtime-type-descriptor t))
          (else
-          (raise-syntax-error #f "unexpected type; expected class, interface or type reference" stx id t))))))
+          (raise-syntax-error #f "unexpected type; expected class, interface or type reference" stx id t)))))
+
+    ;; Return expressions only: other type positions still require identifiers.
+    (def (resolve-return-type stx type)
+      (let loop ((type type) (maybe? #f))
+        (syntax-case type (Maybe)
+          ((Maybe base) (loop #'base #t))
+          ((Maybe . _)
+           (raise-syntax-error #f "invalid Maybe return type; expected (Maybe Type)" stx type))
+          (id (identifier? #'id)
+              (if (type-identifier? #'id)
+                (values #'id maybe?)
+                (raise-syntax-error #f "invalid return type; expected class, interface or type reference" stx type)))
+          (_ (raise-syntax-error #f "invalid return type; expected type identifier or (Maybe Type)" stx type)))))
+
+    (def (resolve-return-type->type-descriptor stx type)
+      (let* (((values base maybe?) (resolve-return-type stx type))
+             (descriptor (resolve-type->type-descriptor stx base)))
+        (if maybe? ['nullable descriptor] descriptor))))
 
   (defrules deftype ()
     ((_ reference-id type-id)
@@ -150,6 +170,34 @@ package: gerbil/core
 (module TypeCast
   (import TypeReference (phi: +1 InterfaceInfo))
   (export #t)
+
+  ;; Internal return adapter. Maybe always checks/adapts nonfalse results,
+  ;; including calls through unchecked interface dispatch wrappers.
+  (defsyntax (return-contract stx)
+    (syntax-case stx ()
+      ((_ expr type checked?)
+       (let ((values base maybe?) (resolve-return-type stx #'type))
+         (with-syntax ((base base))
+           (cond
+            (maybe? #'(return-contract expr type))
+            ((stx-e #'checked?) #'(: expr base))
+            (else #'(:- expr base))))))
+      ((_ expr type)
+       (let ((values base maybe?) (resolve-return-type stx #'type))
+         (if maybe?
+           (let (meta (resolve-type stx base))
+             (with-syntax ((base base)
+                           (klass (resolve-type->type-descriptor stx base)))
+               (if (and (class-type-info? meta) (eq? (!class-type-id meta) 'void))
+                 (with-syntax ((predicate (!class-type-predicate meta)))
+                   #'(begin-annotation (@type (nullable klass))
+                       (let (val (begin-annotation (@type.return (nullable klass)) expr))
+                         (if (or (not val) (predicate val))
+                           val
+                           (contract-violation! expr (predicate val) val)))))
+                 #'(:? (begin-annotation (@type.return (nullable klass)) expr) base))))
+           #'expr)))))
+
   ;; checked type cast
   (defsyntax (: stx)
     (syntax-case stx ()
@@ -213,8 +261,8 @@ package: gerbil/core
              (if (memq (!class-type-id meta)
                        ;; everything is t, void we don't need to check.
                        '(t void))
-               #'(begin-annotation (@type klass) expr)
-               #'(begin-annotation (@type klass)
+               #'(begin-annotation (@type (nullable klass)) expr)
+               #'(begin-annotation (@type (nullable klass))
                    (let (val expr)
                      (if (or (not val) (predicate val))
                        val
@@ -222,7 +270,7 @@ package: gerbil/core
           ((interface-info? meta)
            (with-syntax ((klass (!runtime-type-descriptor meta))
                          (cast-it (resolve-type->identifier stx #'type)))
-             #'(begin-annotation (@type klass)
+             #'(begin-annotation (@type (nullable klass))
                  (let (val expr)
                    (and val (cast-it val))))))
           (else
@@ -333,7 +381,7 @@ package: gerbil/core
 (module TypeEnv
   (import "expander")
   (export #t)
-  (defstruct type-env (var type checked? super)
+  (defstruct type-env (var type checked? nullable? super)
     final: #t)
 
   (def (current-type-env)
@@ -352,6 +400,13 @@ package: gerbil/core
 
   (defsyntax (using stx)
     (syntax-case stx (:~)
+      ((_ (id sigil Type flag) body ...)
+       (and (identifier? #'sigil)
+            (free-identifier=? #'sigil #':?)
+            (eq? (stx-e #'flag) 'unchecked:))
+       (if (interface-info? (resolve-type stx #'Type))
+         #'(with-interface (id :? Type unchecked:) body ...)
+         #'(with-class (id :? Type unchecked:) body ...)))
       ((_ (id expr ~ contract) body ...)
        (and (identifier? #'id)
             (identifier? #'~)
@@ -464,6 +519,12 @@ package: gerbil/core
           ((:~ pred-expr)
            #f))))
 
+    (def (!class-slot-nullable? klass slot)
+      (alet (contract (!class-slot-contract klass slot))
+        (stx-ormap (lambda (x)
+                    (and (identifier? x) (free-identifier=? x #':?)))
+                  contract)))
+
     (def (!class-slot-checked-mutator-contract? klass slot)
       (alet (contract (!class-slot-contract klass slot))
         (syntax-case contract (:~ : :- ::- :?)
@@ -498,20 +559,26 @@ package: gerbil/core
           (cons (stx-identifier id (car parts))
                 (map string->symbol (cdr parts))))))
 
-    (def (get-slot-accessor stx klass-or-id slot)
+    (def (get-slot-accessor stx klass-or-id slot (checked? #f))
       (let* ((klass (if (identifier? klass-or-id)
                       (resolve-type stx klass-or-id)
                       klass-or-id)))
         (cond
-         ((agetq slot (!class-type-unchecked-accessors klass)))
+         ((agetq slot (if checked?
+                       (!class-type-accessors klass)
+                       (!class-type-unchecked-accessors klass))))
          ((agetq slot (or (!class-type-slot-offsets klass) []))
           => (lambda (offset)
                (with-syntax ((rtd (!runtime-type-descriptor klass))
                              (slot slot)
-                             (offset offset))
-                 (syntax/loc stx
-                   (lambda ($obj)
-                     (##unchecked-structure-ref $obj offset rtd 'slot))))))
+                             (offset offset)
+                             (predicate (!class-type-predicate klass)))
+                 ;; System classes have shadow descriptors, so check with their
+                 ;; predicate rather than Gambit's structure type-id check.
+                 (with-syntax ((object (if checked? #'(:~ $obj predicate) #'$obj)))
+                   (syntax/loc stx
+                     (lambda ($obj)
+                       (##unchecked-structure-ref object offset rtd 'slot)))))))
          (else
           (raise-syntax-error #f "no accessor for slot" stx klass slot)))))
 
@@ -528,20 +595,25 @@ package: gerbil/core
           => (lambda (offset)
                (with-syntax ((rtd (!runtime-type-descriptor klass))
                              (slot slot)
-                             (offset offset))
-                 (syntax/loc stx
-                   (lambda ($obj $val)
-                     (##unchecked-structure-set! $obj $val offset rtd 'slot))))))
+                             (offset offset)
+                             (predicate (!class-type-predicate klass)))
+                 (with-syntax ((object (if checked? #'(:~ $obj predicate) #'$obj)))
+                   (syntax/loc stx
+                     (lambda ($obj $val)
+                       (##unchecked-structure-set! object $val offset rtd 'slot)))))))
          (else
           (raise-syntax-error #f "no mutator for slot" stx klass slot))))))
 
   (defsyntax (with-class stx)
-    (def (expand-body klass var Type body checked?)
+    (def (expand-body klass var Type body checked? maybe?)
       (with-syntax ((@@type (syntax-local-introduce '@@type))
-                    (Type::t (!class-type-descriptor klass))
+                    (Type::t (if maybe?
+                              ['nullable (!class-type-descriptor klass)]
+                              (!class-type-descriptor klass)))
                     (var var)
                     (klass klass)
                     (checked? checked?)
+                    (nullable? maybe?)
                     (cte (current-type-env))
                     ((body ...) body))
         #'(let (var (begin-annotation (@type Type::t) var))
@@ -549,12 +621,13 @@ package: gerbil/core
                           (make-type-env (quote-syntax var)
                                          'klass
                                          checked?
+                                         nullable?
                                          'cte)))
               (let () body ...)))))
 
     (def (expand var Type body checked? checked-mutators? maybe?)
       (let* ((klass (syntax-local-value Type false))
-             (expr-body (expand-body klass var Type body (or checked? checked-mutators?))))
+             (expr-body (expand-body klass var Type body (or checked? checked-mutators?) maybe?)))
         (if checked?
           (with-syntax ((predicate
                          (let (instance? (!class-type-predicate klass))
@@ -568,6 +641,9 @@ package: gerbil/core
           expr-body)))
 
     (syntax-case stx (: :? :- ::-)
+      ((_ (var :? Type flag) body ...)
+       (eq? (stx-e #'flag) 'unchecked:)
+       (expand #'var (resolve-type->identifier stx #'Type) #'(body ...) #f #t #t))
       ((_ (var ~ @Type) body ...)
        (type-reference? (syntax-local-value #'@Type false))
        (with-syntax ((Type (type-reference-identifier (syntax-local-value #'@Type))))
@@ -586,13 +662,16 @@ package: gerbil/core
        (expand #'var #'Type #'(body ...) #f #t #f))))
 
   (defsyntax (with-interface stx)
-    (def (expand-body var Interface body checked?)
+    (def (expand-body var Interface body checked? maybe?)
       (let (type (resolve-type stx Interface))
         (with-syntax ((@@type (syntax-local-introduce '@@type))
                       (type type)
-                      (Instance::t (!runtime-type-descriptor type))
+                      (Instance::t (if maybe?
+                                    ['nullable (!runtime-type-descriptor type)]
+                                    (!runtime-type-descriptor type)))
                       (var var)
                       (checked? checked?)
+                      (nullable? maybe?)
                       (cte (current-type-env))
                       ((body ...) body))
           #'(let (var (begin-annotation (@type Instance::t) var))
@@ -600,31 +679,28 @@ package: gerbil/core
                             (make-type-env (quote-syntax var)
                                            'type
                                            checked?
+                                           nullable?
                                            'cte)))
                 (let () body ...))))))
 
     (def (expand var Interface body checked? checked-methods? maybe?)
-      (with-syntax ((expr-body (expand-body var Interface body (or checked? checked-methods?))))
+      (with-syntax ((expr-body (expand-body var Interface body (or checked? checked-methods?) maybe?)))
 
         (if checked?
           (if maybe?
             (with-syntax ((var var)
                           (Interface Interface))
-              #'(let (var (Interface var))
-                  (if var
-                    expr-body
-                    (nil-dereference! var))))
+              #'(let (var (and var (Interface var)))
+                  expr-body))
             (with-syntax ((var var) (Interface Interface))
               #'(let (var (Interface var))
                   expr-body)))
-          (if maybe?
-            (with-syntax ((var var))
-              #'(if var
-                  expr-body
-                  (nil-dereference! var)))
-            #'expr-body))))
+          #'expr-body)))
 
     (syntax-case stx (: :? :- ::-)
+      ((_ (var :? Interface flag) body ...)
+       (eq? (stx-e #'flag) 'unchecked:)
+       (expand #'var (resolve-type->identifier stx #'Interface) #'(body ...) #f #t #t))
       ((_ (var ~ @Type) body ...)
        (type-reference? (syntax-local-value #'@Type false))
        (with-syntax ((Type (type-reference-identifier (syntax-local-value #'@Type))))
@@ -661,6 +737,7 @@ package: gerbil/core
                              (type (type-env-type te))
                              (object var)
                              (checked-method? (type-env-checked? te))
+                             (checked-receiver? (type-env-nullable? te))
                              (nil-check? #f))
                     (match parts
                       ([part . rest]
@@ -670,13 +747,13 @@ package: gerbil/core
                            (loop (cons (string->symbol
                                         (substring str 1 (string-length str)))
                                        rest)
-                                 type object checked-method? #t)))
+                                 type object checked-method? checked-receiver? #t)))
                         ((class-type-info? type)
                          (with-syntax ((object
                                         (if nil-check?
                                           ['check-nil! object]
                                           object))
-                                       (accessor (get-slot-accessor stx type part)))
+                                       (accessor (get-slot-accessor stx type part checked-receiver?)))
                            (cond
                             ((null? rest)
                              #'(%%app (accessor object) rand ...))
@@ -686,6 +763,7 @@ package: gerbil/core
                                     (loop rest slot-type
                                           #'(accessor object)
                                           (!class-slot-checked-method-contract? type part)
+                                          (!class-slot-nullable? type part)
                                           #f))))
                             (else
                              (raise-syntax-error #f "unresolved dotted reference value; unknown type for slot" stx #'id part)))))
@@ -722,7 +800,8 @@ package: gerbil/core
          (cond
           ((type-env-lookup var)
            => (lambda (te)
-                (let loop ((parts parts) (type (type-env-type te)) (object var) (nil-check? #f))
+                (let loop ((parts parts) (type (type-env-type te)) (object var)
+                           (checked-receiver? (type-env-nullable? te)) (nil-check? #f))
                   (match parts
                     ([part . rest]
                      (cond
@@ -731,31 +810,33 @@ package: gerbil/core
                          (loop (cons (string->symbol
                                       (substring str 1 (string-length str)))
                                      rest)
-                               type object #t)))
+                               type object checked-receiver? #t)))
                       ((class-type-info? type)
                        (with-syntax ((object
                                       (if nil-check?
                                         `(check-nil! ,object)
                                         object))
-                                     (accessor (get-slot-accessor stx type part)))
+                                     (accessor (get-slot-accessor stx type part checked-receiver?)))
                          (cond
                           ((null? rest)
                            (cond
                             ((!class-slot-type type part)
                              => (lambda (slot-type)
-                                  (with-syntax ((slot-type (resolve-type->type-descriptor stx slot-type)))
+                                   (with-syntax ((slot-type
+                                                  (let (descriptor (resolve-type->type-descriptor stx slot-type))
+                                                    (if (!class-slot-nullable? type part)
+                                                      ['nullable descriptor]
+                                                      descriptor))))
                                     #'(begin-annotation (@type slot-type)
                                         (accessor object)))))
-                            (nil-check?
-                             #'(accessor (check-nil! object)))
                             (else
                              #'(accessor object))))
                           ((!class-slot-type type part)
-                           => (lambda (type)
-                                (let (type (resolve-type stx type))
-                                  (if nil-check?
-                                    (loop rest type #'(accessor (check-nil! object)) #f)
-                                    (loop rest type #'(accessor object) #f)))))
+                           => (lambda (next-type)
+                                (loop rest (resolve-type stx next-type)
+                                      #'(accessor object)
+                                      (!class-slot-nullable? type part)
+                                      #f)))
                           (else
                            (raise-syntax-error #f "unresolved dotted reference; unknown type for slot" stx #'id part)))))
                       ((interface-info? type)
@@ -781,6 +862,7 @@ package: gerbil/core
                            (type (type-env-type te))
                            (object var)
                            (checked-mutator? (type-env-checked? te))
+                           (checked-receiver? (type-env-nullable? te))
                            (nil-check? #f))
                   (match parts
                     ([part . rest]
@@ -790,7 +872,7 @@ package: gerbil/core
                          (loop (cons (string->symbol
                                       (substring str 1 (string-length str)))
                                      rest)
-                               type object checked-mutator? #t)))
+                               type object checked-mutator? checked-receiver? #t)))
                       ((class-type-info? type)
                        (cond
                         ((null? rest)
@@ -798,11 +880,11 @@ package: gerbil/core
                                        (mutator
                                         (get-slot-mutator
                                          stx type part
-                                         ;; invoke the checked mutator if the contract
-                                         ;; was checked and the slot has a contract
-                                         ;; to be checked
-                                         (and checked-mutator?
-                                              (!class-slot-contract type part)))))
+                                         ;; Check nullable receivers even for slots
+                                         ;; without a value contract.
+                                         (or checked-receiver?
+                                             (and checked-mutator?
+                                                  (!class-slot-contract type part))))))
                            (if nil-check?
                              #'(mutator (check-nil! object) value)
                              #'(mutator object value))))
@@ -813,11 +895,12 @@ package: gerbil/core
                                                (if nil-check?
                                                  `(check-nil! ,object)
                                                  object))
-                                              (accessor (get-slot-accessor stx type part)))
+                                              (accessor (get-slot-accessor stx type part checked-receiver?)))
                                   (loop rest next-type
-                                          #'(accessor object)
-                                          (!class-slot-checked-mutator-contract? type part)
-                                          #f)))))
+                                        #'(accessor object)
+                                        (!class-slot-checked-mutator-contract? type part)
+                                        (!class-slot-nullable? type part)
+                                        #f)))))
                         (else
                          (raise-syntax-error #f "unresolved dotted setter; unknown type for slot" stx #'id part))))
                       ((interface-info? type)
@@ -969,7 +1052,7 @@ package: gerbil/core
                            optionals: (optionals-allowed? #t)
                            keywords: (keywords-allowed? #t))
       (when (stx-e return)
-        (check-valid-type! stx return))
+        (resolve-return-type stx return))
       (check-signature-spec! stx args
                              optionals: optionals-allowed?
                              keywords: keywords-allowed?))
@@ -1259,7 +1342,7 @@ package: gerbil/core
           (cons [self ': Interface] signature)
           return
           unchecked-proc)
-        (let (return-type (resolve-type->type-descriptor stx return))
+        (let (return-type (resolve-return-type->type-descriptor stx return))
           [return: return-type])))
 
     (def (make-interface-method-contract stx self Interface signature checked?)
@@ -1268,6 +1351,8 @@ package: gerbil/core
     (def (make-procedure-lambda-signature stx signature return unchecked)
       (def (type-e contract)
         (syntax-case contract (: :? :~ :- ::- :=)
+          ((:? type . maybe-default)
+           ['nullable (resolve-type->type-descriptor stx #'type)])
           ((: type . maybe-default)
            (resolve-type->type-descriptor stx #'type))
           ((~ type . maybe-default)
@@ -1276,12 +1361,12 @@ package: gerbil/core
                     (free-identifier=? #'~ #'::-)))
            (core-quote-syntax 't::t))
           ((:~ pred-expr : type . maybe-default)
-           (resolve-type->type-descriptor stx #'type))
+           #f)
           ((:~ pred-expr ~ type . maybe-default)
            (and (identifier? #'~)
                 (or (free-identifier=? #'~ #':-)
                     (free-identifier=? #'~ #'::-)))
-           (core-quote-syntax 't::t))
+           #f)
           (_ #f)))
 
       (let loop ((rest signature) (has-keywords? #f) (result []))
@@ -1316,7 +1401,7 @@ package: gerbil/core
            (let* ((arguments (if has-keywords?
                                (core-quote-syntax 't::t)
                                (foldl cons (core-quote-syntax 't::t) result)))
-                  (return-type (resolve-type->type-descriptor stx return))
+                  (return-type (resolve-return-type->type-descriptor stx return))
                   (unchecked (and (not has-keywords?)
                                   (stx-e unchecked)
                                   (core-quote-syntax unchecked))))
@@ -1325,7 +1410,7 @@ package: gerbil/core
                          unchecked: unchecked]))
           (()
            (let* ((arguments (if has-keywords? (core-quote-syntax 't::t) (reverse! result)))
-                  (return-type (resolve-type->type-descriptor stx return))
+                  (return-type (resolve-return-type->type-descriptor stx return))
                   (unchecked (and (not has-keywords?)
                                   (stx-e unchecked)
                                   (core-quote-syntax unchecked))))
@@ -1335,6 +1420,12 @@ package: gerbil/core
       (def (contract-e id contract)
         (with-syntax ((id id))
           (syntax-case contract (: :? :~ :- ::- :=)
+            ((:? type . maybe-default)
+             (if checked? #'(id :? type) #'(id :? type unchecked:)))
+            ((:~ predicate-expr :? type . maybe-default)
+             (if checked?
+               #'(id :~ predicate-expr :? type)
+               #'(id :? type unchecked:)))
             ((~ type . maybe-default)
              (or (free-identifier=? #'~ #'::-)
                  (free-identifier=? #'~ #':)
@@ -1431,9 +1522,12 @@ package: gerbil/core
                                     [] right-kw-contract))))
                 (unless (compatible-signature-type-contract? left-contract right-contract)
                   (return #f))))
-            (unless (free-identifier=? (resolve-type->identifier left left-return)
-                                       (resolve-type->identifier right right-return))
-              (return #f))
+            (let (((values left-base left-maybe?) (resolve-return-type left left-return))
+                  ((values right-base right-maybe?) (resolve-return-type right right-return)))
+              (unless (and (eq? left-maybe? right-maybe?)
+                           (free-identifier=? (resolve-type->identifier left left-base)
+                                              (resolve-type->identifier right right-base)))
+                (return #f)))
             #t))))
 
     (def (compatible-signature-type-contract? left right)
@@ -1715,8 +1809,7 @@ package: gerbil/core
       (let loop ((rest specs) (methods []))
         (syntax-case rest (=>)
           (((id . args) => return-type . rest)
-           (and (identifier? #'id)
-                (identifier? #'return-type))
+           (identifier? #'id)
            (begin
              (check-signature! stx #'args #'return-type)
              (loop #'rest (cons [#'id #'args #'return-type] methods))))
@@ -1832,11 +1925,12 @@ package: gerbil/core
                               (cast descriptor obj))))
                       (deftry-make
                         #'(def (try-make obj)
-                            (begin-annotation (@type.signature return: t::t
+                            (begin-annotation (@type.signature return: (nullable klass-quoted)
                                                                effect: (cast)
                                                                arguments: (t::t))
 
-                              (try-cast descriptor obj))))
+                              (begin-annotation (@type (nullable klass-quoted))
+                                (try-cast descriptor obj)))))
                       (defpred
                         #'(def predicate
                             (begin-annotation (@mop.predicate klass-quoted)
@@ -1886,14 +1980,14 @@ package: gerbil/core
             (syntax/loc stx
               (defdispatch-rule (unchecked-macro $self in ...)
                   lift: unchecked-method
-                  (:- (interface-dispatch-method Interface method ($self out ...))
-                      return)))
+                  (return-contract (interface-dispatch-method Interface method ($self out ...))
+                    return #f)))
             (with-syntax (((out ... tail-out) #'(out ...)))
               (syntax/loc stx
                 (defdispatch-rule (unchecked-macro $self in ... . tail)
                     lift: unchecked-method
-                    (:- (interface-dispatch-method Interface method ($self out ... :: tail-out))
-                        return))))))))
+                    (return-contract (interface-dispatch-method Interface method ($self out ... :: tail-out))
+                      return #f))))))))
 
     (def (make-checked-macro Interface macro-name checked-method-name method signature return)
       (let (info   (syntax-local-value Interface))
@@ -1912,16 +2006,16 @@ package: gerbil/core
                 lift: checked-method
                 (using contract
                   (if __DEBUG
-                    (: (interface-dispatch-method Interface method ($self out ...)) return)
-                    (:- (interface-dispatch-method Interface method ($self out ...)) return)))))
+                    (return-contract (interface-dispatch-method Interface method ($self out ...)) return #t)
+                    (return-contract (interface-dispatch-method Interface method ($self out ...)) return #f)))))
             (with-syntax (((out ... tail-out) #'(out ...)))
               (syntax/loc stx
                 (defdispatch-rule (macro $self in ... . tail)
                   lift: checked-method
                   (using contract
                     (if __DEBUG
-                      (: (interface-dispatch-method Interface method ($self out ... :: tail-out)) return)
-                      (:- (interface-dispatch-method Interface method ($self out ... :: tail-out)) return))))))))))
+                      (return-contract (interface-dispatch-method Interface method ($self out ... :: tail-out)) return #t)
+                      (return-contract (interface-dispatch-method Interface method ($self out ... :: tail-out)) return #f))))))))))
 
     (def (make-unchecked-method-def Interface unchecked-method-name unchecked-macro-name method signature return)
       (with-syntax ((Interface Interface)
@@ -1938,16 +2032,16 @@ package: gerbil/core
             (define-values (unchecked-method)
               (lambda ($self in ...)
                 (with-interface-unchecked-method-signature $self (Interface signature return)
-                  (:- (interface-dispatch-method Interface method ($self out ...))
-                      return)))
+                  (return-contract (interface-dispatch-method Interface method ($self out ...))
+                    return #f)))
               macro: unchecked-macro))
           (with-syntax (((out ... tail-out) #'(out ...)))
             (syntax/loc stx
               (define-values (unchecked-method)
                 (lambda ($self in ... . tail)
                   (with-interface-unchecked-method-signature $self (Interface signature return)
-                    (:- (interface-dispatch-method Interface method ($self out ... :: tail-out))
-                        return)))
+                    (return-contract (interface-dispatch-method Interface method ($self out ... :: tail-out))
+                      return #f)))
                 macro: unchecked-macro))))))
 
     (def (make-checked-method-def Interface checked-method-name checked-macro-name unchecked-method-name method signature return)
@@ -1967,8 +2061,8 @@ package: gerbil/core
               (lambda ($self in ...)
                 (with-interface-checked-method-signature $self (Interface signature return unchecked-method)
                   (if __DEBUG
-                    (: (interface-dispatch-method Interface method ($self out ...)) return)
-                    (:- (interface-dispatch-method Interface method ($self out ...)) return))))
+                    (return-contract (interface-dispatch-method Interface method ($self out ...)) return #t)
+                    (return-contract (interface-dispatch-method Interface method ($self out ...)) return #f))))
               macro: checked-macro))
           (with-syntax (((out ... tail-out) #'(out ...)))
             (syntax/loc stx
@@ -1976,8 +2070,8 @@ package: gerbil/core
                 (lambda ($self in ... . tail)
                   (with-interface-checked-method-signature $self (Interface signature return unchecked-method)
                     (if __DEBUG
-                      (: (interface-dispatch-method Interface method ($self out ... :: tail-out)) return)
-                      (:- (interface-dispatch-method Interface method ($self out ... :: tail-out)) return))))
+                      (return-contract (interface-dispatch-method Interface method ($self out ... :: tail-out)) return #t)
+                      (return-contract (interface-dispatch-method Interface method ($self out ... :: tail-out)) return #f))))
                 macro: checked-macro))))))
 
       (syntax-case stx ()
@@ -2210,8 +2304,7 @@ package: gerbil/core
 
   (defsyntax-case definterface-extension-method (=>)
     ((_ Interface (method self . signature) => return body ...)
-     (and (syntax-local-interface-info? #'Interface)
-          (syntax-local-runtime-type-info? #'return))
+     (syntax-local-interface-info? #'Interface)
      (let* ((info           (syntax-local-value #'Interface))
             (interface-name (interface-info-name info)))
        (with-identifiers ((method-name      #'method interface-name "-" #'method)
@@ -2272,7 +2365,7 @@ package: gerbil/core
                       (make-interface-method-contract stx
                         #'self #'Interface #'signature checked?)))
          #'(begin-annotation (@type.signature . lambda-signature)
-             (using contract body ...))))))
+             (return-contract (using contract body ...) return))))))
 
   (defrule (with-interface-checked-method-signature self (Interface signature return unchecked-method)
              body ...)
@@ -2391,7 +2484,7 @@ package: gerbil/core
       (with-syntax ((unchecked-proc  unchecked-proc)
                     (signature       signature)
                     (return          return)
-                    (return-type     (resolve-type->type-descriptor stx return))
+                    (return-type     (resolve-return-type->type-descriptor stx return))
                     (in              (signature-arguments-in signature))
                     ((body ...)       body))
         (syntax/loc stx
@@ -2399,7 +2492,10 @@ package: gerbil/core
             (lambda in
               (with-procedure-signature (#f return #f)
                 (begin-annotation (@type return-type)
-                  (with-procedure-unchecked-contract signature body ...))))))))
+                  (begin-annotation (@type.return return-type)
+                    (return-contract
+                      (with-procedure-unchecked-contract signature body ...)
+                      return)))))))))
 
     (def (make-checked-proc checked-proc unchecked-proc checked-macro signature return)
       (with-syntax ((checked-proc   checked-proc)
@@ -2407,7 +2503,7 @@ package: gerbil/core
                     (checked-macro  checked-macro)
                     (signature      signature)
                     (return         return)
-                    (return-type    (resolve-type->type-descriptor stx return))
+                    (return-type    (resolve-return-type->type-descriptor stx return))
                     (in             (signature-arguments-in signature))
                     ((out ...)      (signature-arguments-out signature)))
         (if (stx-list? #'in)
@@ -2473,8 +2569,7 @@ package: gerbil/core
 
   (defsyntax-case definline (=>)
     ((_ (proc . signature) => return body rest ...)
-     (and (identifier? #'proc)
-          (syntax-local-runtime-type-info? #'return))
+     (identifier? #'proc)
      (with-identifier (macro #'proc "@" #'proc)
        (with-syntax ((in        (signature-arguments-in #'signature))
                      ((out ...) (signature-arguments-out #'signature))
@@ -2482,9 +2577,7 @@ package: gerbil/core
          #'(begin
              (defdispatch-rule (macro . in)
                lift: proc
-               (: (using contract
-                    body rest ...)
-                  return))
+               (return-contract (using contract body rest ...) return #t))
              (def/c (proc . signature)
                => return
                macro: macro
@@ -2496,13 +2589,13 @@ package: gerbil/core
 
   (defsyntax-case with-procedure-signature ()
     ((_ (#f return #f) body ...)
-     (with-syntax ((return-type (resolve-type->type-descriptor stx #'return)))
+     (with-syntax ((return-type (resolve-return-type->type-descriptor stx #'return)))
        #'(begin-annotation (@type.signature return: return-type)
-           (let () body ...))))
+           (return-contract (let () body ...) return))))
     ((_ (signature return unchecked) body ...)
      (with-syntax ((lambda-signature (make-procedure-lambda-signature stx #'signature #'return #'unchecked)))
        #'(begin-annotation (@type.signature . lambda-signature)
-           (let () body ...)))))
+           (return-contract (let () body ...) return)))))
 
   (defsyntax-case with-procedure-contract ()
     ((_ signature body ...)

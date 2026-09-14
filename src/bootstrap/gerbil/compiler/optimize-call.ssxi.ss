@@ -238,7 +238,7 @@ package: gerbil/compiler
             #f
             signature:
             (return:
-             boolean::t
+             (nullable true::t)
              effect:
              #f
              arguments:

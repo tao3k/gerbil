@@ -180,6 +180,36 @@ package: gerbil/runtime
              origin:
              gerbil/runtime/control)))
   (declare-type
+   __with-unwind-protect!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/runtime/control)))
+  (declare-type
+   with-unwind-protect!
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             (procedure::t procedure::t)
+             unchecked:
+             __with-unwind-protect!
+             origin:
+             gerbil/runtime/control)))
+  (declare-type
    keyword-dispatch
    (@lambda (2)
             #f

@@ -70,7 +70,7 @@
     (do-syscall (__inotify-rm-watch-syscall in.fd wd))))
 
 (def (inotify (in : InotifyDevice) (timeo : :t := #f))
-  => :t                             ; list of InotifyEvent, or #f on timeout
+  => (Maybe :list)                   ; list of InotifyEvent, or #f on timeout
   (let ((timeo (timeout->deadline timeo))
         (buf (get-inotify-buffer)))
     (let loop ()

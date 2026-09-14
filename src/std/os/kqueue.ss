@@ -251,7 +251,7 @@
   => :integer
   (:- (ffi-kevent-data events index) :integer))
 (def (kevent-udata (events :~ kevent? :- :foreign) (index : :fixnum))
-  => :t
+  => (Maybe :foreign)
   (ffi-kevent-udata events index))
 
 (def (set-kevent-ident! (events :~ kevent? :- :foreign)

@@ -77,15 +77,15 @@
                        (lambda (_%slot25748%_)
                          (hash-put! _%tab25744%_ (gx#stx-e _%slot25748%_) '#t))
                        _%slots25742%_)
-                      (if (not _%super25740%_)
-                          '()
+                      (if _%super25740%_
                           (if (gx#identifier? _%super25740%_)
                               (_%dedup25746%_
                                (_%get-mixin-slots-r23563%_ _%super25740%_))
                               (_%dedup25746%_
                                (concatenate
                                 (map _%get-mixin-slots-r23563%_
-                                     _%super25740%_))))))))
+                                     _%super25740%_))))
+                          '()))))
                  (_%get-mixin-slots-r23563%_
                   (lambda (_%type-id25734%_)
                     (let ((_%info25737%_

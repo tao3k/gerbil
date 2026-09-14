@@ -88,6 +88,12 @@ package: gerbil/core
     (lambda () body)
     (lambda () postlude rest ...))))
 
+(defrules unwind-protect! ()
+  ((_ body postlude rest ...)
+   (with-unwind-protect!
+    (lambda () body)
+    (lambda () postlude rest ...))))
+
 (defrules do ()
   ((_ ((var init step ...) ...)
       (test fini ...)

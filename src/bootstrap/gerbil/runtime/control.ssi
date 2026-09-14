@@ -37,6 +37,13 @@ namespace: #f
           with-unwind-protect
           macro:
           @with-unwind-protect)
+         (%#define-syntax @with-unwind-protect! |[:0:]#@with-unwind-protect!|)
+         (%#define-runtime __with-unwind-protect! __with-unwind-protect!)
+         (%#define-runtime
+          with-unwind-protect!
+          with-unwind-protect!
+          macro:
+          @with-unwind-protect!)
          (%#define-runtime keyword-dispatch keyword-dispatch)
          (%#define-runtime keyword-rest keyword-rest))
 (%#call (%#ref load-module) (%#quote "gerbil/runtime/control~0"))
