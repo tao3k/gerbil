@@ -1,6 +1,6 @@
 (declare (block) (standard-bindings) (extended-bindings))
 (begin
-  (define gerbil/core/sugar~QuasiquoteExpander::timestamp 1789371482)
+  (define gerbil/core/sugar~QuasiquoteExpander::timestamp 1789552432)
   (begin
     (define gerbil/core/sugar~QuasiquoteExpander#_g21835_
       (##structure

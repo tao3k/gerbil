@@ -1,6 +1,6 @@
 (declare (block) (standard-bindings) (extended-bindings))
 (begin
-  (define gerbil/runtime/error::timestamp 1789371524)
+  (define gerbil/runtime/error::timestamp 1789552473)
   (begin
     (define Exception::t
       (let ((__tmp151529 (list)))
@@ -727,38 +727,38 @@
               (##write-string __tmp151546 _%port150838%_))))))
     (define Error::display-exception::specialize
       (lambda (__klass151453 __method-table151454)
-        (let ((__where151455
+        (let ((__irritants151455
                (let ((__slot151459
                       (let ()
                         (declare (not safe))
-                        (class-slot-offset __klass151453 'where))))
+                        (class-slot-offset __klass151453 'irritants))))
                  (if __slot151459
                      __slot151459
-                     (error '"Unknown slot" 'where))))
-              (__irritants151456
+                     (error '"Unknown slot" 'irritants))))
+              (__message151456
                (let ((__slot151460
                       (let ()
                         (declare (not safe))
-                        (class-slot-offset __klass151453 'irritants))))
+                        (class-slot-offset __klass151453 'message))))
                  (if __slot151460
                      __slot151460
-                     (error '"Unknown slot" 'irritants))))
-              (__continuation151457
+                     (error '"Unknown slot" 'message))))
+              (__where151457
                (let ((__slot151461
                       (let ()
                         (declare (not safe))
-                        (class-slot-offset __klass151453 'continuation))))
+                        (class-slot-offset __klass151453 'where))))
                  (if __slot151461
                      __slot151461
-                     (error '"Unknown slot" 'continuation))))
-              (__message151458
+                     (error '"Unknown slot" 'where))))
+              (__continuation151458
                (let ((__slot151462
                       (let ()
                         (declare (not safe))
-                        (class-slot-offset __klass151453 'message))))
+                        (class-slot-offset __klass151453 'continuation))))
                  (if __slot151462
                      __slot151462
-                     (error '"Unknown slot" 'message)))))
+                     (error '"Unknown slot" 'continuation)))))
           (lambda (_%self150837%_ _%port150838%_)
             (let ((_%self150841%_ _%self150837%_))
               (let ((_%tmp-port150851%_ (open-output-string))
@@ -774,7 +774,7 @@
                                   (declare (not safe))
                                   (##unchecked-structure-ref
                                    _%self150841%_
-                                   __where151455
+                                   __where151457
                                    '#f
                                    '#f))))
                            (if _%$e150855%_
@@ -809,7 +809,7 @@
                                   (declare (not safe))
                                   (##unchecked-structure-ref
                                    _%self150841%_
-                                   __message151458
+                                   __message151456
                                    '#f
                                    '#f))))
                            (declare (not safe))
@@ -819,7 +819,7 @@
                                   (declare (not safe))
                                   (##unchecked-structure-ref
                                    _%self150841%_
-                                   __irritants151456
+                                   __irritants151455
                                    '#f
                                    '#f))))
                            (if (null? _%irritants150879%_)
@@ -853,7 +853,7 @@
                                       (declare (not safe))
                                       (##unchecked-structure-ref
                                        _%self150841%_
-                                       __continuation151457
+                                       __continuation151458
                                        '#f
                                        '#f))))
                                (if _%$%cont150882150884%_

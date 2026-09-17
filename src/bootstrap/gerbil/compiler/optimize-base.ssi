@@ -776,6 +776,9 @@ namespace: gxc
          (%#define-runtime !class-lookup-method gxc#!class-lookup-method)
          (%#define-runtime !type-subtype? gxc#!type-subtype?)
          (%#define-runtime !class-subclass? gxc#!class-subclass?)
+         (%#define-runtime !class-primitive-leaf? gxc#!class-primitive-leaf?)
+         (%#define-runtime !class-struct-base gxc#!class-struct-base)
+         (%#define-runtime !type-disjoint? gxc#!type-disjoint?)
          (%#define-runtime !interface-instance? gxc#!interface-instance?)
          (%#define-runtime !procedure-origin gxc#!procedure-origin)
          (%#begin (%#define-runtime

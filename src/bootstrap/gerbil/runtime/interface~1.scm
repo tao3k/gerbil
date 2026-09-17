@@ -374,10 +374,10 @@
   (define |[1]#_g154488_|
     (gx#core-deserialize-mark
      '(0
-       ($%arg151694 . _%$%arg151694151765%_)
+       ($%arg151693 . _%$%arg151693151751%_)
        (id . _%id151718%_)
        (arg . _%arg151781%_)
-       ($%arg151693 . _%$%arg151693151751%_))
+       ($%arg151694 . _%$%arg151694151765%_))
      (gx#import-module '(:gerbil/core/contract Interface))))
   (define |[1]#_g154489_|
     (##structure
@@ -440,10 +440,10 @@
   (define |[1]#_g154500_|
     (gx#core-deserialize-mark
      '(0
-       ($%arg152321 . _%$%arg152321152378%_)
        (id . _%id152345%_)
-       ($%arg152322 . _%$%arg152322152392%_)
-       (arg . _%arg152408%_))
+       (arg . _%arg152408%_)
+       ($%arg152321 . _%$%arg152321152378%_)
+       ($%arg152322 . _%$%arg152322152392%_))
      (gx#import-module '(:gerbil/core/contract Interface))))
   (define |[1]#_g154501_|
     (##structure

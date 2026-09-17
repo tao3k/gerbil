@@ -1,6 +1,6 @@
 (declare (block) (standard-bindings) (extended-bindings))
 (begin
-  (define gerbil/core/contract~InterfaceInfo::timestamp 1789371509)
+  (define gerbil/core/contract~InterfaceInfo::timestamp 1789552459)
   (begin
     (define gerbil/core/contract~InterfaceInfo#_g107068_
       (##structure

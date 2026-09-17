@@ -110,6 +110,38 @@
 
 (def compiler-typed-test
   (test-suite "compiler type inference tests"
+    (test-case "disjointness requires proof, including system types"
+      (parameterize ((gxc#current-compile-optimizer-info (gxc#make-optimizer-info)))
+        (gxc#optimizer-info-init!)
+        (gxc#optimizer-load-builtin-ssxi (current-expander-context))
+        (def (type name) (gxc#optimizer-resolve-class 'test name))
+        (check (gxc#!type-disjoint? (type 'fixnum::t) (type 'string::t)) => #t)
+        (check (gxc#!type-disjoint? (type 'fixnum::t) (type 'number::t)) => #f)
+        ;; Neither is a subtype of the other, but fixnums inhabit both.
+        (check (gxc#!type-disjoint? (type 'number::t) (type 'immediate::t)) => #f)
+        (check (gxc#!type-disjoint? (type 'false::t) (type 'boolean::t)) => #f)
+        (check (gxc#!type-disjoint? (gxc#nullable-type (type 'fixnum::t))
+                                  (gxc#nullable-type (type 'string::t)))
+               => #f)))
+    (test-case "overlapping mixins across compiled modules"
+      (must-compile-and-execute "compiler-test-support/mixin-client.ss"
+        ["compiler-test-support/mixin-provider.ss"]
+        (lambda (output-dir)
+          (def definitions
+            (forms 'define
+              (call-with-input-file (path-expand "test/mixin-provider~0.scm" output-dir)
+                (lambda (port) (read-all port)))))
+          ;; Proven disjointness still folds; do not fix overlap by disabling all
+          ;; negative folding. Runtime cases check retained side effects as well.
+          (for-each
+           (lambda (name)
+             (def body
+               (compiled-body definitions
+                 (string->symbol (string-append "test/mixin-provider#__" name))))
+             (check (forms 'class-instance? body) => [])
+             (check (forms '##structure-instance-of? body) => [])
+             (check (forms '##structure-direct-instance-of? body) => []))
+           '("final-disjoint" "struct-disjoint" "struct-mixins-disjoint")))))
     (test-case "optimizer type snapshots retain nullable bases"
       (parameterize ((gxc#current-compile-optimizer-info (gxc#make-optimizer-info))
                      (gxc#current-compile-local-type (make-hash-table-eq)))

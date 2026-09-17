@@ -1,6 +1,6 @@
 (declare (block) (standard-bindings) (extended-bindings))
 (begin
-  (define gerbil/compiler/method::timestamp 1789371532)
+  (define gerbil/compiler/method::timestamp 1789552481)
   (begin
     (define gxc#current-compile-method (make-parameter '#f))
     (define gxc#compile-e__0
@@ -3477,7 +3477,7 @@
                               (_%$%K204574204607%_
                                _%rest204617%_
                                _%id204615%_))
-                            (_%$%K204572204587%_)))
+                            (_%$%try-match204569204601%_)))
                       (_%$%try-match204569204601%_)))))))))
     (define gxc#xform-operands
       (lambda (_%self204511%_ _%stx204512%_)

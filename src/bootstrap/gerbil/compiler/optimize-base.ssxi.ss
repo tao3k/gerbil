@@ -1833,6 +1833,51 @@ package: gerbil/compiler
              origin:
              gerbil/compiler/optimize-base)))
   (declare-type
+   gxc#!class-primitive-leaf?
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!class-struct-base
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
+   gxc#!type-disjoint?
+   (@lambda 2
+            #f
+            signature:
+            (return:
+             t::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/compiler/optimize-base)))
+  (declare-type
    gxc#!interface-instance?
    (@lambda 1
             #f

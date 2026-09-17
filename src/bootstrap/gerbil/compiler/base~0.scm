@@ -1,6 +1,6 @@
 (declare (block) (standard-bindings) (extended-bindings))
 (begin
-  (define gerbil/compiler/base::timestamp 1789371531)
+  (define gerbil/compiler/base::timestamp 1789552481)
   (begin
     (define gxc#__DEBUG-COMPILE
       (if (string? __DEBUG)

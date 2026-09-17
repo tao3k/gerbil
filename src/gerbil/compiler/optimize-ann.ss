@@ -583,11 +583,19 @@ namespace: gxc
               (cond
                ((eq? t xt) val)
                (val
-                ;; it's a positive type assertion; we can only satisfy it
-                ;; if it's an assertion for a subtype of ours
-                (and (!class? t)
-                     (!class? xt)
-                     (!class-subclass? t xt)))
+                (cond
+                 ((and (!class? t) (!class? xt))
+                  (cond
+                   ((!class-subclass? xt t) #t)
+                   ((!type-disjoint? xt t) #f)
+                   (else (lp rest))))
+                 ;; Preserve disjoint shape tests, but do not confuse ordinary
+                 ;; pair/vector tests with their possibly overlapping syntax tests.
+                 ((and (memq t '(pair null vector box))
+                       (memq xt '(pair null vector box))) #f)
+                 ((and (memq t '(identifier stx-pair stx-null stx-vector stx-box))
+                       (memq xt '(identifier stx-pair stx-null stx-vector stx-box))) #f)
+                 (else (lp rest))))
                (else
                 ;; it's a negative type assertion; we cannot satisfy it
                 ;; if it's an assertion for a supertype of ours

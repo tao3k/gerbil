@@ -379,6 +379,52 @@ namespace: gxc
                  (loop rest)))
             (else #f))))))
 
+;; These are concrete primitive representations, not extensible class families.
+;; In particular, number, integer, boolean, immediate and sequence are NOT leaves:
+;; the system hierarchy itself has multiple inheritance.
+(def (!class-primitive-leaf? klass)
+  (memq (!type-id klass)
+        '(char true false eof void null fixnum bignum ratnum cpxnum
+          stflonum haflonum symbol keyword pair vector string
+          u8vector s8vector u16vector s16vector u32vector s32vector
+          u64vector s64vector f32vector f64vector)))
+
+(def (!class-struct-base klass)
+  (if (!class-struct? klass)
+    klass
+    (let loop ((rest (!class-precedence-list klass)))
+      (match rest
+        ([name . rest]
+         (let (super (optimizer-resolve-class 'struct-base name))
+           (if (!class-struct? super) super (loop rest))))
+        (else #f)))))
+
+;; Lack of a subtype relationship is not a disjointness proof. An unknown
+;; intersection must retain its runtime check, even if no common subclass has
+;; been declared in this compilation unit yet.
+(def (!type-disjoint? type-a type-b)
+  (cond
+   ((or (not type-a) (not type-b)
+        (!abort? type-a) (!abort? type-b)
+        (!nullable-type? type-a) (!nullable-type? type-b)) #f)
+   ((or (!type-subtype? type-a type-b) (!type-subtype? type-b type-a)) #f)
+   ((!procedure? type-a)
+    (!type-disjoint? (optimizer-resolve-class 'disjoint 'procedure::t) type-b))
+   ((!procedure? type-b)
+    (!type-disjoint? type-a (optimizer-resolve-class 'disjoint 'procedure::t)))
+   ((and (!class? type-a) (!class? type-b))
+    (cond
+     ((or (!class-final? type-a) (!class-final? type-b)
+          (!class-primitive-leaf? type-a) (!class-primitive-leaf? type-b)) #t)
+     (else
+      (let ((base-a (!class-struct-base type-a))
+            (base-b (!class-struct-base type-b)))
+        ;; C4 requires a single compatible struct tail, including through mixins.
+        (and base-a base-b
+             (not (!class-subclass? base-a base-b))
+             (not (!class-subclass? base-b base-a)))))))
+   (else #f)))
+
 (def (!interface-instance? type)
   (and (!class? type)
        (memq 'interface-instance::t (!class-precedence-list type))))

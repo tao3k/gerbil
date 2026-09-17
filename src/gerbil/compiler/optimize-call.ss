@@ -343,8 +343,7 @@ namespace: gxc
         #f)
 
        (else
-	;; incompatibility, enable compile time eval
-	#t))))))
+        (!type-disjoint? expr-type type)))))))
 
 (def (check-expression-type! stx expr type)
   (cond
@@ -383,9 +382,10 @@ namespace: gxc
         ;; abundant.
         #f)
 
-       (else
-        ;; not happy; type is incompatible
-        (raise-compile-error "signature type mismatch" stx expr expr-type type)))))))
+       ((!type-disjoint? expr-type type)
+        (raise-compile-error "signature type mismatch" stx expr expr-type type))
+       ;; Possibly overlapping types still require checked dispatch.
+       (else #f))))))
 
 (defmethod {optimize-call !constructor}
   (lambda (self ctx stx args)
