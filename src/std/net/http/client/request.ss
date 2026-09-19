@@ -61,11 +61,17 @@
      (write-newline! writer)
      (__request-write-body! writer body)
      (writer.flush)
-     ;; read request head
-     (let* (((values status status-line)
-             (read-status-line! reader (box max-status-line-length)))
-            (headers
-             (read-headers! reader (box max-headers-length)))
+     ;; Consume interim 100 heads before selecting final response framing.
+     ;; A 101 response belongs to the WebSocket upgrade caller, not this loop.
+     (let* (((values status status-line headers)
+             (let read-head ()
+               => :values
+               (let* (((values status status-line)
+                       (read-status-line! reader (box max-status-line-length)))
+                      (headers (read-headers! reader (box max-headers-length))))
+                 (if (eqv? status 100)
+                   (read-head)
+                   (values status status-line headers)))))
             (content-length
              (aget "Content-Length" headers))
             (reader

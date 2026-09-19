@@ -207,6 +207,36 @@
                      exception: (exception->string e))
        (unregister!)))))
 
+;; Called only after new-request validates framing. Unsupported or multiple
+;; Expect fields retain their existing ignored behavior; no body input is read.
+(def (request-expects-continue? (proto   : :string)
+                               (headers : :list))
+  => :boolean
+  (and (string=? proto "HTTP/1.1")
+       (let loop ((rest headers :- :list) (seen? #f :- :boolean))
+         => :boolean
+         (cond
+          ((null? rest) seen?)
+          ((equal? (caar rest) "Expect")
+           (and (not seen?)
+                (string-ci=? (cdar rest) "100-continue")
+                (loop (cdr rest) #t)))
+          (else (loop (cdr rest) seen?))))
+       (if (aget "Transfer-Encoding" headers)
+         #t
+         (cond
+          ((aget "Content-Length" headers)
+           => (lambda ((length : :string))
+                => :boolean
+                ;; Framing validation already checked all digits and duplicate agreement.
+                (let (end (string-length length))
+                  (let loop ((i 0 :- :fixnum))
+                    => :boolean
+                    (and (fx< i end)
+                         (or (not (char=? (string-ref length i) #\0))
+                             (loop (fx1+ i))))))))
+          (else #f)))))
+
 (def (server-handler (self : http-server) (sock : StreamSocket))
   => :void
   (deflogger-macros self.cfg.log "/net/httpd/request")
@@ -225,16 +255,24 @@
           (writer (open-buffered-writer (sock.writer) self.cfg.response-buffer)
                   :- BufferedWriter))
 
+    ;; The connection boundary must not translate a mux/application exception
+    ;; merely because it has the same type as a parser error.
+    (def reading-request-head? #f)
+
     (def (handle-next-request!)
+      => :void
       (sock.set-input-timeout! (timeout->deadline self.cfg.request-timeout))
+      (set! reading-request-head? #t)
       (let* (((values method target proto)
               (read-request-line! reader (box self.cfg.max-request-line)))
              (headers
               (read-headers! reader (box self.cfg.max-headers)))
+             (_ (validate-request-host! proto headers))
              (request
               (new-request method target proto headers
                            sock reader
                            (Logger self.cfg.log)))
+             (_ (set! reading-request-head? #f))
              (response
               (rec response
                 (new-response-handler
@@ -263,6 +301,10 @@
                               target: target
                               proto: proto)
            (sock.set-output-timeout! (timeout->deadline self.cfg.response-timeout))
+           (when (request-expects-continue? proto headers)
+             (write-status-line! writer "HTTP/1.1" 100 "Continue")
+             (write-newline! writer)
+             (writer.flush))
            (handler.handle-request! request response)
            (catch (e)
              (self.cfg.log.error "unhandled exception in handler"
@@ -276,9 +318,21 @@
     (try
      (handle-next-request!)
      (catch (e)
-       (syslog.error "unhandled exception in handler"
-                     exception: (call-with-output-string ""
-                                  (cut display-exception e <>))))
+       (try
+        (if (and reading-request-head?
+                 (HTTPInputError? e))
+          (begin
+            (sock.set-output-timeout! (timeout->deadline self.cfg.response-timeout))
+            (write-status-line! writer "HTTP/1.1" 400 "Bad Request")
+            (write-header! writer "Connection" "close")
+            (write-header! writer "Content-Length" "0")
+            (write-newline! writer)
+            (writer.flush))
+          (raise e))
+        (catch (e)
+          (syslog.error "unhandled exception in handler"
+                        exception: (call-with-output-string ""
+                                     (cut display-exception e <>))))))
      (finally
       (ignore-errors (reader.close))
       (ignore-errors (writer.close))

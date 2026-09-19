@@ -16,7 +16,88 @@
         ./interface
         ./status)
 (export new-request
-        new-response-handler)
+        new-response-handler
+        validate-request-host!
+        request-content-length
+        (struct-out MalformedHost)
+        (struct-out MalformedContentLength)
+        (struct-out MalformedRequestFraming))
+
+(deferror-class (MalformedHost HTTPInputError) ())
+(defraise/context (raise-malformed-host where message irritants ...)
+  (MalformedHost message irritants: [irritants ...]))
+(deferror-class (MalformedContentLength HTTPInputError) ())
+(defraise/context (raise-malformed-content-length where message irritants ...)
+  (MalformedContentLength message irritants: [irritants ...]))
+(deferror-class (MalformedRequestFraming HTTPInputError) ())
+(defraise/context (raise-malformed-request-framing where message irritants ...)
+  (MalformedRequestFraming message irritants: [irritants ...]))
+
+;; Headers come from read-headers!, which canonicalizes names and retains
+;; occurrences. Validate before URL construction, body setup or mux dispatch.
+(def (validate-request-host! (proto   : :string)
+                             (headers : :list))
+  => :void
+  (let loop ((rest headers :- :list) (seen? #f :- :boolean))
+    => :void
+    (if (pair? rest)
+      (if (equal? (caar rest) "Host")
+        (if seen?
+          (raise-malformed-host validate-request-host! "duplicate Host")
+          (loop (cdr rest) #t))
+        (loop (cdr rest) seen?))
+      (when (and (string=? proto "HTTP/1.1") (not seen?))
+        (raise-malformed-host validate-request-host! "missing Host")))))
+
+;; Read canonicalized fields before URL/body construction. Only decimal digits
+;; are accepted: comma lists are rejected, not repaired. Separate occurrences
+;; must agree numerically; generic arithmetic preserves arbitrarily large values.
+;; Returns #f when absent, otherwise an exact nonnegative integer.
+(def (request-content-length (headers : :list))
+  => (Maybe :integer)
+  (def (parse-length (value : :string))
+    => :integer
+    (let (end (string-length value))
+      (when (fxzero? end)
+        (raise-malformed-content-length request-content-length "empty Content-Length"))
+      (let loop ((index 0 :- :fixnum) (length 0 :- :integer))
+        => :integer
+        (if (fx= index end)
+          length
+          (let (digit (fx- (char->integer (string-ref value index)) 48))
+            (unless (fx<= 0 digit 9)
+              (raise-malformed-content-length request-content-length "nondecimal Content-Length"))
+            (loop (fx1+ index) (+ (* length 10) digit)))))))
+  (let loop ((rest headers :- :list) (length #f :? :integer))
+    => (Maybe :integer)
+    (if (pair? rest)
+      (if (equal? (caar rest) "Content-Length")
+        (let (next (parse-length (cdar rest)))
+          (when (and length (not (= length next)))
+            (raise-malformed-content-length request-content-length "inconsistent Content-Length"))
+          (loop (cdr rest) next))
+        (loop (cdr rest) length))
+      length)))
+
+;; Only a single chunked coding is supported. Conservatively reject all other
+;; transfer-coding forms with 400/close, including lists and parameters. HTTP/1.0
+;; forbids Transfer-Encoding; leave other versions to the existing 505 dispatch.
+;; Headers are canonicalized and content-length has already been validated.
+(def (request-chunked? (proto          : :string)
+                      (headers        : :list)
+                      (content-length :? :integer))
+  => :boolean
+  (let loop ((rest headers :- :list) (chunked? #f :- :boolean))
+    => :boolean
+    (if (pair? rest)
+      (if (equal? (caar rest) "Transfer-Encoding")
+        (begin
+          (when (or content-length chunked? (string=? proto "HTTP/1.0")
+                    (not (string-ci=? (cdar rest) "chunked")))
+            (raise-malformed-request-framing request-chunked? "conflicting or unsupported request framing"))
+          (loop (cdr rest) #t))
+        (loop (cdr rest) chunked?))
+      chunked?)))
 
 (def (new-request (method : :string)
                   (target : :string)
@@ -26,7 +107,9 @@
                   (reader  : BufferedReader)
                   (log     : Logger))
   => Request
-  (let* ((url
+  (let* ((content-length (request-content-length headers))
+         (chunked? (request-chunked? proto headers content-length))
+         (url
           (if (string-contains target "://")
             (URL target)
             (URL-from-components
@@ -39,12 +122,10 @@
              (sock.address))))
          (body-reader
           (cond
-           ((aget "Content-Length" headers)
-            => (lambda (len-str)
-                 (let (len (: (string->number len-str) :integer))
-                   (open-buffered-reader
-                    (delimit-reader reader (: len :integer))))))
-           ((equal? (aget "Transfer-Encoding" headers) "chunked")
+           (content-length
+            (open-buffered-reader
+             (delimit-reader reader content-length)))
+           (chunked?
             (open-buffered-reader
              (open-chunked-reader reader)))
            (else

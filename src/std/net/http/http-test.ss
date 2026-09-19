@@ -81,6 +81,29 @@
         (check (client.Request-content req) => (string->utf8 greeting))
         (client.Request-close req)))
 
+    (test-case "Expect 100-continue returns the fixed-length final response"
+      (let (req (client.http-post (string-append server-url "/simple")
+                                  headers: '(("Expect" . "100-continue"))
+                                  body: (string->utf8 greeting)))
+        (try
+         (check (client.Request-status req) => 200)
+         (check (aget "Content-Length" (client.Request-headers req))
+                => (number->string (u8vector-length (string->utf8 greeting))))
+         (check (aget "Content-Type" (client.Request-headers req)) => "text/plain")
+         (check (client.Request-content req) => (string->utf8 greeting))
+         (finally (client.Request-close req)))))
+
+    (test-case "Expect 100-continue returns the chunked final echo"
+      (let (req (client.http-post (string-append server-url "/echo")
+                                  headers: '(("Expect" . "100-continue"))
+                                  body: (string->utf8 greeting)))
+        (try
+         (check (client.Request-status req) => 200)
+         (check (aget "Transfer-Encoding" (client.Request-headers req)) => "chunked")
+         (check (aget "Content-Type" (client.Request-headers req)) => "application/octet-stream")
+         (check (client.Request-content req) => (string->utf8 greeting))
+         (finally (client.Request-close req)))))
+
     (test-case "echo handler"
       ;; small text body
       (let (req (client.http-post (string-append server-url "/echo")
