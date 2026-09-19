@@ -1269,6 +1269,12 @@ package: gerbil/core
           (id (identifier? #'id) (foldl cons #'id result))
           (_ (reverse! result)))))
 
+    ;; A rest-only signature is an identifier, not a pair. Split explicitly:
+    ;; the (in ... . tail) syntax pattern requires at least one input argument.
+    (def (signature-arguments-in-split signature)
+      (let-values (((head tail) (syntax-split-splice (signature-arguments-in signature) 0)))
+        [head tail]))
+
     (def (signature-arguments-out signature)
       (let loop ((rest signature) (result []))
         (syntax-case rest ()
@@ -1974,7 +1980,7 @@ package: gerbil/core
                       (method           method)
                       (return           return)
                       ($self           (syntax-local-temp 'self))
-                      ((in ... . tail) (signature-arguments-in signature))
+                      (((in ...) tail) (signature-arguments-in-split signature))
                       ((out ...)       (signature-arguments-out signature)))
           (if (stx-null? #'tail)
             (syntax/loc stx
@@ -1997,7 +2003,7 @@ package: gerbil/core
                        (checked-method   checked-method-name)
                        (return           return)
                        ($self            (syntax-local-temp 'self))
-                       ((in ... . tail)  (signature-arguments-in signature))
+                       (((in ...) tail)  (signature-arguments-in-split signature))
                        ((out ...)        (signature-arguments-out signature))
                        (contract         (make-interface-method-contract stx #'$self #'Interface signature #t)))
           (if (stx-null? #'tail)
@@ -2025,7 +2031,7 @@ package: gerbil/core
                     (return           return)
                     (signature        signature)
                     ($self            (syntax-local-temp 'self))
-                    ((in ... . tail)  (signature-arguments-in signature))
+                    (((in ...) tail)  (signature-arguments-in-split signature))
                     ((out ...)        (signature-arguments-out signature)))
         (if (stx-null? #'tail)
           (syntax/loc stx
@@ -2053,7 +2059,7 @@ package: gerbil/core
                     (signature        signature)
                     (return           return)
                     ($self            (syntax-local-temp 'self))
-                    ((in ... . tail)  (signature-arguments-in signature))
+                    (((in ...) tail)  (signature-arguments-in-split signature))
                     ((out ...)        (signature-arguments-out signature)))
         (if (stx-null? #'tail)
           (syntax/loc stx
@@ -2311,7 +2317,7 @@ package: gerbil/core
                           (unchecked-macro  #'method "&"  #'method-name)
                           (checked-method   #'method "::" #'method-name)
                           (unchecked-method #'method "__" #'method-name))
-         (with-syntax (((in ... . tail)    (signature-arguments-in #'signature))
+         (with-syntax ((((in ...) tail)    (signature-arguments-in-split #'signature))
                        ((out ...)          (signature-arguments-out #'signature))
                        (checked-contract   (make-interface-method-contract stx #'self #'Interface #'signature #t))
                        (unchecked-contract (make-interface-method-contract stx #'self #'Interface #'signature #f))
@@ -2336,22 +2342,22 @@ package: gerbil/core
                    macro: checked-macro))
              (with-syntax (((out ... tail-out) #'(out ...)))
                #'(begin
-                   (defdispatch-rule (unchecked-macro self in ... tail (... ...))
+                   (defdispatch-rule (unchecked-macro self in ... . tail)
                      lift: unchecked-method
                      (using unchecked-contract
-                       (unchecked-method self out ... tail-out (... ...))))
-                   (defdispatch-rule (checked-macro self in ... tail (... ...))
+                       (apply unchecked-method self out ... tail-out)))
+                   (defdispatch-rule (checked-macro self in ... . tail)
                      lift: checked-method
                      (using checked-contract
-                       (unchecked-method self out ... tail (... ...))))
+                       (apply unchecked-method self out ... tail-out)))
                    (def (unchecked-method self in ... . tail)
                      (with-interface-unchecked-method-signature self (Interface signature return)
                        body ...))
                    (define-values (checked-method)
                      (lambda (self in ... . tail)
                        (with-interface-checked-method-signature self (Interface signature return unchecked-method)
-                         body ...)
-                       macro: unchecked-macro)))))))))
+                         body ...))
+                     macro: checked-macro))))))))
     ((_ Interface (method self . signature) body ...)
      #'(definterface-extension-method Interface (method self . signature) => :t body ...)))
 
@@ -2397,7 +2403,7 @@ package: gerbil/core
                                        implementation-macros: macro-impl
                                        unchecked-implementation-macros: unchecked-macro-impl)
                        info)
-                  (lp #'rest [#'id type descriptor constructor try-constructor predicate satisfies-predicate method-impl ... (if unchecked? unchecked-impl []) macro-impl ... (if unchecked? unchecked-macro-impl []) ... ids ...]))))
+                  (lp #'rest [#'id type descriptor constructor try-constructor predicate satisfies-predicate method-impl ... (if unchecked? unchecked-impl []) ... macro-impl ... (if unchecked? unchecked-macro-impl []) ... ids ...]))))
              (_ (cons begin: ids)))))))
 
     (syntax-case stx ()

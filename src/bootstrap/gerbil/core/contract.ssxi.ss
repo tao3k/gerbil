@@ -1211,6 +1211,21 @@ package: gerbil/core
              origin:
              gerbil/core/contract~Interface)))
   (declare-type
+   |gerbil/core/contract~Interface[1]#signature-arguments-in-split|
+   (@lambda 1
+            #f
+            signature:
+            (return:
+             pair::t
+             effect:
+             #f
+             arguments:
+             #f
+             unchecked:
+             #f
+             origin:
+             gerbil/core/contract~Interface)))
+  (declare-type
    |gerbil/core/contract~Interface[1]#signature-arguments-out|
    (@lambda 1
             #f

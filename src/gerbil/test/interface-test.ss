@@ -51,6 +51,23 @@
 
 (@implement KeywordMethod X)
 
+(interface RestMethods
+  (collect . args) => :list
+  (prepend (first : :fixnum) . args) => :list)
+
+(defmethod {collect X}
+  (lambda (self . args) (cons (X-x self) args))
+  interface: RestMethods)
+(defmethod {prepend X}
+  (lambda (self first . args) (cons first args))
+  interface: RestMethods)
+(@implement RestMethods X)
+
+(definterface-extension-method RestMethods (extend self . args) => :list
+  (apply RestMethods-collect self args))
+(definterface-extension-method RestMethods (extend-from self (first : :fixnum) . args) => :list
+  (cons first args))
+
 (def interface-test
   (test-suite "test :std/interface"
     (test-case "nullable interface binding"
@@ -72,6 +89,42 @@
       (using (obj (KeywordMethod (make-X 0)) : KeywordMethod)
         (check (obj.combine 3 4) => 14)
         (check (obj.combine 3 4 scale: 3) => 21)))
+
+    (test-case "rest-only interface and extension methods"
+      (using (obj (RestMethods (make-X 1)) : RestMethods)
+        (check (obj.collect) => [1])
+        (check (obj.collect 2 3) => [1 2 3])
+        (check (RestMethods-collect obj) => [1])
+        (check (&RestMethods-collect obj 2 3) => [1 2 3])
+        (check (obj.extend) => [1])
+        (check (obj.extend 2 3) => [1 2 3])
+        (check (&RestMethods-extend obj 2 3) => [1 2 3])
+        ;; A method used as a value must lift to its actual procedure.
+        (for-each
+         (lambda (proc)
+           (check (proc obj) => [1])
+           (check (apply proc obj [2 3]) => [1 2 3]))
+         [RestMethods-collect &RestMethods-collect
+          RestMethods-extend &RestMethods-extend])))
+
+    (test-case "fixed arguments before rest retain their contracts"
+      (using (obj (RestMethods (make-X 1)) : RestMethods)
+        (check (obj.prepend 2) => [2])
+        (check (obj.prepend 2 3 4) => [2 3 4])
+        (check (obj.extend-from 2) => [2])
+        (check (obj.extend-from 2 3 4) => [2 3 4])
+        (check-exception (obj.prepend "bad") contract-violation-error?)
+        (check-exception (obj.extend-from "bad") contract-violation-error?)
+        (for-each
+         (lambda (proc)
+           (check (proc obj 2) => [2])
+           (check (apply proc obj [2 3 4]) => [2 3 4]))
+         [RestMethods-prepend &RestMethods-prepend
+          RestMethods-extend-from &RestMethods-extend-from])
+        (for-each
+         (lambda (proc)
+           (check-exception (proc obj "bad") contract-violation-error?))
+         [RestMethods-prepend RestMethods-extend-from])))
 
     (test-case "test dispatch"
       (def x (make-X 1))
