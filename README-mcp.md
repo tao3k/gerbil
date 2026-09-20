@@ -123,6 +123,63 @@ Never put credentials or machine-specific secrets in committed client configurat
 
 ## Client Configuration
 
+### Pi
+
+[Pi](https://pi.dev) uses an extension for MCP support. Install Pi following its
+[upstream instructions](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent),
+then install [pi-mcp-extension](https://github.com/irahardianto/pi-mcp-extension):
+
+```sh
+pi install npm:pi-mcp-extension
+```
+
+Review third-party extensions before installing: they execute with your user's
+permissions. This command installs the extension in your user configuration; the
+repository does not vendor it or automatically install it.
+
+The committed [.pi/mcp.json](.pi/mcp.json) configures the checkout wrapper:
+
+```json
+{
+  "mcpServers": {
+    "gerbil": {
+      "command": "./gerbil-mcp.sh",
+      "lifecycle": "eager"
+    }
+  }
+}
+```
+
+Start `pi` from the checkout root, with `gerbil-mcp` on its inherited PATH.
+The extension defaults to stdio transport; `eager` starts the server at session
+startup and exposes its tools directly to the model. The JSON file alone does not
+provide MCP support without the extension. Review and approve Pi's project trust
+prompt when applicable.
+
+In the active session:
+
+- `/mcp` shows configured server status.
+- `/mcp gerbil` shows connection details and server stderr.
+- `/mcp:stop gerbil`, followed by `/mcp:start gerbil`, restarts the server with
+  the unchanged configuration, including rerunning the wrapper's runtime selection.
+
+Restart Pi after installing the extension or changing `.pi/mcp.json`. Restart the
+MCP server after the first successful checkout build if it started in fallback mode,
+and follow the branch/build restart guidance above. Ask the connected Gerbil tools
+to perform the runtime verification in [Verification And Troubleshooting](#verification-and-troubleshooting);
+a connected status alone does not prove runtime compatibility.
+
+The extension merges `~/.pi/agent/mcp.json` with the project configuration by server
+name, replacing matching server entries. A global server under a different name
+can still run alongside `gerbil`; check for unwanted duplicates. Tool names normally
+have the prefix `mcp_gerbil_`, for example `mcp_gerbil_gerbil_eval`; available names
+also depend on the MCP server's exposure mode.
+
+This configuration supplies MCP connectivity only. It neither selects a model nor
+grants permission to build, commit or push. Continue following [AGENTS.md](AGENTS.md)
+and the stdlib instructions where applicable. Keep personal credentials, session
+logs and installed package directories out of committed `.pi/` configuration.
+
 ### OpenCode
 
 The repository's [opencode.json](opencode.json) starts the wrapper with this configuration:
