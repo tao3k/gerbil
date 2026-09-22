@@ -3,8 +3,10 @@
 ;;; © mikael more
 ;;; © vyzo
 ;;; base64 encoding; the codec was written by Marc Feeley.
+(import :std/error)
 (export (rename: base64-string->u8vector base64-decode)
         (rename: u8vector->base64-string base64-encode)
+        base64-decoded-length
         base64-substring->u8vector
         subu8vector->base64-string)
 
@@ -58,6 +60,50 @@
 ;;
 
 (declare (fixnum))
+
+;; Strict canonical validation of str[start,end), without allocating decoded data.
+;; Completed groups contribute three bytes; the partial group is counted at EOF.
+(def (base64-decoded-length (str   : :string)
+                            (start : :fixnum := 0)
+                            (end   : :fixnum := (string-length str))
+                            padding: (padding? : :boolean := #t)
+                            urlsafe: (urlsafe? : :boolean := #f))
+  => (Maybe :fixnum)
+  (unless (and (fx<= 0 start) (fx<= start end) (fx<= end (string-length str)))
+    (raise-bad-argument base64-decoded-length "0 <= start <= end <= string length"
+                        start end (string-length str)))
+  (let loop ((i start) (rest 0) (last 0) (bytes 0))
+    (if (fx= i end)
+      (case rest
+        ((0) bytes)
+        ((2) (and (not padding?) (fxzero? (fxand last 15)) (fx+ bytes 1)))
+        ((3) (and (not padding?) (fxzero? (fxand last 3)) (fx+ bytes 2)))
+        (else #f))
+      (let (c (string-ref str i))
+        (if (char=? c #\=)
+          (and padding?
+               (case rest
+                 ((2) (and (fx= (fx- end i) 2)
+                           (char=? (string-ref str (fx+ i 1)) #\=)
+                           (fxzero? (fxand last 15))
+                           (fx+ bytes 1)))
+                 ((3) (and (fx= (fx- end i) 1)
+                           (fxzero? (fxand last 3))
+                           (fx+ bytes 2)))
+                 (else #f)))
+          (let (sextet
+                (cond
+                 ((char<=? #\A c #\Z) (fx- (char->integer c) 65))
+                 ((char<=? #\a c #\z) (fx+ 26 (fx- (char->integer c) 97)))
+                 ((char<=? #\0 c #\9) (fx+ 52 (fx- (char->integer c) 48)))
+                 ((char=? c (if urlsafe? #\- #\+)) 62)
+                 ((char=? c (if urlsafe? #\_ #\/)) 63)
+                 (else #f)))
+            (and sextet
+                 ;; i+1 <= end; bytes+3 never exceeds consumed input length.
+                 (if (fx= rest 3)
+                   (loop (fx+ i 1) 0 sextet (fx+ bytes 3))
+                   (loop (fx+ i 1) (fx+ rest 1) sextet bytes)))))))))
 
 ;; Representation of fifos.
 

@@ -6,6 +6,7 @@
 
 (C-ffi-macrology)
 (C-include "<openssl/crypto.h>"
+           "<openssl/kdf.h>"
            "<openssl/evp.h>"
            "<openssl/err.h>"
            "<openssl/dh.h>"
@@ -154,9 +155,9 @@ static int ffi_HMAC_Final (HMAC_CTX *ctx, ___SCMOBJ bytes)
   return HMAC_Final (ctx, U8_DATA (bytes), NULL);
 }
 
-static void ffi_HMAC (EVP_MD *type, ___SCMOBJ key, ___SCMOBJ bytes, int start, int end, ___SCMOBJ digest)
+static int ffi_HMAC (EVP_MD *type, ___SCMOBJ key, ___SCMOBJ bytes, int start, int end, ___SCMOBJ digest)
 {
-  HMAC (type, U8_DATA (key), U8_LEN (key), U8_DATA (bytes) + start, end - start, U8_DATA (digest), NULL);
+  return HMAC (type, U8_DATA (key), U8_LEN (key), U8_DATA (bytes) + start, end - start, U8_DATA (digest), NULL) != NULL;
 }
 
 /* bn */
@@ -211,23 +212,21 @@ static EVP_PKEY *ffi_EVP_PKEY_new_raw_public_key (int type, ENGINE* e, ___SCMOBJ
 }
 static int ffi_EVP_PKEY_get_raw_private_key (EVP_PKEY* pkey, ___SCMOBJ o)
 {
-  size_t len;
+  size_t len = 0;
   if ((void*)o == (void*)___FAL) {
-    EVP_PKEY_get_raw_private_key(pkey, NULL, &len);
-    return (int)len;
-  } else if (EVP_PKEY_get_raw_private_key(pkey, U8_DATA(o), &len)) {
-    return (int)len;
+    return EVP_PKEY_get_raw_private_key(pkey, NULL, &len) ? (int)len : 0;
   } else {
-    return 0;
+    len = U8_LEN(o);
+    return EVP_PKEY_get_raw_private_key(pkey, U8_DATA(o), &len) ? (int)len : 0;
   }
 }
 static int ffi_EVP_PKEY_get_raw_public_key (EVP_PKEY* pkey, ___SCMOBJ o)
 {
-  size_t len;
+  size_t len = 0;
   if ((void*)o == (void*)___FAL) {
-    EVP_PKEY_get_raw_public_key(pkey, NULL, &len);
-    return (int)len;
+    return EVP_PKEY_get_raw_public_key(pkey, NULL, &len) ? (int)len : 0;
   } else {
+    len = U8_LEN(o);
     return EVP_PKEY_get_raw_public_key(pkey, U8_DATA(o), &len) ? (int)len : 0;
   }
 }
@@ -293,6 +292,13 @@ END-C
 (def-C-lambda ERR_func_error_string (unsigned-long) char-string)
 (def-C-lambda ERR_reason_error_string (unsigned-long) char-string)
 (def-C-lambda ERR_error_string (unsigned-long) char-string "ffi_openssl_error_string")
+
+;;; Memory
+;; These raw byte-vector bindings require validated u8vector arguments.
+(def-C-lambda CRYPTO_memcmp (scheme-object scheme-object) int
+  "___result = U8_LEN(___arg1) == U8_LEN(___arg2) ? CRYPTO_memcmp(U8_DATA(___arg1), U8_DATA(___arg2), U8_LEN(___arg1)) : 1;")
+(def-C-lambda OPENSSL_cleanse (scheme-object) void
+  "OPENSSL_cleanse(U8_DATA(___arg1), U8_LEN(___arg1));")
 
 ;;; Engines
 (def-C-type/pointer ENGINE)
@@ -442,7 +448,7 @@ END-C
 (def-C-lambda HMAC_Init (HMAC_CTX* scheme-object EVP_MD*) int "ffi_HMAC_Init")
 (def-C-lambda HMAC_Update (HMAC_CTX* scheme-object int int) int "ffi_HMAC_Update")
 (def-C-lambda HMAC_Final (HMAC_CTX* scheme-object) int "ffi_HMAC_Final")
-(def-C-lambda HMAC (EVP_MD* scheme-object scheme-object int int scheme-object) void "ffi_HMAC")
+(def-C-lambda HMAC (EVP_MD* scheme-object scheme-object int int scheme-object) int "ffi_HMAC")
 
 ;;; BN
 (def-C-type/pointer BN "BIGNUM" release: "ffi_BN_free")
@@ -479,6 +485,7 @@ END-C
 (def-C-lambda EVP_PKEY_CTX_set_scrypt_N (EVP_PKEY_CTX* int) int)
 (def-C-lambda EVP_PKEY_CTX_set_scrypt_r (EVP_PKEY_CTX* int) int)
 (def-C-lambda EVP_PKEY_CTX_set_scrypt_p (EVP_PKEY_CTX* int) int)
+(def-C-lambda EVP_PKEY_CTX_set_scrypt_maxmem_bytes (EVP_PKEY_CTX* unsigned-int64) int)
 (def-C-lambda EVP_PKEY_derive (EVP_PKEY_CTX* scheme-object) int "ffi_EVP_PKEY_derive")
 
 (def-C-lambda EVP_MD_CTX_set_pkey_ctx (EVP_MD_CTX* EVP_PKEY_CTX*) void)

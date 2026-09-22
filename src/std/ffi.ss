@@ -56,7 +56,7 @@
 
 (deferror-class AllocationError () foreign-allocation-error?)
 (defraise/context (raise-allocation-error where irritants ...)
-  (PrematureEndOfInput "foreign memory allocation failure" irritants: [irritants ...]))
+  (AllocationError "foreign memory allocation failure" irritants: [irritants ...]))
 
 (defrule (check-pointer where expr)
   (let (ptr expr)

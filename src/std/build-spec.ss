@@ -217,6 +217,9 @@
        `(gxc: "net/ssl/libssl"
 	      "-ld-options" ,(ldflags "libssl" "-lssl"))))
     "net/ssl/error"
+    (gxc: "net/ssl/error-test-support"
+          "-cc-options" ,(cppflags "libssl" "")
+          "-ld-options" ,(ldflags "libcrypto" "-lcrypto"))
     "net/ssl/interface"
     "net/ssl/socket"
     "net/ssl/client"
@@ -240,6 +243,7 @@
     "net/socks"
 
     "encoding/base64"
+    "encoding/base32"
     "encoding/base58"
     "encoding/hex"
     "encoding/json/env"
@@ -331,6 +335,7 @@
     "db/interface"
     "db/db"
     "db/cache"
+    "db/schema"
     "db/connpool"
     "db/query"
     "db/postgresql-driver"
@@ -344,73 +349,48 @@
     "actor/serde"
     "actor/api"
     "actor"
+
+    "ensemble/ucan/interface"
+    "ensemble/ucan/did"
+    "ensemble/ucan/util"
+    "ensemble/ucan/cap"
+    "ensemble/ucan/ext"
+
+    "ensemble/network/config"
+    "ensemble/network/log"
+    "ensemble/network/thread"
+    "ensemble/network/listener"
+    "ensemble/network/wire"
+    "ensemble/network/auth"
+    "ensemble/network/handshake"
+    "ensemble/network/connector"
+    "ensemble/network/network"
+    "ensemble/network/stream"
+    "ensemble/network/connection"
+    "ensemble/network/renewal"
+    "ensemble/network/interface"
+    "ensemble/network/tls"
+    "ensemble/network"
+
+    "ensemble/keystore/interface"
+    "ensemble/keystore/crypto"
+    "ensemble/keystore/store"
+    "ensemble/keystore/memory"
+    "ensemble/keystore/persistent"
+    "ensemble/keystore/api"
+    "ensemble/keystore"
+
     ,@(if config-enable-sqlite
         `((gxc: "db/sqlite-driver"
                 "-cc-options" ,(cppflags "sqlite3" "")
                 "-ld-options" ,(append-options (ldflags "sqlite3" "-lsqlite3") "-lm"))
-          "db/sqlite")
+          "db/sqlite"
+          (gxc: "ensemble/ucan/db" (extra-inputs: ("ensemble/ucan/db.sql")))
+          "ensemble/ucan/context")
         '())
     "db"
 
     "encoding/multibase"
-
-    ;; TODO
-    ;; "ensemble/interface/ucan"
-    ;; "ensemble/interface/message"
-    ;; "ensemble/interface/actor"
-    ;; "ensemble/interface/network"
-    ;; "ensemble/interface/address"
-    ;; "ensemble/interface/broadcast"
-    ;; "ensemble/interface/host"
-    ;; "ensemble/interface/protocol"
-    ;; "ensemble/interface/event"
-    ;; "ensemble/interface"
-
-    ;; "ensemble/ucan/cap"
-    ;; "ensemble/ucan/did"
-    ;; "ensemble/ucan/db"
-    ;; "ensemble/ucan/context"
-    ;; "ensemble/ucan/security"
-    ;; "ensemble/ucan/ext"
-
-    ;; "ensemble/actor/types"
-    ;; "ensemble/actor/util"
-    ;; "ensemble/actor/macros"
-    ;; "ensemble/actor/reactor"
-    ;; "ensemble/actor/actor"
-    ;; "ensemble/actor"
-
-    ;; "ensemble/config"
-
-    ;; "ensemble/network/base"
-    ;; "ensemble/network/connector"
-    ;; "ensemble/network/listener"
-    ;; "ensemble/network/handshake"
-    ;; "ensemble/network/connection"
-    ;; "ensemble/network/stream"
-    ;; "ensemble/network/network"
-    ;; "ensemble/network"
-
-    ;; "ensemble/broadcast"
-    ;; "ensemble/broadcast/broadcast"
-
-    ;; "ensemble/host/types"
-    ;; "ensemble/host/db"
-    ;; "ensemble/host/bus"
-    ;; "ensemble/host/actor-dispatch"
-    ;; "ensemble/host/actor-context"
-    ;; "ensemble/host/actor-handler"
-    ;; "ensemble/host/actor-space"
-    ;; "ensemble/host/monitor"
-    ;; "ensemble/host/resolver"
-    ;; "ensemble/host/stream-cache"
-    ;; "ensemble/host/basic"
-    ;; "ensemble/host/server"
-
-    ;; "ensemble/tls"
-
-    ;; "ensemble/svc/loader/protocol"
-    ;; "ensemble/svc/loader/server"
 
     "text/markup/sxml/print"
     (gxc: "text/markup/sxml/ssax")

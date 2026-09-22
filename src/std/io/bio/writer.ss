@@ -171,9 +171,10 @@
 (def (bio-write-char-utf8 (bio : basic-output-buffer) (char : :char))
   => :fixnum
   (let (c (char->integer char))
-    (let* ((buf bio.buf)
-           (buflen (u8vector-length buf)))
-      (let again ((whi bio.whi))
+    (let again ((whi bio.whi))
+      ;; A memory drain replaces the buffer while preserving the write position.
+      (let* ((buf bio.buf)
+             (buflen (u8vector-length buf)))
         (cond
          ((fx<= c #x7f)
           (if (fx< whi buflen)

@@ -101,7 +101,7 @@
     (set! dev.dir
       (fxand dev.dir (fxnot direction)))
     (when (fx= dev.dir 0)
-      (unwind-protect
+      (unwind-protect!
         (close-port dev.raw)
         (set! dev.raw #f)))))
 

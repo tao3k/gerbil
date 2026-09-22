@@ -9,7 +9,7 @@
         ./stringer)
 (export #t)
 
-(deferror-class ResolverError ())
+(deferror-class (ResolverError IOError) ())
 
 (defraise/context (raise-resolver-error where message irritants ...)
   (ResolverError message irritants: [irritants ...]))
@@ -39,7 +39,11 @@
       (if (pair? self.resolved)
         (:- (list-random-ref self.resolved) EndpointAddress)
         (let* ((info
-                (host-info self.host))
+                (try
+                  (host-info self.host)
+                  (catch (os-exception? e)
+                    (raise-resolver-error DNSAddress::resolve "Host lookup failed"
+                      (os-exception-arguments e) host: self.host))))
                (ips
                 (map u8vector->ip-address
                      (host-info-addresses info)))

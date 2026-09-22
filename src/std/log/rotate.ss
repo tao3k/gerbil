@@ -63,7 +63,7 @@
   (lambda (self)
     (when self.thread
       (thread-send self.thread !STOP!))
-    (unwind-protect
+    (unwind-protect!
       (thread-join! self.thread)
       (set! self.thread #f)))
   interface: LogSink)

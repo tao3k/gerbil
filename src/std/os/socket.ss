@@ -9,6 +9,16 @@
         ./sockaddr)
 (export #t)
 
+;; Only connect failures carry this type; socket creation/options remain OSError.
+(deferror-class (SocketConnectError OSError IOError) () #f
+  (lambda (self errno . args)
+    (let (errno (if (fx< errno 0) (fx- errno) errno))
+      (apply Error:::init! self (strerror errno) args)
+      (set! (OSError-errno self) errno))))
+
+(defraise/context (raise-socket-connect-error where errno irritants ...)
+  (SocketConnectError errno irritants: [irritants ...]))
+
 (defstruct (SocketDevice OSDevice)
   ((domain :- :fixnum)
    (type   :- :fixnum)
@@ -106,6 +116,7 @@
   => :fixnum
   (do-check-device-output socket-device-connect sock
     (do-syscall (__connect sock.fd sa)
+                raise: raise-socket-connect-error
                 EINPROGRESS EWOULDBLOCK EAGAIN)))
 
 ;; TODO safer input/output range interface

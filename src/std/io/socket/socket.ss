@@ -25,8 +25,9 @@
           ((unix)  AF_UNIX)
           (else
            (raise-bad-argument connect "bad address domain" address: addr))))
-    (let* ((sock (open-client-socket-device domain type proto))
-           (sa   (address->sockaddr addr)))
+    ;; Finish address allocation/validation before acquiring a socket device.
+    (let* ((sa   (address->sockaddr addr))
+           (sock (open-client-socket-device domain type proto)))
       (with-error-device-close sock
         (let (errno (socket-device-connect sock sa))
           (if (fx< errno 0)
@@ -35,7 +36,7 @@
                 (let (errno (socket-device-getsockopt sock SOL_SOCKET.SO_ERROR))
                   (if (fx= errno 0)
                     sock
-                    (raise-os-error connect errno address: addr)))
+                    (raise-socket-connect-error connect errno address: addr)))
                 (raise-timeout connect "connection timeout" address: addr)))
             sock))))))
 

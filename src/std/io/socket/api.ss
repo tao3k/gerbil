@@ -89,7 +89,7 @@
   => ServerSocket
   (using (addr (resolve->endpoint addr) :- EndpointAddress)
     (case addr.domain
-      ((ip4 ip6)
+      ((inet4 inet6)
        (tcp-listen addr backlog: backlog sockopts: sockopts))
       ((unix)
        (unix-listen addr backlog: backlog sockopts: sockopts))

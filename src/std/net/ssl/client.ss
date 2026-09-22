@@ -37,11 +37,11 @@
                      (&interface-instance-object ssock)
                      ssl)
                     : ssl-socket)
-      (with-ssl-result (SSL_set_fd ssl sslsock.dev.fd))
-      (with-ssl-result (SSL_set_host ssl host))
       (set! sslsock.timeo-in deadline)
       (set! sslsock.timeo-out deadline)
       (try
+       (with-ssl-result (SSL_set_fd ssl sslsock.dev.fd))
+       (with-ssl-result (SSL_set_host ssl host))
        (ssl-client-handshake sslsock)
        (catch (e)
          (foreign-release! ssl)
@@ -67,7 +67,9 @@
               (loop)
               (raise-timeout ssl-connect "send timeout")))
            (else
-            (raise-ssl-error ssl-connect result))))))))
+            (if (ssl-local-error? result)
+              (raise-ssl-error ssl-connect result)
+              (raise-ssl-handshake-error ssl-connect result)))))))))
 
 (def (default-client-ssl-context)
   (force __default-client-ssl-context))

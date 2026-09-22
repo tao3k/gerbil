@@ -5,7 +5,26 @@
 (import :std/error)
 (export make-detached-thread-group
         thread-group->thread-list*
-        thread-group-kill!)
+        thread-group-kill!
+        thread-join!/error)
+
+;; Join with the native timeout/timeout-value semantics, but propagate the
+;; worker's original exception instead of its uncaught-exception wrapper.
+;; A native join timeout becomes Timeout; explicit timeout values are unchanged.
+;; Worker failures (even a worker-raised native timeout), termination, and caller
+;; cancellation propagate unchanged. Classify before unwrapping worker failures.
+(def (thread-join!/error (thread        : :thread)
+                         (timeout       : :t := absent-obj)
+                         (timeout-value : :t := absent-obj))
+  => :t
+  (with-catch
+   (lambda (e)
+     (cond
+      ((uncaught-exception? e) (raise (uncaught-exception-reason e)))
+      ((join-timeout-exception? e)
+       (raise-timeout thread-join!/error "Thread join timed out" thread timeout))
+      (else (raise e))))
+   (lambda () (thread-join! thread timeout timeout-value))))
 
 ;; Make a thread group with no parent.
 (def (make-detached-thread-group (name : :t := (void)))

@@ -33,6 +33,7 @@
       result: result
       error: error?
       eqv: eqv
+      raise: raise-error
       ERRNO ...)
    (with-identifier (r '$r)
      (with-syntax (((val ...) (gentemps #'(arg ...))))
@@ -47,17 +48,25 @@
                       ((or (eqv errno ERRNO) ...)
                        (result r))
                       (else
-                       (raise-os-error prim errno args: [val ...])))))))))))
+                       (raise-error prim errno args: [val ...])))))))))))
+  ((_ expr errno: get-errno result: result error: error? eqv: eqv ERRNO ...)
+   #'(do-try-syscall expr errno: get-errno result: result error: error? eqv: eqv
+       raise: raise-os-error ERRNO ...))
   )
 
-(defrule (do-syscall expr ERRNO ...)
-  (: (do-try-syscall expr
-       errno: fx-
-       result: (lambda (r) r)
-       error: fxnegative?
-       eqv: fx=
-       ERRNO ...)
-     :fixnum))
+;; A source-specific raiser shares argument evaluation, EINTR and pending rules.
+(defrules do-syscall ()
+  ((_ expr raise: raise-error ERRNO ...)
+   (: (do-try-syscall expr
+        errno: fx-
+        result: (lambda (r) r)
+        error: fxnegative?
+        eqv: fx=
+        raise: raise-error
+        ERRNO ...)
+      :fixnum))
+  ((_ expr ERRNO ...)
+   (do-syscall expr raise: raise-os-error ERRNO ...)))
 
 (defrule (do-syscall64 expr ERRNO ...)
   (: (do-try-syscall expr
@@ -103,6 +112,10 @@
   ECONNABORTED
   ECONNREFUSED
   ECONNRESET
+  EHOSTUNREACH
+  ENETUNREACH
+  ENETDOWN
+  ETIMEDOUT
   EDOM
   EEXIST
   EFAULT

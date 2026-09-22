@@ -99,19 +99,11 @@
        #!eof
        (dequeue! self.q)))))
 
-(def (queue-copy (q : Queue))
-  => Queue
-  (using (nq (make-Queue) :- Queue)
-    (let (front* (list-copy q.front))
-      (set! nq.front front*)
-      (set! nq.length q.length)
-      (when (pair? front*)
-        (set! nq.back (last-pair front*)))
-      nq)))
-
+;; Traverse the existing links without copying or consuming the queue.
+;; This is not a snapshot; callers must not mutate the queue during iteration.
 (def (in-queue (q : Queue))
   => Iterator
-  (Iterator (make-QueueIterator (queue-copy q))))
+  (__in-list q.front))
 
 (implement Iterable Queue
   (iter

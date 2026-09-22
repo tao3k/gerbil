@@ -18,4 +18,5 @@
         ssl-listen
         ssl-client-upgrade
         ssl-server-upgrade
-        ssl-error?)
+        ssl-error?
+        (struct-out SSLError SSLHandshakeError))

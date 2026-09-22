@@ -15,7 +15,8 @@
          IP6Address
          InetAddress
          UnixAddress
-         DNSAddress)
+          DNSAddress
+          ResolverError)
         inaddr-any4
         inaddr-any6
         localhost4

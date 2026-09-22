@@ -72,32 +72,32 @@
 
 (def (buffer-cache.get (size : :fixnum))
   => :u8vector
-  (let* ((bits   (integer-length size))
-         (bucket (fx- bits 1)))
-    (let again ((bucket bucket)
-                (bucket-size (fxshift 1 bucket)))
-      (if (fx< bucket-size size)
-        (again (fx+ bucket 1) (fxshift bucket-size 1))
-        (using (cache __buffer-cache :- BufferCache)
-          (cond
-           ((do-with-spin-lock cache.lock
-              (and (fx< bucket (vector-length cache.caches))
-                   (vector-ref cache.caches bucket)))
-            => (lambda ((ocache :- ObjectCache))
-                 => :u8vector
-                 (:- (object-cache-get ocache) :u8vector)))
-           (else
-            (make-u8vector size))))))))
+  (cond
+   ((fx> size 0)
+    ;; Ceiling bucket without shifting a capacity beyond the fixnum range.
+    (let (bucket (integer-length (fx- size 1)))
+      (using (cache __buffer-cache :- BufferCache)
+        (cond
+         ((do-with-spin-lock cache.lock
+            (and (fx< bucket (vector-length cache.caches))
+                 (vector-ref cache.caches bucket)))
+          => (lambda ((ocache :- ObjectCache))
+               => :u8vector
+               (:- (object-cache-get ocache) :u8vector)))
+         (else
+          (make-u8vector size))))))
+   ((fxzero? size)
+    #u8())
+   (else
+    (raise-bad-argument buffer-cache.get "nonnegative fixnum" size))))
 
 (def (buffer-cache.put! (buf : :u8vector))
   => :void
-  (let* ((size   (u8vector-length buf))
-         (bits   (integer-length size))
-         (bucket (fx- bits 1)))
-    (let again ((bucket bucket)
-                (bucket-size (fxshift 1 bucket)))
-      (if (fx< bucket-size size)
-        (again (fx+ bucket 1) (fxshift bucket-size 1))
+  (let (size (u8vector-length buf))
+    (unless (fxzero? size)
+      ;; Only cache buffers that can hold the bucket's full capacity.
+      (let* ((bucket (fx- (integer-length size) 1))
+             (bucket-size (fxshift 1 bucket)))
         (using (cache __buffer-cache :- BufferCache)
           (do-with-spin-lock cache.lock
             (when (fx< bucket (vector-length cache.caches))
@@ -113,7 +113,7 @@
                                    0
                                    cache.max-cache-size
                                    (lambda () (make-u8vector bucket-size))
-                                   (lambda (buf)
+                                   (lambda ((buf :- :u8vector))
                                      (when (fx> (u8vector-length buf) bucket-size)
                                        (u8vector-shrink! buf bucket-size)))))
                   (vector-set! cache.caches bucket ocache)

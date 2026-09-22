@@ -56,8 +56,22 @@
     (set! sslsock.ctx ctx)
     sslsock))
 
+;; Both close paths must catch inside the write lock, before its exception
+;; handler unlocks. A dynamic-wind finalizer alone runs too late, or not at all
+;; in a plain failing thread. Native ownership is independent of device liveness.
+(defrule (with-ssl-socket-close self body ...)
+  (using (socket self :- ssl-socket)
+    (let (failure [])
+      (do-with-write-lock socket.lock
+        (begin
+          (try (begin body ...) (catch (e) (set! failure [e])))
+          (when socket.ssl
+            (foreign-release! socket.ssl)
+            (set! socket.ssl #f))))
+      (unless (null? failure) (raise (car failure))))))
+
 (def (ssl-socket-shutdown (self : ssl-socket))
-  (do-with-write-lock self.lock
+  (with-ssl-socket-close self
     (unless (fx= self.dev.dir 0)
       (try
        (let loop ()
@@ -70,17 +84,12 @@
             ((eqv? result SSL_ERROR_WANT_WRITE)
              (when (device-wait-output! self.dev self.timeo-out)
                (loop))))))
-       (catch (e) (void)))
-      (device-close self.dev DIRECTION-INOUT)
-      (foreign-release! self.ssl)
-      (set! self.ssl #f))))
+       (catch (e) (void))))
+    (device-close self.dev DIRECTION-INOUT)))
 
 (def (ssl-socket-close (self :- ssl-socket))
-  (do-with-write-lock self.lock
-    (unless (fx= self.dev.dir 0)
-      (device-close self.dev DIRECTION-INOUT)
-      (foreign-release! self.ssl)
-      (set! self.ssl #f))))
+  (with-ssl-socket-close self
+    (device-close self.dev DIRECTION-INOUT)))
 
 (def (ssl-socket-recv (self         : ssl-socket)
                       (output       : :u8vector)
@@ -151,11 +160,13 @@
   (TLS
    (ssl-socket
     (peer-certificate
-    (lambda (self)
-      (or self.peer-cert
-          (let (cert (SSL_get_peer_certificate self.ssl))
-            (set! self.peer-cert cert)
-            cert))))))
+     (lambda (self)
+       (do-with-write-lock self.lock
+         (or self.peer-cert
+             (do-check-device-input ssl-peer-certificate self.dev
+               (let (cert (SSL_get_peer_certificate self.ssl))
+                 (set! self.peer-cert cert)
+                 cert))))))))
   (Closer
    (ssl-socket-reader
     (close
@@ -178,10 +189,10 @@
              (let (read (ssl-socket-recv sock output output-start output-end 0))
                (cond
                 ((fx= read 0)
-                 (if (fx> input-need result)
+                 (if (fxpositive? input-need)
                    (raise-premature-end-of-input ssl-socket-read input-need)
                    result))
-                ((fx> read input-need)
+                ((fx>= read input-need)
                  (fx+ result read))
                 (else
                  (loop (fx+ output-start read) (fx- input-need read) (fx+ result read)))))

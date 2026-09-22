@@ -23,6 +23,17 @@
            "<openssl/bio.h>"
            "<openssl/x509v3.h>")
 
+;; SYSCALL does not preserve errno in the existing result representation, so it
+;; cannot safely be classified as a retryable peer failure. statem.c appends
+;; INTERNAL_ERROR after buffer allocation failures. ERR_GET_REASON retains the
+;; common/fatal flags present in these constants; do not strip flags on one side
+;; or classify every fatal protocol error as local. Leave the error queue intact.
+(def-C-lambda (SSL_error_is_local (code : int) (last : unsigned-long))
+  => bool
+  "___return(___arg1 == SSL_ERROR_SYSCALL ||
+             ERR_GET_REASON(___arg2) == ERR_R_MALLOC_FAILURE ||
+             ERR_GET_REASON(___arg2) == ERR_R_INTERNAL_ERROR);")
+
 (C-declare #<<END-C
 static int ffi_sk_GENERAL_NAME_num(const STACK_OF(GENERAL_NAME) *sk)
 {
@@ -56,8 +67,8 @@ static ___SCMOBJ ffi_release_X509 (void *ptr)
 
 static ___SCMOBJ ffi_ssl_error(SSL *ssl, int r)
 {
- unsigned long last = ERR_peek_last_error();
  int err = SSL_get_error(ssl, r);
+ unsigned long last = ERR_peek_last_error();
  switch (err) {
   case SSL_ERROR_WANT_READ:
    return ___CHR(114);
@@ -93,8 +104,11 @@ static SSL* ffi_ssl_new(SSL_CTX *ctx)
  return ssl;
 }
 
+/* Scheme threads share the OS thread's error queue. Clear it before each I/O
+ * operation, keeping the operation and its error capture in the same C call. */
 static ___SCMOBJ ffi_ssl_connect(SSL *ssl)
 {
+ ERR_clear_error();
  int r = SSL_connect(ssl);
  if (r > 0) {
   return ___FIX(r);
@@ -105,6 +119,7 @@ static ___SCMOBJ ffi_ssl_connect(SSL *ssl)
 
 static ___SCMOBJ ffi_ssl_accept(SSL *ssl)
 {
+ ERR_clear_error();
  int r = SSL_accept(ssl);
  if (r > 0) {
   return ___FIX(r);
@@ -115,6 +130,7 @@ static ___SCMOBJ ffi_ssl_accept(SSL *ssl)
 
 static ___SCMOBJ ffi_ssl_read(SSL *ssl, ___SCMOBJ buf, int start, int end)
 {
+ ERR_clear_error();
  int r = SSL_read(ssl, U8_DATA (buf) + start, end - start);
  if (r > 0) {
   return ___FIX(r);
@@ -125,6 +141,7 @@ static ___SCMOBJ ffi_ssl_read(SSL *ssl, ___SCMOBJ buf, int start, int end)
 
 static ___SCMOBJ ffi_ssl_write(SSL *ssl, ___SCMOBJ buf, int start, int end)
 {
+ ERR_clear_error();
  int r = SSL_write(ssl, U8_DATA (buf) + start, end - start);
  if (r > 0) {
   return ___FIX(r);
@@ -135,6 +152,7 @@ static ___SCMOBJ ffi_ssl_write(SSL *ssl, ___SCMOBJ buf, int start, int end)
 
 static ___SCMOBJ ffi_ssl_shutdown(SSL *ssl)
 {
+ ERR_clear_error();
  int r = SSL_shutdown(ssl);
  if (r > 0) {
   return ___FIX(r);
@@ -412,7 +430,7 @@ static int ffi_ssl_verify_self_signed(int preverify, X509_STORE_CTX *ctx)
  int err = X509_STORE_CTX_get_error(ctx);
  int depth = X509_STORE_CTX_get_error_depth(ctx);
  if (err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT && depth == 0) {
-  if (X509_self_signed(cert, 0) == 1) {
+  if (X509_self_signed(cert, 1) == 1) {
    X509_STORE_CTX_set_error(ctx, X509_V_OK);
    return 1;
   }
@@ -447,23 +465,26 @@ static SSL_CTX *ffi_self_signed_tls_ctx(EVP_PKEY *pkey, char *hostname)
   goto error;
  }
 
- X509_set_pubkey(x509, pkey);
- X509_gmtime_adj(X509_get_notBefore(x509), 0);
- X509_gmtime_adj(X509_get_notAfter(x509), 3153600000L);
+ if (X509_set_pubkey(x509, pkey) != 1 ||
+     !X509_gmtime_adj(X509_get_notBefore(x509), 0) ||
+     !X509_time_adj_ex(X509_get_notAfter(x509), 36500, 0, NULL)) {
+  goto error;
+ }
 
  name = X509_get_subject_name(x509);
- X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                           (unsigned char *)hostname,
-                           -1, -1, 0);
- X509_NAME_add_entry_by_txt(name, "C",  MBSTRING_ASC,
-                           (unsigned char *)"UN", -1, -1, 0);
- X509_NAME_add_entry_by_txt(name, "O",  MBSTRING_ASC,
-                           (unsigned char *)"Mighty Gerbils", -1, -1, 0);
- X509_NAME_add_entry_by_txt(name, "L",  MBSTRING_ASC,
-                           (unsigned char *)"Internet", -1, -1, 0);
- X509_set_issuer_name(x509, name);
-
- X509_sign(x509, pkey, NULL);
+ if (!name ||
+     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (unsigned char *)hostname, -1, -1, 0) != 1 ||
+     X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC,
+                               (unsigned char *)"UN", -1, -1, 0) != 1 ||
+     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
+                               (unsigned char *)"Mighty Gerbils", -1, -1, 0) != 1 ||
+     X509_NAME_add_entry_by_txt(name, "L", MBSTRING_ASC,
+                               (unsigned char *)"Internet", -1, -1, 0) != 1 ||
+     X509_set_issuer_name(x509, name) != 1 ||
+     X509_sign(x509, pkey, NULL) <= 0) {
+  goto error;
+ }
 
  r = SSL_CTX_use_certificate(ctx, x509);
  if (r <= 0) {
@@ -472,6 +493,7 @@ static SSL_CTX *ffi_self_signed_tls_ctx(EVP_PKEY *pkey, char *hostname)
 
  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT|0, ffi_ssl_verify_self_signed);
 
+ X509_free(x509);
  return ctx;
 
 error:

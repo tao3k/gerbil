@@ -85,8 +85,10 @@
     (condition-variable-broadcast! rw.rcv))
   (mutex-unlock! rw.mx))
 
+;; Pair only completed entry with exit; entry may itself release a read lock.
 (defrule (do-with-rwlock rw expr enter! exit!)
   (let (handler (current-exception-handler))
+    (enter! rw)
     (with-exception-handler
      (lambda (e)
        (with-catch void
@@ -96,7 +98,6 @@
        ;; if the handler returns here the state is inconsistent -- we need to bail
        (##thread-end-with-uncaught-exception! e))
      (lambda ()
-       (enter! rw)
        (let (result expr)
          (exit! rw)
          result)))))

@@ -41,7 +41,7 @@
       (let (rd (client-socket-recv reader.sock output output-start output-end 0))
         (cond
          ((fx= rd 0)
-          (if (fx> input-need result)
+          (if (fxpositive? input-need)
             (raise-premature-end-of-input stream-socket-read input-need)
             result))
          ((fx>= rd input-need)

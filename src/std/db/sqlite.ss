@@ -88,7 +88,7 @@
        ((number? arg)
         (cond
          ((exact-integer? arg)
-          (if (< (abs arg) (expt 2 32))
+           (if (<= (- (expt 2 31)) arg (- (expt 2 31) 1))
             (sqlite3_bind_int self.ptr param arg)
             (sqlite3_bind_int64 self.ptr param arg)))
          ((real? arg)

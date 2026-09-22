@@ -3,7 +3,7 @@
 ;;; base58 encoding and decoding
 
 (import :std/error)
-(export base58-encode base58-decode
+(export base58-encode base58-decode base58-valid?
         base58-btc-alphabet base58-flickr-alphabet)
 
 (declare (not safe))
@@ -36,6 +36,20 @@
 
 (def base58-flickr-alphabet
   (make-alphabet "123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"))
+
+;; Validate str[start,end) without converting to an integer or decoded bytes.
+(def (base58-valid? (str   : :string)
+                    (start : :fixnum := 0)
+                    (end   : :fixnum := (string-length str))
+                    (ab    : alphabet := base58-btc-alphabet))
+  => :boolean
+  (unless (and (fx<= 0 start) (fx<= start end) (fx<= end (string-length str)))
+    (raise-bad-argument base58-valid? "0 <= start <= end <= string length"
+                        start end (string-length str)))
+  (let loop ((i start))
+    (or (fx= i end)
+        (and (alphabet-decode ab (string-ref str i))
+             (loop (fx1+ i))))))
 
 (def (base58-encode bytes (ab base58-btc-alphabet))
   (let* ((idx (fx1+ (fxquotient (fx* (u8vector-length bytes) 138) 100)))

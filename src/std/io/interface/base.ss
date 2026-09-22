@@ -36,8 +36,9 @@
 (interface (Writer Closer)
   ;; write from a buffer; it _must_ be a u8vector
   ;; - start denotes the start of the write region; it must be a fixnum within the buffer range.
-  ;; - end denotes the write region end; #f means the end of the buffer
-  ;; Returns the number of bytes written.
+  ;; - end denotes the exclusive write region end; defaults to the buffer length.
+  ;; Consumes the entire requested region and returns end - start, or raises.
+  ;; Internal partial writes must not be returned as successful Writer operations.
   (write (u8v   :  :u8vector)
          (start :~ (in-range-inclusive? 0 (u8vector-length u8v))     :- :fixnum := 0)
          (end   :~ (in-range-inclusive? start (u8vector-length u8v)) :- :fixnum := (u8vector-length u8v)))

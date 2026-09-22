@@ -1,0 +1,11 @@
+{
+  "theme": "neutral",
+  "fontFamily": "Arial, sans-serif",
+  "sequence": {
+    "useMaxWidth": false,
+    "wrap": true,
+    "width": 180,
+    "actorMargin": 50,
+    "mirrorActors": false
+  }
+}

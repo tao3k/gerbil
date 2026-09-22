@@ -6,6 +6,8 @@
         ./libcrypto
         ./error)
 (export #t)
+
+;; Compute HMAC over bytes[start:end], raising if OpenSSL cannot produce a digest.
 (def (hmac-digest (md     :~ EVP_MD? :- :foreign)
                   (key    : :u8vector)
                   (bytes  : :u8vector)
@@ -16,7 +18,7 @@
   => :u8vector
   (let* ((size (EVP_MD_size md))
          (digest (make-u8vector size)))
-    (HMAC md key bytes start end digest)
+    (with-libcrypto-error hmac-digest (HMAC md key bytes start end digest))
     digest))
 
 (defrule (defhmac name digest)

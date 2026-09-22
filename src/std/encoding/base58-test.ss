@@ -1,6 +1,7 @@
 (export base58-test)
 (import
   :std/test
+  :std/error
   ./base58)
 
 (def base58-test
@@ -18,4 +19,26 @@
                  ["11" #u8(0 0)]
                  ["3VNr6P" (@bytes "abcd")]
                  ["zZ" (@bytes "\r\n")]]))
-    ))
+    (test-case "base58 validation"
+      (for-each
+       (lambda (ab)
+         (for-each
+          (lambda (str) (check (base58-valid? str 0 (string-length str) ab) => #t))
+          '("" "1" "11" "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"))
+         (for-each
+          (lambda (str) (check (base58-valid? str 0 (string-length str) ab) => #f))
+          '("0" "O" "I" "l" "abc!" "abc=" "abc " "abc\n" "\x80;")))
+       (list base58-btc-alphabet base58-flickr-alphabet))
+      (check (base58-valid? "1") => #t)
+      (check (base58-valid? "!123?" 1 4) => #t)
+      (check (base58-valid? "!123" 1) => #t)
+      (check (base58-valid? "!" 1 1) => #t)
+      (check (base58-valid? "!123?" 1 5) => #f))
+    (test-case "base58 validation bounds"
+      (check-exception (base58-valid? "abc" -1) ContractViolation?)
+      (check-exception (base58-valid? "abc" 2 1) ContractViolation?)
+      (check-exception (base58-valid? "abc" 0 4) ContractViolation?)
+      (check-exception (base58-valid? "abc" 4) ContractViolation?)
+      (check-exception (base58-valid? "abc" 0 -1) ContractViolation?)
+      (check-exception (base58-valid? "abc" 1/2) ContractViolation?)
+      (check-exception (base58-valid? "abc" 0 1/2) ContractViolation?))))

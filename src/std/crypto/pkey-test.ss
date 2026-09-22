@@ -21,6 +21,25 @@
 
 (def pkey-test
   (test-suite "test :std/crypto/pkey"
+    (test-case "raw key export respects destination capacity"
+      (let* ((seed (make-u8vector 32 7))
+             (priv (bytes->ed25519-private-key seed))
+             (key (PrivKey-key priv)))
+        (unwind-protect
+          (begin
+            (check (EVP_PKEY_get_raw_private_key key #f) => 32)
+            (check (EVP_PKEY_get_raw_public_key key #f) => 32)
+            (for-each
+             (lambda (size)
+               (check (EVP_PKEY_get_raw_private_key key (make-u8vector size 0)) => 0)
+               (check (EVP_PKEY_get_raw_public_key key (make-u8vector size 0)) => 0))
+             '(0 31))
+            (let (output (make-u8vector 32 0))
+              (check (EVP_PKEY_get_raw_private_key key output) => 32)
+              (check output => seed)
+              (check (EVP_PKEY_get_raw_public_key key output) => 32)
+              (check output => (private-key->public-bytes priv))))
+          (foreign-release! key))))
     (test-case "test signature vectors"
       (test-signature-type
        EVP_PKEY_ED25519

@@ -37,18 +37,19 @@
        (ssl-server-upgrade clisock self.ctx)))))
 
 (def (ssl-server-upgrade (clisock : StreamSocket)
-                         (ctx      :~ SSL_CTX? :- :foreign))
+                         (ctx      :~ SSL_CTX? :- :foreign)
+                         timeout: (timeo : IOTimeout := default-connect-timeout))
   => StreamSocket
-  (let* ((deadline (timeout->deadline default-connect-timeout))
+  (let* ((deadline (timeout->deadline timeo))
          (ssl (check-pointer ssl-server-upgrade (SSL_new ctx))))
     (using (sslsock (__ssl-socket-from-stream-socket
                      (&interface-instance-object clisock)
                      ssl)
                     : ssl-socket)
-      (with-ssl-result (SSL_set_fd ssl sslsock.dev.fd))
       (set! sslsock.timeo-in deadline)
       (set! sslsock.timeo-out deadline)
       (try
+       (with-ssl-result (SSL_set_fd ssl sslsock.dev.fd))
        (ssl-server-handshake sslsock)
        (catch (e)
          (foreign-release! ssl)
@@ -74,4 +75,6 @@
               (loop)
               (raise-timeout ssl-accept "send timeout")))
            (else
-            (raise-ssl-error ssl-accept result))))))))
+            (if (ssl-local-error? result)
+              (raise-ssl-error ssl-accept result)
+              (raise-ssl-handshake-error ssl-accept result)))))))))
