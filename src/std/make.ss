@@ -217,15 +217,15 @@ TODO:
           (not (ormap file-exists? (spec-outputs spec settings)))))
    (normalize-buildspec buildspec-in)))
 
-;; A cold library build retires each expansion session at a process boundary.
-;; Incremental dependency discovery keeps its existing coordinator until its
-;; imported contexts have a separately qualified retirement contract.
+;; Retire each compiler/optimizer session at a process boundary. Keep the
+;; official dependency coordinator: source-list order does not imply that
+;; imported modules have delivered their cross-module optimizer metadata.
+;; The coordinator's expander contexts still require a retirement contract.
 (def (make-build/separate buildspec-in settings)
   (def buildspec (normalize-buildspec buildspec-in))
   (def files (make-hash-table))
-  ;; Validate the whole request before producing outputs. Preserve declared
-  ;; order; missing macro support is an error, never permission to import every
-  ;; source into this coordinator.
+  ;; Validate the whole request before producing outputs. Dependency ordering
+  ;; and completion publication remain owned by make-build below.
   (for (spec buildspec)
     (unless (memq (spec-type spec) '(gxc: ssi:))
       (error "Separate compiler requires a library buildspec" spec))
@@ -235,11 +235,7 @@ TODO:
       (hash-put! files file #t))
     (when (ormap file-exists? (spec-outputs spec settings))
       (error "Separate compiler requires absent cold-build outputs" spec)))
-  (create-directory* (settings-bindir settings))
-  (create-directory* (settings-libdir settings))
-  (create-directory* (path-expand "static" (settings-libdir settings)))
-  (for (spec buildspec)
-    (build spec settings)))
+  (make-build buildspec settings))
 
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
