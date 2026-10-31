@@ -70,7 +70,7 @@ TODO:
    full-program-optimization
    build-release
    build-optimized
-   target)
+   target separate-compiler)
   transparent: #t constructor: :init!)
 
 (defmethod {:init! settings}
@@ -84,7 +84,8 @@ TODO:
       parallelize: (parallelize_ #t)
       full-program-optimization: (full-program-optimization #f)
       build-release: (build-release #f)
-      build-optimized: (build-optimized #f))
+      build-optimized: (build-optimized #f)
+      separate-compiler: (separate-compiler #f))
 
     (def gerbil-path_ (delay (gerbil-path)))
     (def srcdir (or srcdir_ (error "srcdir must be specified")))
@@ -111,7 +112,7 @@ TODO:
       full-program-optimization
       build-release
       build-optimized
-      target)))
+      target separate-compiler)))
 
 (def (gerbil-build-cores (cpu-count-spec #t))
   ;; TODO: for the default (catch) case, use something like
@@ -200,9 +201,45 @@ TODO:
   (parameterize ((current-directory (settings-srcdir settings))
                  (current-expander-compiling? #t))
     (add-load-path! (settings-srcdir settings))
-    (make-build buildspec settings))
+    (when (eq? (settings-separate-compiler settings) 'auto)
+      (set! (settings-separate-compiler settings)
+        (cold-library-build? buildspec settings)))
+    (if (settings-separate-compiler settings)
+      (make-build/separate buildspec settings)
+      (make-build buildspec settings)))
   (when (> (settings-parallelize settings) 1)
     (execute-pending-compile-jobs!)))
+
+(def (cold-library-build? buildspec-in settings)
+  (andmap
+   (lambda (spec)
+     (and (memq (spec-type spec) '(gxc: ssi:))
+          (not (ormap file-exists? (spec-outputs spec settings)))))
+   (normalize-buildspec buildspec-in)))
+
+;; A cold library build retires each expansion session at a process boundary.
+;; Incremental dependency discovery keeps its existing coordinator until its
+;; imported contexts have a separately qualified retirement contract.
+(def (make-build/separate buildspec-in settings)
+  (def buildspec (normalize-buildspec buildspec-in))
+  (def files (make-hash-table))
+  ;; Validate the whole request before producing outputs. Preserve declared
+  ;; order; missing macro support is an error, never permission to import every
+  ;; source into this coordinator.
+  (for (spec buildspec)
+    (unless (memq (spec-type spec) '(gxc: ssi:))
+      (error "Separate compiler requires a library buildspec" spec))
+    (let (file (spec-file spec settings))
+      (when (hash-get files file)
+        (error "Duplicate files in buildspec" file))
+      (hash-put! files file #t))
+    (when (ormap file-exists? (spec-outputs spec settings))
+      (error "Separate compiler requires absent cold-build outputs" spec)))
+  (create-directory* (settings-bindir settings))
+  (create-directory* (settings-libdir settings))
+  (create-directory* (path-expand "static" (settings-libdir settings)))
+  (for (spec buildspec)
+    (build spec settings)))
 
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
@@ -504,7 +541,23 @@ TODO:
   (message "... compile " mod)
   (def gsc-opts (gsc-compile-opts opts))
   (def srcpath (source-path mod ".ss" settings))
-  (let (gxc-opts
+  (if (settings-separate-compiler settings)
+    (let* ((args
+            ["-d" (settings-libdir settings)
+             "-target" (symbol->string (settings-target settings))
+             (if (settings-optimize settings) ["-O"] []) ...
+             (if (settings-debug settings) ["-g"] []) ...
+             (if (settings-verbose>=? settings 9) ["-V"] []) ...
+             (if invoke-gsc? [] ["-S" "-s"]) ...
+             (append-map (lambda (arg) ["-gsc-flag" arg]) gsc-opts) ...
+             srcpath])
+           (proc (open-process [path: (gerbil-gxc) arguments: args
+                                stdout-redirection: #f stderr-redirection: #f]))
+           (status (process-status proc)))
+      (close-port proc)
+      (unless (zero? status)
+        (error "Compilation error; gxc exited with nonzero status" srcpath status)))
+    (let (gxc-opts
         [invoke-gsc: invoke-gsc?
          target: (settings-target settings)
          keep-scm: (not invoke-gsc?)
@@ -515,7 +568,7 @@ TODO:
          verbose: (settings-verbose>=? settings 9)
          parallel: (> (settings-parallelize settings) 1)
          (when/list gsc-opts [gsc-options: gsc-opts]) ...])
-      (compile-module srcpath gxc-opts)))
+      (compile-module srcpath gxc-opts))))
 
 (def (gsc-libpath mod settings)
   (def libdir-prefix (settings-libdir-prefix settings))
