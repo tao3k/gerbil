@@ -29,6 +29,7 @@
 
 (def default-gambit-gsc (path-expand "~~bin/gsc"))
 (def default-gerbil-gxc (path-expand "~~bin/gxc"))
+(def default-gerbil-gxi (path-expand "~~bin/gxi"))
 
 #|
 TODO:
@@ -224,6 +225,8 @@ TODO:
 (def (make-build/separate buildspec-in settings)
   (def buildspec (normalize-buildspec buildspec-in))
   (def files (make-hash-table))
+  (unless (equal? (path-normalize (gerbil-gxc)) (path-normalize default-gerbil-gxc))
+    (error "Separate compiler API requires the runtime compiler; custom GERBIL_GXC is unsupported"))
   ;; Validate the whole request before producing outputs. Dependency ordering
   ;; and completion publication remain owned by make-build below.
   (for (spec buildspec)
@@ -335,6 +338,11 @@ TODO:
     (def (build-coordinator spec)
       (let* ((file (spec-file spec settings))
              (mod (import/mx file)))
+        ;; A custom language is executable compilation support. A fresh child
+        ;; must not evaluate its reader while that prelude is still building.
+        (when (settings-separate-compiler settings)
+          (alet (prelude (core-context-prelude mod))
+            (consider prelude (expander-context-id mod))))
         (for (in (module-context-import mod))
           (consider in (expander-context-id mod)))
         (if (or (build? spec)
@@ -563,35 +571,38 @@ TODO:
   (message "... compile " mod)
   (def gsc-opts (gsc-compile-opts opts))
   (def srcpath (source-path mod ".ss" settings))
+  (def gxc-opts
+    [invoke-gsc: invoke-gsc?
+     target: (settings-target settings)
+     keep-scm: (not invoke-gsc?)
+     output-dir: (settings-libdir settings)
+     optimize: (settings-optimize settings)
+     debug: (settings-debug settings)
+     generate-ssxi: #t
+     verbose: (settings-verbose>=? settings 9)
+     ;; Module-level concurrency belongs to make-build. Do not abandon a
+     ;; private child's deferred native jobs or multiply its native workers.
+     parallel: (and (not (settings-separate-compiler settings))
+                    (> (settings-parallelize settings) 1))
+     (when/list gsc-opts [gsc-options: gsc-opts]) ...])
   (if (settings-separate-compiler settings)
-    (let* ((args
-            ["-d" (settings-libdir settings)
-             "-target" (symbol->string (settings-target settings))
-             (if (settings-optimize settings) ["-O"] []) ...
-             (if (settings-debug settings) ["-g"] []) ...
-             (if (settings-verbose>=? settings 9) ["-V"] []) ...
-             (if invoke-gsc? [] ["-S" "-s"]) ...
-             (append-map (lambda (arg) ["-gsc-flag" arg]) gsc-opts) ...
-             srcpath])
-           (proc (open-process [path: (gerbil-gxc) arguments: args
+    (let* ((sharp (path-expand "lib/_gambit#.scm"
+                   (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
+           (expression
+            `(begin
+               (import :gerbil/compiler)
+               ;; Preserve the stock std/build.ss bootstrap initialization.
+               (eval '(begin-foreign (include ,sharp)))
+               (compile-module ,srcpath ',gxc-opts)))
+           (proc (open-process [path: default-gerbil-gxi
+                                arguments: ["-e" (object->string expression)]
                                 environment: (gxc-process-environment settings)
                                 stdout-redirection: #f stderr-redirection: #f]))
            (status (process-status proc)))
       (close-port proc)
       (unless (zero? status)
-        (error "Compilation error; gxc exited with nonzero status" srcpath status)))
-    (let (gxc-opts
-        [invoke-gsc: invoke-gsc?
-         target: (settings-target settings)
-         keep-scm: (not invoke-gsc?)
-         output-dir: (settings-libdir settings)
-         optimize: (settings-optimize settings)
-         debug: (settings-debug settings)
-         generate-ssxi: #t
-         verbose: (settings-verbose>=? settings 9)
-         parallel: (> (settings-parallelize settings) 1)
-         (when/list gsc-opts [gsc-options: gsc-opts]) ...])
-      (compile-module srcpath gxc-opts))))
+        (error "Compilation error; private compiler exited with nonzero status" srcpath status)))
+    (compile-module srcpath gxc-opts)))
 
 (def (gsc-libpath mod settings)
   (def libdir-prefix (settings-libdir-prefix settings))
