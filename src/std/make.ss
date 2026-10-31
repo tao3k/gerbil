@@ -27,6 +27,8 @@
         append-options
         enable-shared?)
 
+(extern namespace: #f create-temporary-directory)
+
 (def default-gambit-gsc (path-expand "~~bin/gsc"))
 (def default-gerbil-gxc (path-expand "~~bin/gxc"))
 (def default-gerbil-gxi (path-expand "~~bin/gxi"))
@@ -214,31 +216,76 @@ TODO:
 (def (cold-library-build? buildspec-in settings)
   (andmap
    (lambda (spec)
-     (and (memq (spec-type spec) '(gxc: ssi:))
+     (and (eq? (spec-type spec) gxc:)
+          (null? (spec-submodules spec))
           (not (ormap file-exists? (spec-outputs spec settings)))))
    (normalize-buildspec buildspec-in)))
 
-;; Retire each compiler/optimizer session at a process boundary. Keep the
-;; official dependency coordinator: source-list order does not imply that
-;; imported modules have delivered their cross-module optimizer metadata.
-;; The coordinator's expander contexts still require a retirement contract.
+;; The parent must not import the source graph. One frontend owns the original
+;; dependency coordinator and its complete expansion world through emission.
+;; Only closed file identities and resolved native arguments cross its exit.
 (def (make-build/separate buildspec-in settings)
   (def buildspec (normalize-buildspec buildspec-in))
   (def files (make-hash-table))
   (unless (equal? (path-normalize (gerbil-gxc)) (path-normalize default-gerbil-gxc))
     (error "Separate compiler API requires the runtime compiler; custom GERBIL_GXC is unsupported"))
-  ;; Validate the whole request before producing outputs. Dependency ordering
-  ;; and completion publication remain owned by make-build below.
   (for (spec buildspec)
-    (unless (memq (spec-type spec) '(gxc: ssi:))
-      (error "Separate compiler requires a library buildspec" spec))
+    (unless (and (eq? (spec-type spec) gxc:)
+                 (null? (spec-submodules spec)))
+      (error "Separate compiler requires a Scheme-only library buildspec" spec))
     (let (file (spec-file spec settings))
       (when (hash-get files file)
         (error "Duplicate files in buildspec" file))
       (hash-put! files file #t))
     (when (ormap file-exists? (spec-outputs spec settings))
       (error "Separate compiler requires absent cold-build outputs" spec)))
-  (make-build buildspec settings))
+  (create-directory* (settings-libdir settings))
+  ;; Task context is private build metadata, not an installable library product.
+  (def cache-root
+    (path-expand ".compiler"
+      (or (getenv "GERBIL_PATH" #f) (getenv "GERBIL_BUILD_PREFIX" #f) (gerbil-path))))
+  (create-directory* cache-root)
+  (let* ((private (create-temporary-directory
+                   [path: (path-expand "phase" cache-root) permissions: #o700]))
+         (output (path-expand "output" private))
+         (options
+          [srcdir: (settings-srcdir settings)
+           libdir: (settings-libdir settings)
+           bindir: (settings-bindir settings)
+           prefix: (settings-prefix settings)
+           force: (settings-force settings)
+           optimize: (settings-optimize settings)
+           debug: (settings-debug settings)
+           verbose: (settings-verbose settings)
+           build-deps: (settings-build-deps settings)
+           parallelize: (settings-parallelize settings)
+           full-program-optimization: (settings-full-program-optimization settings)
+           build-release: (settings-build-release settings)
+           build-optimized: (settings-build-optimized settings)
+           target: (settings-target settings)
+           separate-compiler: #f])
+         (sharp (path-expand "lib/_gambit#.scm"
+                  (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
+         (expression
+          `(begin
+             (import :gerbil/compiler :gerbil/expander)
+             (eval '(begin-foreign (include ,sharp)))
+             (parameterize ((current-compilation-target ',(settings-target settings)))
+               (eval '(begin
+                        (import :std/make)
+                        (call-with-compilation-output ,output
+                          (lambda () (apply make ',buildspec ',options))))))))
+         (proc (open-process [path: default-gerbil-gxi
+                              arguments: ["-e" (object->string expression)]
+                              environment: (gxc-process-environment settings)
+                              stdout-redirection: #f stderr-redirection: #f]))
+         (status (process-status proc)))
+    (close-port proc)
+    (unless (zero? status)
+      (error "Compilation error; frontend did not deliver phase output" output status))
+    ;; A delivered file alone is insufficient: the frontend process has joined.
+    ;; Validate every product before admitting any final native compilation.
+    (execute-compilation-output output (> (settings-parallelize settings) 1))))
 
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
@@ -340,9 +387,8 @@ TODO:
              (mod (import/mx file)))
         ;; A custom language is executable compilation support. A fresh child
         ;; must not evaluate its reader while that prelude is still building.
-        (when (settings-separate-compiler settings)
-          (alet (prelude (core-context-prelude mod))
-            (consider prelude (expander-context-id mod))))
+        (alet (prelude (core-context-prelude mod))
+          (consider prelude (expander-context-id mod)))
         (for (in (module-context-import mod))
           (consider in (expander-context-id mod)))
         (if (or (build? spec)
@@ -585,24 +631,7 @@ TODO:
      parallel: (and (not (settings-separate-compiler settings))
                     (> (settings-parallelize settings) 1))
      (when/list gsc-opts [gsc-options: gsc-opts]) ...])
-  (if (settings-separate-compiler settings)
-    (let* ((sharp (path-expand "lib/_gambit#.scm"
-                   (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
-           (expression
-            `(begin
-               (import :gerbil/compiler)
-               ;; Preserve the stock std/build.ss bootstrap initialization.
-               (eval '(begin-foreign (include ,sharp)))
-               (compile-module ,srcpath ',gxc-opts)))
-           (proc (open-process [path: default-gerbil-gxi
-                                arguments: ["-e" (object->string expression)]
-                                environment: (gxc-process-environment settings)
-                                stdout-redirection: #f stderr-redirection: #f]))
-           (status (process-status proc)))
-      (close-port proc)
-      (unless (zero? status)
-        (error "Compilation error; private compiler exited with nonzero status" srcpath status)))
-    (compile-module srcpath gxc-opts)))
+  (compile-module srcpath gxc-opts))
 
 (def (gsc-libpath mod settings)
   (def libdir-prefix (settings-libdir-prefix settings))
