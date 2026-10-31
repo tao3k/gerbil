@@ -536,6 +536,23 @@ TODO:
     ([[plist ...] . rest] (listify rest))
     (_ (listify opts))))
 
+(def (gxc-process-environment)
+  (def paths (map path-expand (load-path)))
+  (def defaults
+    (if (getenv "GERBIL_BUILD_PREFIX" #f)
+      [(path-expand "lib" (gerbil-home))]
+      [(path-expand "lib" (gerbil-path)) (path-expand "lib" (gerbil-home))]))
+  (when (ormap (lambda (path) (string-index path #\:)) paths)
+    (error "GERBIL_LOADPATH cannot represent a path containing a colon" paths))
+  (unless (andmap (lambda (path) (member path paths)) defaults)
+    (error "Private compiler would add a disabled default load path" defaults paths))
+  ;; Export the logical search view, not the parent's mutable module registry.
+  ;; gxc appends the same default roots; they must already occur in this prefix.
+  (cons (string-append "GERBIL_LOADPATH=" (string-join paths ":"))
+    (map (lambda (entry) (string-append (car entry) "=" (cdr entry)))
+      (filter (lambda (entry) (not (string=? (car entry) "GERBIL_LOADPATH")))
+        (get-environment-variables)))))
+
 ;; TODO: split that (and more?) into many action. See :gerbil/compiler/driver
 (def (gxc-compile mod opts settings (invoke-gsc? #t))
   (message "... compile " mod)
@@ -552,6 +569,7 @@ TODO:
              (append-map (lambda (arg) ["-gsc-flag" arg]) gsc-opts) ...
              srcpath])
            (proc (open-process [path: (gerbil-gxc) arguments: args
+                                environment: (gxc-process-environment)
                                 stdout-redirection: #f stderr-redirection: #f]))
            (status (process-status proc)))
       (close-port proc)
