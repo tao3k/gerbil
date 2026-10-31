@@ -5,4 +5,7 @@
 (import "build-config" "make")
 (include "build-spec.ss")
 
-(def (build . args) (apply make (apply build-spec args) args))
+(def (build . args)
+  (apply make (apply build-spec args)
+    separate-compiler: (cond-expand (darwin 'auto) (else #f))
+    args))
