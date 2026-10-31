@@ -10,7 +10,8 @@ namespace: gxc
         "base"
         "compile"
         "optimize")
-(export compile-module compile-exe)
+(export compile-module compile-exe
+        call-with-compilation-output read-compilation-output execute-compilation-output)
 
 (extern namespace: #f gerbil-path) ;; needed until bootstrap re-generated
 
@@ -32,8 +33,101 @@ namespace: gxc
 
 (def scheme-file-settings '(permissions: #o644 char-encoding: UTF-8 eol-encoding: lf))
 
+(def current-compilation-output (make-parameter #f))
+
+(def (record-compilation-file! path)
+  (alet (output (current-compilation-output))
+    (let* ((path (path-expand path))
+           (info (file-info path)))
+      (with-lock (vector-ref output 0)
+        (lambda ()
+          (hash-put! (vector-ref output 1) path
+            [(file-info-size info)
+             (time->seconds (file-info-last-modification-time info))]))))))
+
+;; The caller owns a fresh output file and the generated files until the
+;; frontend process has exited. No Scheme context, thread or thunk is exported.
+(def (call-with-compilation-output path thunk)
+  (when (or (current-compilation-output) (file-exists? path)
+            (file-exists? (string-append path ".tmp")))
+    (error "Compilation output requires a fresh, non-nested owner" path))
+  (let* ((output (vector (make-mutex 'compiler/output) (make-hash-table) []
+                         (make-hash-table)))
+         (result (parameterize ((current-compilation-output output)) (thunk))))
+    (with-output-to-file [path: (string-append path ".tmp") . scheme-file-settings]
+      (lambda ()
+        (write ['compilation-output
+                ['files (hash->list (vector-ref output 1)) ...]
+                ['gsc (reverse (vector-ref output 2)) ...]])
+        (newline)))
+    (rename-file (string-append path ".tmp") path)
+    result))
+
+;; Validate the entire handoff before admitting any native job. These metadata
+;; checks assume exclusive workspace ownership, not adversarial file integrity.
+(def (read-compilation-output path)
+  (let (data (call-with-input-file path
+                (lambda (port)
+                  (let (data (read port))
+                    (unless (eof-object? (read port))
+                      (error "Trailing compilation output data" path))
+                    data))))
+    (match data
+      (['compilation-output ['files . files] ['gsc . jobs]]
+       (def inputs (make-hash-table))
+       (for-each
+        (lambda (entry)
+          (match entry
+            ([file size stamp]
+             (unless (and (string? file) (integer? size) (>= size 0)
+                          (real? stamp) (file-exists? file))
+               (error "Missing compilation product" entry))
+             (let (info (file-info file))
+               (unless (and (= size (file-info-size info))
+                            (= stamp (time->seconds (file-info-last-modification-time info))))
+                 (error "Changed compilation product" file)))
+             (hash-put! inputs file #t))
+            (_ (error "Invalid compilation product" entry))))
+        files)
+       (for-each
+        (lambda (job)
+          (match job
+            ([program cwd input phi? args]
+             (unless (and (string? program) (equal? program (gerbil-gsc))
+                          (string? cwd) (file-exists? cwd)
+                          (string? input) (hash-get inputs input)
+                          (boolean? phi?) (pair? args) (list? args)
+                          (andmap string? args)
+                          (parameterize ((current-directory cwd))
+                            (equal? (path-expand (last args)) input)))
+               (error "Invalid native compilation job" job)))
+            (_ (error "Invalid native compilation job" job))))
+        jobs)
+       data)
+      (_ (error "Invalid compilation output" path)))))
+
+;; The caller must join the frontend owner before calling this procedure.
+;; Existing compiler workers execute only scalar native inputs after that join.
+(def (execute-compilation-output path (parallel? #t))
+  (match (read-compilation-output path)
+    (['compilation-output _ ['gsc . jobs]]
+     (for-each
+      (lambda (job)
+        (match job
+          ([program cwd input phi? args]
+           (let (run (lambda ()
+                        (parameterize ((current-directory cwd))
+                          (invoke program args))))
+             (if parallel?
+               (add-compile-job! run `(compile-file ,input))
+               (run))))))
+      jobs)
+     (when parallel? (execute-pending-compile-jobs!)))))
+
 (def (with-output-to-scheme-file path fun)
-  (with-output-to-file [path: path . scheme-file-settings] fun))
+  (begin0
+    (with-output-to-file [path: path . scheme-file-settings] fun)
+    (record-compilation-file! path)))
 
 (def +gerbil-gsc+ #f)
 (def (gerbil-gsc)
@@ -694,7 +788,8 @@ namespace: gxc
         (delete-file scms))
       (if runtime-code?
         (copy-file scm0 scms)
-        (call-with-output-file scms void))))
+        (call-with-output-file scms void))
+      (record-compilation-file! scms)))
 
   (let (all-modules (cons ctx (lift-nested-modules ctx)))
     (for-each
@@ -795,13 +890,25 @@ namespace: gxc
           (extended-bindings)
           ,@(if phi? '((inlining-limit 200)) '())))
       (pretty-print code)))
-  (when (current-compile-invoke-gsc)
+  (cond
+   ((current-compilation-output)
+    => (lambda (output)
+         (let* ((input (path-expand path))
+                (job [(gerbil-gsc) (current-directory) input phi?
+                      (gsc-compile-file-arguments path phi?)]))
+           (with-lock (vector-ref output 0)
+             (lambda ()
+               (when (hash-get (vector-ref output 3) input)
+                 (error "Duplicate native compilation input" input))
+               (hash-put! (vector-ref output 3) input #t)
+               (vector-set! output 2 (cons job (vector-ref output 2))))))))
+   ((current-compile-invoke-gsc)
     (let (compile-it
           (lambda ()
             (gsc-compile-file path phi?)))
       (if (current-compile-parallel)
         (add-compile-job! compile-it `(compile-file ,path))
-        (compile-it)))))
+        (compile-it))))))
 
 (def (gsc-link-options (phi? #f))
   (let lp ((rest (current-compile-gsc-options)) (opts []))
@@ -878,12 +985,14 @@ namespace: gxc
 (def (not-string-empty? str)
   (not (string-empty? str)))
 
-(def (gsc-compile-file path phi?)
+(def (gsc-compile-file-arguments path phi?)
   (let ((gsc-link-opts (gsc-link-options phi?))
         (gsc-cc-opts (gsc-cc-options phi?))
         (gsc-ld-opts (gsc-ld-options phi?)))
-    (invoke (gerbil-gsc)
-            [gsc-cc-opts ... gsc-ld-opts ... gsc-link-opts ... path])))
+    [gsc-cc-opts ... gsc-ld-opts ... gsc-link-opts ... path]))
+
+(def (gsc-compile-file path phi?)
+  (invoke (gerbil-gsc) (gsc-compile-file-arguments path phi?)))
 
 (def (compile-output-file ctx n ext)
   (def (module-relative-path ctx)
