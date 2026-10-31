@@ -54,7 +54,8 @@ namespace: gxc
   (let* ((output (vector (make-mutex 'compiler/output) (make-hash-table) []
                          (make-hash-table)))
          (result (parameterize ((current-compilation-output output)) (thunk))))
-    (with-output-to-file [path: (string-append path ".tmp") . scheme-file-settings]
+    (with-output-to-file [path: (string-append path ".tmp") permissions: #o600
+                          char-encoding: 'UTF-8 eol-encoding: 'lf]
       (lambda ()
         (write ['compilation-output
                 ['files (hash->list (vector-ref output 1)) ...]
@@ -92,12 +93,13 @@ namespace: gxc
        (for-each
         (lambda (job)
           (match job
-            ([program cwd input phi? args]
+            ([program cwd input phi? args environment]
              (unless (and (string? program) (equal? program (gerbil-gsc))
                           (string? cwd) (file-exists? cwd)
                           (string? input) (hash-get inputs input)
                           (boolean? phi?) (pair? args) (list? args)
                           (andmap string? args)
+                          (list? environment) (andmap string? environment)
                           (parameterize ((current-directory cwd))
                             (equal? (path-expand (last args)) input)))
                (error "Invalid native compilation job" job)))
@@ -111,18 +113,26 @@ namespace: gxc
 (def (execute-compilation-output path (parallel? #t))
   (match (read-compilation-output path)
     (['compilation-output _ ['gsc . jobs]]
-     (for-each
-      (lambda (job)
-        (match job
-          ([program cwd input phi? args]
-           (let (run (lambda ()
-                        (parameterize ((current-directory cwd))
-                          (invoke program args))))
-             (if parallel?
-               (add-compile-job! run `(compile-file ,input))
-               (run))))))
-      jobs)
-     (when parallel? (execute-pending-compile-jobs!)))))
+     ;; An unknown completion retains this claim. Do not create another native
+     ;; generation by replaying the same phase output after an exception.
+     (let (claim (string-append path ".native"))
+       (create-directory claim)
+       (for-each
+        (lambda (job)
+          (match job
+            ([program cwd input phi? args environment]
+             (let (run (lambda ()
+                          (parameterize ((current-directory cwd))
+                            (invoke program args environment: environment))))
+               (if parallel?
+                 (add-compile-job! run `(compile-file ,input))
+                 (run))))))
+        jobs)
+       (when parallel? (execute-pending-compile-jobs!))
+       (call-with-output-file (path-expand "complete" claim)
+         (lambda (port)
+           (write ['native-compilation-complete (length jobs)] port)
+           (newline port)))))))
 
 (def (with-output-to-scheme-file path fun)
   (begin0
@@ -894,8 +904,10 @@ namespace: gxc
    ((current-compilation-output)
     => (lambda (output)
          (let* ((input (path-expand path))
-                (job [(gerbil-gsc) (current-directory) input phi?
-                      (gsc-compile-file-arguments path phi?)]))
+                (job [(string-copy (gerbil-gsc)) (string-copy (current-directory)) input phi?
+                      (map string-copy (gsc-compile-file-arguments path phi?))
+                      (map (lambda (entry) (string-append (car entry) "=" (cdr entry)))
+                        (get-environment-variables))]))
            (with-lock (vector-ref output 0)
              (lambda ()
                (when (hash-get (vector-ref output 3) input)
@@ -1071,9 +1083,11 @@ namespace: gxc
 
 (def (invoke program args
              stdout-redirection: (stdout-redirection #f)
-             stderr-redirection: (stderr-redirection #f))
+             stderr-redirection: (stderr-redirection #f)
+             environment: (environment #f))
   (verbose "invoke " [program . args])
   (let* ((proc (open-process [path: program arguments: args
+                                    (if environment [environment: environment] []) ...
                                     stdout-redirection: stdout-redirection
                                     stderr-redirection: stderr-redirection]))
          (output (and (or stdout-redirection stderr-redirection)
