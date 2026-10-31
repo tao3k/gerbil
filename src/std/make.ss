@@ -536,8 +536,9 @@ TODO:
     ([[plist ...] . rest] (listify rest))
     (_ (listify opts))))
 
-(def (gxc-process-environment)
+(def (gxc-process-environment settings)
   (def paths (map path-expand (load-path)))
+  (def libdir (path-expand (settings-libdir settings)))
   (def defaults
     (if (getenv "GERBIL_BUILD_PREFIX" #f)
       [(path-expand "lib" (gerbil-home))]
@@ -546,9 +547,17 @@ TODO:
     (error "GERBIL_LOADPATH cannot represent a path containing a colon" paths))
   (unless (andmap (lambda (path) (member path paths)) defaults)
     (error "Private compiler would add a disabled default load path" defaults paths))
+  ;; A completed child has delivered both SSI and native macro support. Prefer
+  ;; that existing authorized root, avoiding repeated expansion of ready source
+  ;; bodies. Unbuilt forward dependencies still use the original source view.
+  ;; Never add an output root that the caller did not authorize for lookup.
+  (def ordered-paths
+    (if (member libdir paths)
+      (cons libdir (filter (lambda (path) (not (string=? path libdir))) paths))
+      paths))
   ;; Export the logical search view, not the parent's mutable module registry.
   ;; gxc appends the same default roots; they must already occur in this prefix.
-  (cons (string-append "GERBIL_LOADPATH=" (string-join paths ":"))
+  (cons (string-append "GERBIL_LOADPATH=" (string-join ordered-paths ":"))
     (map (lambda (entry) (string-append (car entry) "=" (cdr entry)))
       (filter (lambda (entry) (not (string=? (car entry) "GERBIL_LOADPATH")))
         (get-environment-variables)))))
@@ -569,7 +578,7 @@ TODO:
              (append-map (lambda (arg) ["-gsc-flag" arg]) gsc-opts) ...
              srcpath])
            (proc (open-process [path: (gerbil-gxc) arguments: args
-                                environment: (gxc-process-environment)
+                                environment: (gxc-process-environment settings)
                                 stdout-redirection: #f stderr-redirection: #f]))
            (status (process-status proc)))
       (close-port proc)
