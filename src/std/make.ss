@@ -88,7 +88,7 @@ TODO:
       full-program-optimization: (full-program-optimization #f)
       build-release: (build-release #f)
       build-optimized: (build-optimized #f)
-      separate-compiler: (separate-compiler #f))
+      separate-compiler: (separate-compiler (cond-expand (darwin 'auto) (else #f))))
 
     (def gerbil-path_ (delay (gerbil-path)))
     (def srcdir (or srcdir_ (error "srcdir must be specified")))
@@ -214,12 +214,17 @@ TODO:
     (execute-pending-compile-jobs!)))
 
 (def (cold-library-build? buildspec-in settings)
-  (andmap
-   (lambda (spec)
-     (and (eq? (spec-type spec) gxc:)
-          (null? (spec-submodules spec))
-          (not (ormap file-exists? (spec-outputs spec settings)))))
-   (normalize-buildspec buildspec-in)))
+  ;; Auto admission must preserve the compiler and its explicit heap bound.
+  ;; Gambit's runtime option grammar represents heap sizes in KiB or larger.
+  (let (limit (##get-max-heap))
+    (and (>= limit 0) (zero? (modulo limit 1024))
+         (equal? (gerbil-gxc) default-gerbil-gxc)
+         (andmap
+          (lambda (spec)
+            (and (eq? (spec-type spec) gxc:)
+                 (null? (spec-submodules spec))
+                 (not (ormap file-exists? (spec-outputs spec settings)))))
+          (normalize-buildspec buildspec-in)))))
 
 ;; The parent must not import the source graph. One frontend owns the original
 ;; dependency coordinator and its complete expansion world through emission.
@@ -239,6 +244,9 @@ TODO:
       (hash-put! files file #t))
     (when (ormap file-exists? (spec-outputs spec settings))
       (error "Separate compiler requires absent cold-build outputs" spec)))
+  (def max-heap (##get-max-heap))
+  (unless (and (>= max-heap 0) (zero? (modulo max-heap 1024)))
+    (error "Separate compiler cannot preserve the exact heap bound" max-heap))
   (create-directory* (settings-libdir settings))
   ;; Task context is private build metadata, not an installable library product.
   (def cache-root
@@ -264,19 +272,23 @@ TODO:
            build-optimized: (settings-build-optimized settings)
            target: (settings-target settings)
            separate-compiler: #f])
-         (sharp (path-expand "lib/_gambit#.scm"
-                  (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
          (expression
           `(begin
+             (unless (= (##get-max-heap) ,max-heap)
+               (error "Private compiler heap bound changed" ,max-heap (##get-max-heap)))
              (import :gerbil/compiler :gerbil/expander)
-             (eval '(begin-foreign (include ,sharp)))
+             ;; Stock gxc passes _gambit# to GSC; importing it into the
+             ;; frontend again changes its expansion world and retains macros.
              (parameterize ((current-compilation-target ',(settings-target settings)))
                (eval '(begin
                         (import :std/make)
                         (call-with-compilation-output ,output
                           (lambda () (apply make ',buildspec ',options))))))))
          (proc (open-process [path: default-gerbil-gxi
-                              arguments: ["-e" (object->string expression)]
+                              arguments: [(string-append "-:max-heap="
+                                            (number->string (quotient max-heap 1024))
+                                            "K,debug=q")
+                                          "-e" (object->string expression)]
                               environment: (gxc-process-environment settings)
                               stdout-redirection: #f stderr-redirection: #f]))
          (status (process-status proc)))
@@ -290,6 +302,8 @@ TODO:
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
     (def buildspec (normalize-buildspec buildspec-in))
+    (def static-runtime-objects?
+      (ormap (lambda (spec) (memq (spec-type spec) '(exe: static-exe:))) buildspec))
     ;; detect and report duplicate files in the buildspec up front
     (let (file-counts (make-hash-table))
       (for (spec buildspec)
@@ -375,7 +389,7 @@ TODO:
     (def (build-worker)
       (try
        (for (spec workch)
-         (build spec settings)
+         (build spec settings static-runtime-objects?)
          (completion-post! (hash-ref completions (module-id spec)) 'done))
        (catch (e)
          (barrier-error! build-barrier e)
@@ -547,19 +561,19 @@ TODO:
      (else
       `("-e" ,include-gambit-sharp)))))
 
-(def (build spec settings)
+(def (build spec settings (static-runtime-objects? #f))
   (match spec
     ((? string? modf)
-     (gxc-compile modf #f settings #t))
+     (gxc-compile modf #f settings #t static-runtime-objects?))
     ([gxc: modf [submodules: submodules . _] . opts]
-     (for-each (cut build <> settings) submodules)
-     (gxc-compile modf opts settings #t))
+     (for-each (cut build <> settings static-runtime-objects?) submodules)
+     (gxc-compile modf opts settings #t static-runtime-objects?))
     ([gxc: modf . opts]
-     (gxc-compile modf opts settings #t))
+     (gxc-compile modf opts settings #t static-runtime-objects?))
     ([gsc: modf . opts]
      (gsc-compile modf opts settings))
     ([ssi: modf . submodules]
-     (for-each (cut build <> settings) submodules)
+     (for-each (cut build <> settings static-runtime-objects?) submodules)
      (compile-ssi modf '() settings))
     ([exe:  modf . opts]
      (compile-exe/context modf opts settings))
@@ -613,12 +627,13 @@ TODO:
         (get-environment-variables)))))
 
 ;; TODO: split that (and more?) into many action. See :gerbil/compiler/driver
-(def (gxc-compile mod opts settings (invoke-gsc? #t))
+(def (gxc-compile mod opts settings (invoke-gsc? #t) (static-runtime-objects? #f))
   (message "... compile " mod)
   (def gsc-opts (gsc-compile-opts opts))
   (def srcpath (source-path mod ".ss" settings))
   (def gxc-opts
     [invoke-gsc: invoke-gsc?
+     static: static-runtime-objects?
      target: (settings-target settings)
      keep-scm: (not invoke-gsc?)
      output-dir: (settings-libdir settings)

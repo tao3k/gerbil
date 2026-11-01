@@ -2,6 +2,7 @@
 ;;; © vyzo
 ;;; tool to run tests without the need of glue code
 (import :gerbil/expander
+        (only-in :gerbil/runtime/init gerbil-load-expander!)
         :std/cli/getopt
         :std/iter
         :std/hash/misc
@@ -50,6 +51,10 @@
        (displayln 'OK)
        (force-output))
      (notice-error `(HARNESS ,args) result)))
+
+  ;; Embedded callers have no BACH interpreter-entry initialization.
+  ;; Use the same idempotent public entry before importing source modules.
+  (gerbil-load-expander!)
 
   (when features
     (let (root (core-context-root))
