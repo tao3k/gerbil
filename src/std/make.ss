@@ -73,7 +73,7 @@ TODO:
    full-program-optimization
    build-release
    build-optimized
-   target separate-compiler)
+   target separate-compiler initialize-gambit-sharp)
   transparent: #t constructor: :init!)
 
 (defmethod {:init! settings}
@@ -88,7 +88,8 @@ TODO:
       full-program-optimization: (full-program-optimization #f)
       build-release: (build-release #f)
       build-optimized: (build-optimized #f)
-      separate-compiler: (separate-compiler (cond-expand (darwin 'auto) (else #f))))
+      separate-compiler: (separate-compiler (cond-expand (darwin 'auto) (else #f)))
+      initialize-gambit-sharp: (initialize-gambit-sharp #f))
 
     (def gerbil-path_ (delay (gerbil-path)))
     (def srcdir (or srcdir_ (error "srcdir must be specified")))
@@ -108,6 +109,8 @@ TODO:
        (debug_)
        ((getenv "GERBIL_BUILD_DEBUG" #f) #t)
        (else #f)))
+    (unless (boolean? initialize-gambit-sharp)
+      (error "initialize-gambit-sharp must be boolean" initialize-gambit-sharp))
     (struct-instance-init!
       self
       srcdir libdir bindir prefix force? optimize debug verbose build-deps
@@ -115,7 +118,7 @@ TODO:
       full-program-optimization
       build-release
       build-optimized
-      target separate-compiler)))
+      target separate-compiler initialize-gambit-sharp)))
 
 (def (gerbil-build-cores (cpu-count-spec #t))
   ;; TODO: for the default (catch) case, use something like
@@ -271,14 +274,21 @@ TODO:
            build-release: (settings-build-release settings)
            build-optimized: (settings-build-optimized settings)
            target: (settings-target settings)
+           initialize-gambit-sharp: (settings-initialize-gambit-sharp settings)
            separate-compiler: #f])
          (expression
           `(begin
              (unless (= (##get-max-heap) ,max-heap)
                (error "Private compiler heap bound changed" ,max-heap (##get-max-heap)))
              (import :gerbil/compiler :gerbil/expander)
-             ;; Stock gxc passes _gambit# to GSC; importing it into the
-             ;; frontend again changes its expansion world and retains macros.
+             ;; Replay only declared initialization in the fresh frontend.
+             ;; Standard-library readers require the same Gambit macros as
+             ;; src/std/build.ss; ordinary package frontends do not opt in.
+             ,@(if (settings-initialize-gambit-sharp settings)
+                 `((eval '(begin-foreign
+                            (include ,(path-expand "lib/_gambit#.scm"
+                                        (getenv "GERBIL_BUILD_PREFIX" (gerbil-home)))))))
+                 [])
              (parameterize ((current-compilation-target ',(settings-target settings)))
                (eval '(begin
                         (import :std/make)

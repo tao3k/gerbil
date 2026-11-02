@@ -7,5 +7,6 @@
 
 (def (build . args)
   (apply make (apply build-spec args)
+    initialize-gambit-sharp: #t
     separate-compiler: (cond-expand (darwin 'auto) (else #f))
     args))
