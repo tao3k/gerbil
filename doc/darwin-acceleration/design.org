@@ -1,0 +1,77 @@
+#+TITLE: Darwin acceleration source review checkpoint
+#+STARTUP: overview
+#+OPTIONS: toc:2
+
+* Scope
+:PROPERTIES:
+:STATUS: DRAFT-NOT-MERGE-QUALIFIED
+:SOURCE_BASE: 1cfb032c7a1612637da6205f5f8a15683eba3ba0
+:CODE_HEAD: c8f5735516368a31b60a708f243e5d88e45ec3a2
+:END:
+
+This draft retains the canonical v0.19-staging source identity
+=1cfb032c7a1612637da6205f5f8a15683eba3ba0= from git.cons.io. The GitHub mirror
+predates that commit. The review base therefore imports that exact canonical
+commit on a separate branch; it is not synthesized from the older mirror.
+
+| Source boundary | Resulting behavior |
+|-----------------+--------------------|
+| Official compiler driver/base | Stage products carry resolved native jobs; frontend sessions can retire before native consumption; static C/object reuse requires matching products |
+| =std/make= and =std/build-std= | Private compilation contexts preserve source lookup, language initialization and the original option list; the outer stdlib driver owns frontend lifetime |
+| =gerbil/main= | Provider-checked runtime command dispatch preserves interpreter/compiler fallback and failed-exec signal-mask restoration |
+| =tools/gxpkg= and =tools/gxtest= | Optional providers are separated and original test command behavior remains observable |
+| =builtin.ssxi= | Temporary-directory result types match their actual runtime values |
+| Darwin phi emission | Official =##meta-info cc-options= selects upstream host fallback above8192 labels for C phi output; small units retain configured behavior |
+
+The8192 threshold is an observed calibration, not a universal memory bound.
+No runtime GC, continuation representation or SMP scheduler redesign is included.
+The command fast path still has a known producer/consumer gap: current tools
+construction produces the gxpkg library but not the executable expected by the
+native handoff. Missing executable is not proved to explain all loader delay.
+
+* Validation and limitations
+:PROPERTIES:
+:CURATED_EVIDENCE: checkpoint.json
+:END:
+
+The combined compiler construction completed using Gambit6e647736 and
+Gerbilc8f57355. Actual source heads, output identity and the8GiB supervisor
+record are retained in the curated checkpoint. The installed directory label
+=30ad943= is retained build metadata, not a substitute for source identity.
+
+| Gate | Observed result | Interpretation |
+|------+-----------------+----------------|
+| Official metadata transport and mixed-host controls | PASS8371e4bc | Selected tail-call, GC and multishot-continuation executions, not a universal semantic proof |
+| Complete compiler/tools construction | PASS2f7b9088; peak7,188,480,176 charged bytes | Construction only; package behavior remains separate |
+| Candidate planned package run | Identity queries pass; both clean commands time out30s | No candidate package-suite pass |
+| Current-PATH Homebrew MCP | clean3.0664s; build59.2477s; original27-file suite exits0 with zero failed checks | Control package passes; includes previously published improvements |
+| Current-PATH Homebrew POO | clean3.1297s; build95.1062s; original test compilation interrupted at8,609,413,240 charged bytes | POO tests not passed; not evidence of a candidate-only regression |
+| Excluded extra candidate execution | MCP clean8.19669s/build70.04815s complete; original tests interrupted | Unplanned execution; no speedup admission; counterevidence to a permanent clean failure |
+| Net whole-package acceleration | Unresolved | No twofold claim, no component-to-package promotion |
+
+Both candidate clean samples show =dynamic_load -> dlopen -> mapSegments ->
+fcntl=. Each is a one-second sample, not whole-command syscall timing. Owned fd
+snapshots do not establish exact fd/syscall association. Source-unchanged timing
+variation prevents attributing the full delay to the absent native gxpkg product.
+
+The accidental extra run used =--step= with =--run=, which did not limit execution.
+It was stopped and owned groups were reconciled. The framework now rejects that
+combination before launch. Its times remain excluded from net-benefit claims.
+
+* Acceptance still required
+- Build and install the native command product through the existing official
+  tools producer; preserve library imports and provider override semantics.
+- Preserve positive and negative controls, natural exit, original package tests,
+  worker/environment resolution and the8GiB charged-footprint contract.
+- Complete =gerbil clean=, =gerbil build= and original tests for both gerbil-mcp
+  and gerbil-poo before admitting matched cold/incremental net benefit.
+- Do not convert sum-RSS or the charged-footprint ledger into exact physical RAM,
+  multiply stack fractions by whole-command time, or count existing GCC gains again.
+- QNT owns readiness/publication/custody histories; Lean owns binding, argv,
+  representation and semantic refinement. Neither proves measured speedup.
+
+* Evidence retention
+Only source, this design note and the curated checkpoint are distributed.
+Compiler copies, generated C/object products, raw logs and process caches remain
+outside Git. Run IDs identify local execution history; their absence in a clean
+checkout is missing native evidence, never a passed gate.
