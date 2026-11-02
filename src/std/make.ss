@@ -27,8 +27,11 @@
         append-options
         enable-shared?)
 
+(extern namespace: #f create-temporary-directory)
+
 (def default-gambit-gsc (path-expand "~~bin/gsc"))
 (def default-gerbil-gxc (path-expand "~~bin/gxc"))
+(def default-gerbil-gxi (path-expand "~~bin/gxi"))
 
 #|
 TODO:
@@ -70,7 +73,7 @@ TODO:
    full-program-optimization
    build-release
    build-optimized
-   target)
+   target separate-compiler initialize-gambit-sharp)
   transparent: #t constructor: :init!)
 
 (defmethod {:init! settings}
@@ -84,7 +87,9 @@ TODO:
       parallelize: (parallelize_ #t)
       full-program-optimization: (full-program-optimization #f)
       build-release: (build-release #f)
-      build-optimized: (build-optimized #f))
+      build-optimized: (build-optimized #f)
+      separate-compiler: (separate-compiler (cond-expand (darwin 'auto) (else #f)))
+      initialize-gambit-sharp: (initialize-gambit-sharp #f))
 
     (def gerbil-path_ (delay (gerbil-path)))
     (def srcdir (or srcdir_ (error "srcdir must be specified")))
@@ -104,6 +109,8 @@ TODO:
        (debug_)
        ((getenv "GERBIL_BUILD_DEBUG" #f) #t)
        (else #f)))
+    (unless (boolean? initialize-gambit-sharp)
+      (error "initialize-gambit-sharp must be boolean" initialize-gambit-sharp))
     (struct-instance-init!
       self
       srcdir libdir bindir prefix force? optimize debug verbose build-deps
@@ -111,7 +118,7 @@ TODO:
       full-program-optimization
       build-release
       build-optimized
-      target)))
+      target separate-compiler initialize-gambit-sharp)))
 
 (def (gerbil-build-cores (cpu-count-spec #t))
   ;; TODO: for the default (catch) case, use something like
@@ -200,13 +207,113 @@ TODO:
   (parameterize ((current-directory (settings-srcdir settings))
                  (current-expander-compiling? #t))
     (add-load-path! (settings-srcdir settings))
-    (make-build buildspec settings))
+    (when (eq? (settings-separate-compiler settings) 'auto)
+      (set! (settings-separate-compiler settings)
+        (cold-library-build? buildspec settings)))
+    (if (settings-separate-compiler settings)
+      (make-build/separate buildspec settings)
+      (make-build buildspec settings)))
   (when (> (settings-parallelize settings) 1)
     (execute-pending-compile-jobs!)))
+
+(def (cold-library-build? buildspec-in settings)
+  ;; Auto admission must preserve the compiler and its explicit heap bound.
+  ;; Gambit's runtime option grammar represents heap sizes in KiB or larger.
+  (let (limit (##get-max-heap))
+    (and (>= limit 0) (zero? (modulo limit 1024))
+         (equal? (gerbil-gxc) default-gerbil-gxc)
+         (andmap
+          (lambda (spec)
+            (and (eq? (spec-type spec) gxc:)
+                 (null? (spec-submodules spec))
+                 (not (ormap file-exists? (spec-outputs spec settings)))))
+          (normalize-buildspec buildspec-in)))))
+
+;; The parent must not import the source graph. One frontend owns the original
+;; dependency coordinator and its complete expansion world through emission.
+;; Only closed file identities and resolved native arguments cross its exit.
+(def (make-build/separate buildspec-in settings)
+  (def buildspec (normalize-buildspec buildspec-in))
+  (def files (make-hash-table))
+  (unless (equal? (path-normalize (gerbil-gxc)) (path-normalize default-gerbil-gxc))
+    (error "Separate compiler API requires the runtime compiler; custom GERBIL_GXC is unsupported"))
+  (for (spec buildspec)
+    (unless (and (eq? (spec-type spec) gxc:)
+                 (null? (spec-submodules spec)))
+      (error "Separate compiler requires a Scheme-only library buildspec" spec))
+    (let (file (spec-file spec settings))
+      (when (hash-get files file)
+        (error "Duplicate files in buildspec" file))
+      (hash-put! files file #t))
+    (when (ormap file-exists? (spec-outputs spec settings))
+      (error "Separate compiler requires absent cold-build outputs" spec)))
+  (def max-heap (##get-max-heap))
+  (unless (and (>= max-heap 0) (zero? (modulo max-heap 1024)))
+    (error "Separate compiler cannot preserve the exact heap bound" max-heap))
+  (create-directory* (settings-libdir settings))
+  ;; Task context is private build metadata, not an installable library product.
+  (def cache-root
+    (path-expand ".compiler"
+      (or (getenv "GERBIL_PATH" #f) (getenv "GERBIL_BUILD_PREFIX" #f) (gerbil-path))))
+  (create-directory* cache-root)
+  (let* ((private (create-temporary-directory
+                   [path: (path-expand "phase" cache-root) permissions: #o700]))
+         (output (path-expand "output" private))
+         (options
+          [srcdir: (settings-srcdir settings)
+           libdir: (settings-libdir settings)
+           bindir: (settings-bindir settings)
+           prefix: (settings-prefix settings)
+           force: (settings-force settings)
+           optimize: (settings-optimize settings)
+           debug: (settings-debug settings)
+           verbose: (settings-verbose settings)
+           build-deps: (settings-build-deps settings)
+           parallelize: (settings-parallelize settings)
+           full-program-optimization: (settings-full-program-optimization settings)
+           build-release: (settings-build-release settings)
+           build-optimized: (settings-build-optimized settings)
+           target: (settings-target settings)
+           initialize-gambit-sharp: (settings-initialize-gambit-sharp settings)
+           separate-compiler: #f])
+         (expression
+          `(begin
+             (unless (= (##get-max-heap) ,max-heap)
+               (error "Private compiler heap bound changed" ,max-heap (##get-max-heap)))
+             (import :gerbil/compiler :gerbil/expander)
+             ;; Replay only declared initialization in the fresh frontend.
+             ;; Standard-library readers require the same Gambit macros as
+             ;; src/std/build.ss; ordinary package frontends do not opt in.
+             ,@(if (settings-initialize-gambit-sharp settings)
+                 `((eval '(begin-foreign
+                            (include ,(path-expand "lib/_gambit#.scm"
+                                        (getenv "GERBIL_BUILD_PREFIX" (gerbil-home)))))))
+                 [])
+             (parameterize ((current-compilation-target ',(settings-target settings)))
+               (eval '(begin
+                        (import :std/make)
+                        (call-with-compilation-output ,output
+                          (lambda () (apply make ',buildspec ',options))))))))
+         (proc (open-process [path: default-gerbil-gxi
+                              arguments: [(string-append "-:max-heap="
+                                            (number->string (quotient max-heap 1024))
+                                            "K,debug=q")
+                                          "-e" (object->string expression)]
+                              environment: (gxc-process-environment settings)
+                              stdout-redirection: #f stderr-redirection: #f]))
+         (status (process-status proc)))
+    (close-port proc)
+    (unless (zero? status)
+      (error "Compilation error; frontend did not deliver phase output" output status))
+    ;; A delivered file alone is insufficient: the frontend process has joined.
+    ;; Validate every product before admitting any final native compilation.
+    (execute-compilation-output output (> (settings-parallelize settings) 1))))
 
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
     (def buildspec (normalize-buildspec buildspec-in))
+    (def static-runtime-objects?
+      (ormap (lambda (spec) (memq (spec-type spec) '(exe: static-exe:))) buildspec))
     ;; detect and report duplicate files in the buildspec up front
     (let (file-counts (make-hash-table))
       (for (spec buildspec)
@@ -292,7 +399,7 @@ TODO:
     (def (build-worker)
       (try
        (for (spec workch)
-         (build spec settings)
+         (build spec settings static-runtime-objects?)
          (completion-post! (hash-ref completions (module-id spec)) 'done))
        (catch (e)
          (barrier-error! build-barrier e)
@@ -302,6 +409,10 @@ TODO:
     (def (build-coordinator spec)
       (let* ((file (spec-file spec settings))
              (mod (import/mx file)))
+        ;; A custom language is executable compilation support. A fresh child
+        ;; must not evaluate its reader while that prelude is still building.
+        (alet (prelude (core-context-prelude mod))
+          (consider prelude (expander-context-id mod)))
         (for (in (module-context-import mod))
           (consider in (expander-context-id mod)))
         (if (or (build? spec)
@@ -460,19 +571,19 @@ TODO:
      (else
       `("-e" ,include-gambit-sharp)))))
 
-(def (build spec settings)
+(def (build spec settings (static-runtime-objects? #f))
   (match spec
     ((? string? modf)
-     (gxc-compile modf #f settings #t))
+     (gxc-compile modf #f settings #t static-runtime-objects?))
     ([gxc: modf [submodules: submodules . _] . opts]
-     (for-each (cut build <> settings) submodules)
-     (gxc-compile modf opts settings #t))
+     (for-each (cut build <> settings static-runtime-objects?) submodules)
+     (gxc-compile modf opts settings #t static-runtime-objects?))
     ([gxc: modf . opts]
-     (gxc-compile modf opts settings #t))
+     (gxc-compile modf opts settings #t static-runtime-objects?))
     ([gsc: modf . opts]
      (gsc-compile modf opts settings))
     ([ssi: modf . submodules]
-     (for-each (cut build <> settings) submodules)
+     (for-each (cut build <> settings static-runtime-objects?) submodules)
      (compile-ssi modf '() settings))
     ([exe:  modf . opts]
      (compile-exe/context modf opts settings))
@@ -499,23 +610,53 @@ TODO:
     ([[plist ...] . rest] (listify rest))
     (_ (listify opts))))
 
+(def (gxc-process-environment settings)
+  (def paths (map path-expand (load-path)))
+  (def libdir (path-expand (settings-libdir settings)))
+  (def defaults
+    (if (getenv "GERBIL_BUILD_PREFIX" #f)
+      [(path-expand "lib" (gerbil-home))]
+      [(path-expand "lib" (gerbil-path)) (path-expand "lib" (gerbil-home))]))
+  (when (ormap (lambda (path) (string-index path #\:)) paths)
+    (error "GERBIL_LOADPATH cannot represent a path containing a colon" paths))
+  (unless (andmap (lambda (path) (member path paths)) defaults)
+    (error "Private compiler would add a disabled default load path" defaults paths))
+  ;; A completed child has delivered both SSI and native macro support. Prefer
+  ;; that existing authorized root, avoiding repeated expansion of ready source
+  ;; bodies. Unbuilt forward dependencies still use the original source view.
+  ;; Never add an output root that the caller did not authorize for lookup.
+  (def ordered-paths
+    (if (member libdir paths)
+      (cons libdir (filter (lambda (path) (not (string=? path libdir))) paths))
+      paths))
+  ;; Export the logical search view, not the parent's mutable module registry.
+  ;; gxc appends the same default roots; they must already occur in this prefix.
+  (cons (string-append "GERBIL_LOADPATH=" (string-join ordered-paths ":"))
+    (map (lambda (entry) (string-append (car entry) "=" (cdr entry)))
+      (filter (lambda (entry) (not (string=? (car entry) "GERBIL_LOADPATH")))
+        (get-environment-variables)))))
+
 ;; TODO: split that (and more?) into many action. See :gerbil/compiler/driver
-(def (gxc-compile mod opts settings (invoke-gsc? #t))
+(def (gxc-compile mod opts settings (invoke-gsc? #t) (static-runtime-objects? #f))
   (message "... compile " mod)
   (def gsc-opts (gsc-compile-opts opts))
   (def srcpath (source-path mod ".ss" settings))
-  (let (gxc-opts
-        [invoke-gsc: invoke-gsc?
-         target: (settings-target settings)
-         keep-scm: (not invoke-gsc?)
-         output-dir: (settings-libdir settings)
-         optimize: (settings-optimize settings)
-         debug: (settings-debug settings)
-         generate-ssxi: #t
-         verbose: (settings-verbose>=? settings 9)
-         parallel: (> (settings-parallelize settings) 1)
-         (when/list gsc-opts [gsc-options: gsc-opts]) ...])
-      (compile-module srcpath gxc-opts)))
+  (def gxc-opts
+    [invoke-gsc: invoke-gsc?
+     static: static-runtime-objects?
+     target: (settings-target settings)
+     keep-scm: (not invoke-gsc?)
+     output-dir: (settings-libdir settings)
+     optimize: (settings-optimize settings)
+     debug: (settings-debug settings)
+     generate-ssxi: #t
+     verbose: (settings-verbose>=? settings 9)
+     ;; Module-level concurrency belongs to make-build. Do not abandon a
+     ;; private child's deferred native jobs or multiply its native workers.
+     parallel: (and (not (settings-separate-compiler settings))
+                    (> (settings-parallelize settings) 1))
+     (when/list gsc-opts [gsc-options: gsc-opts]) ...])
+  (compile-module srcpath gxc-opts))
 
 (def (gsc-libpath mod settings)
   (def libdir-prefix (settings-libdir-prefix settings))

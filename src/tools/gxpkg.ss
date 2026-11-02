@@ -28,10 +28,8 @@
         :std/hash/misc
         :std/iter
         :std/misc/process
-        :std/net/request
         :std/string/misc
         :std/text/pregexp
-        :std/text/template
         ./env)
 (export main
         ;; script api
@@ -42,6 +40,14 @@
         pkg-list
         pkg-retag
         pkg-plist pkg-dependents pkg-dependents*)
+
+;; Optional command features use the ordinary runtime module loader. Their
+;; bindings are defined by the nested modules below, not inferred from an
+;; external provider's namespace or reconstructed by the command dispatcher.
+(extern namespace: gerbil/tools/gxpkg~request
+  http-get request-status request-status-text request-url request-text)
+(extern namespace: gerbil/tools/gxpkg~template
+  write-template)
 
 ;; TODO: have a generic version command, and a DSL to describe the API
 ;; with all of both CLI, REPL, JSON-RPC and Gerbil actor variants.
@@ -369,6 +375,7 @@
    (def name (or package-name
                  (path-strip-directory (path-normalize* (current-directory)))))
 
+   (load-module "gerbil/tools/gxpkg~template")
    (write-template "gerbil.pkg" gerbil.pkg-template
                    package: prefix)
    (create-directory name)
@@ -911,6 +918,7 @@
     (map pkg-directory-url all-dirs)))
 
 (def (pkg-directory-list-all)
+  (load-module "gerbil/tools/gxpkg~request")
   (remove-duplicates
    (for/fold (result []) (url (pkg-directory-urls))
      (let (req (with-catch
@@ -934,6 +942,7 @@
            result))))))
 
 (def (pkg-directory-list dir)
+  (load-module "gerbil/tools/gxpkg~request")
   (let* ((url (pkg-directory-url dir))
          (req (http-get url)))
     (if (fx= (request-status req) 200)
@@ -1234,3 +1243,24 @@ build-deps
 
 END
 )
+
+;; Defining a nested module does not load its runtime dependencies. Gerbil's
+;; existing compiler lifts it into its own ordinary loader and runtime section.
+(module request
+  (import (rename-in :std/net/request
+            (http-get provider-http-get)
+            (request-status provider-request-status)
+            (request-status-text provider-request-status-text)
+            (request-url provider-request-url)
+            (request-text provider-request-text)))
+  (export http-get request-status request-status-text request-url request-text)
+  (def http-get provider-http-get)
+  (def request-status provider-request-status)
+  (def request-status-text provider-request-status-text)
+  (def request-url provider-request-url)
+  (def request-text provider-request-text))
+
+(module template
+  (import (rename-in :std/text/template (write-template provider-write-template)))
+  (export write-template)
+  (def write-template provider-write-template))

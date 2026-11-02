@@ -118,7 +118,9 @@ package: gerbil
   gerbil-runtime-init!)
 
 (def (init!)
-  (gerbil-runtime-init! builtin-modules)
+  (gerbil-runtime-init! builtin-modules))
+
+(def (init-expander!)
   (gerbil-load-expander!)
   ;; hook ##begin -- gambit wraps it around scripts
   (eval '(define-alias ##begin begin)))
@@ -198,18 +200,135 @@ package: gerbil
     => core-resolve-module-export)
    (else #f)))
 
+(def (runtime-tool-load-path?)
+  ;; A compiled tool must not bypass a user-supplied standard-library or
+  ;; expander provider. Package-private namespaces do not need the interpreter.
+  (let (installed (path-normalize (path-expand "lib" (gerbil-home))))
+    (andmap
+     (lambda (dir)
+       (or (not (file-exists? dir))
+           (equal? (path-normalize dir) installed)
+           (and (not (file-exists? (path-expand "std" dir)))
+                (not (file-exists? (path-expand "gerbil" dir)))
+                (let (prefix (core-library-package-path-prefix dir))
+                  (not (and prefix
+                            (or (string-prefix? "std/" prefix)
+                                (string-prefix? "gerbil/" prefix))))))))
+     (load-path))))
+
+(def (compiled-tool-main tool-id)
+  ;; Only the bundled package manager has a runtime-only command contract.
+  ;; Source overrides and other tools retain full expander initialization.
+  (and (eq? tool-id ':gerbil/tools/gxpkg)
+       (runtime-tool-load-path?)
+       (let* ((path (core-resolve-library-module-path tool-id))
+              (installed (path-normalize
+                          (path-expand "lib/gerbil/tools/gxpkg.ssi" (gerbil-home))))
+              (native (__find-library-module "gerbil/tools/gxpkg")))
+         (and (equal? path installed)
+              native
+              (not (equal? (path-extension native) ".scm"))
+              (equal? (path-strip-extension native) (path-strip-extension path))
+              (call-with-input-file path
+                (lambda (port)
+                  (def prelude #f)
+                  (def exported [])
+                  (def bindings [])
+                  (def runtime [])
+                  (def (inspect form)
+                    (match form
+                      (['%#begin . body] (for-each inspect body))
+                      (['%#export . specs]
+                       (for-each
+                        (lambda (spec)
+                          (match spec
+                            (['spec: 0 id 'main]
+                             (set! exported (cons id exported)))
+                            (else (void))))
+                        specs))
+                      (['%#define-runtime id binding]
+                       (set! bindings (cons (cons id binding) bindings)))
+                      (['%#call ['%#ref 'load-module] ['%#quote name]]
+                       (set! runtime (cons name runtime)))
+                      (else (void))))
+                  (let lp ()
+                    (let (form (read port))
+                      (cond
+                       ((eof-object? form) (void))
+                       ((eq? form prelude:)
+                        (set! prelude (read port))
+                        (lp))
+                       (else (inspect form) (lp)))))
+                  (and (eq? prelude ':gerbil/base)
+                       (equal? exported '(main))
+                       (equal? runtime '("gerbil/tools/gxpkg~0"))
+                       (let (matches (filter (lambda (entry) (eq? (car entry) 'main)) bindings))
+                         (and (pair? matches) (null? (cdr matches))
+                              (symbol? (cdar matches)) (cdar matches))))))))))
+
+(extern runtime-tool-exec)
+(begin-foreign
+  (namespace ("gerbil/main#" runtime-tool-exec))
+  (c-declare "#include <unistd.h>\n#include <errno.h>\n#include <signal.h>\n#include <pthread.h>")
+  ;; exec preserves the calling thread's signal mask and interval timers.
+  ;; New Gambit setup installs its heartbeat handler before unblocking SIGALRM.
+  ;; A failed exec restores the previous mask and leaves the original handler live.
+  (define runtime-tool-exec
+    (c-lambda (nonnull-char-string nonnull-char-string-list) int
+      "sigset_t blocked, saved;
+       sigemptyset(&blocked);
+       sigaddset(&blocked, SIGALRM);
+       int mask_error = pthread_sigmask(SIG_BLOCK, &blocked, &saved);
+       if (mask_error) { ___result = mask_error; }
+       else {
+         execv(___arg1, ___arg2);
+         int exec_error = errno;
+         int restore_error = pthread_sigmask(SIG_SETMASK, &saved, 0);
+         ___result = restore_error ? restore_error : exec_error;
+       }")))
+
+(def (runtime-tool-native-strings? strings)
+  ;; The native char-string FFI is byte-oriented. Keep other argument/path
+  ;; encodings on the original loader path rather than introducing conversion errors.
+  (andmap (lambda (str)
+            (let loop ((i 0))
+              (or (= i (string-length str))
+                  (and (< (char->integer (string-ref str i)) 128)
+                       (loop (+ i 1))))))
+          strings))
+
 (def (tool-main program-name args)
   (cond
    ((equal? program-name "gxi")
+    (init-expander!)
     (apply gxi-main args))
    ((equal? program-name "gxc")
+    (init-expander!)
     (apply gxc-main args))
    (else
     (let* ((tool-id (string->symbol (string-append ":gerbil/tools/" program-name)))
-           (tool-module (import-module tool-id #f #t))
-           (tool-main-id (find-runtime-symbol tool-module 'main))
-           (tool-main (eval tool-main-id)))
-      (apply tool-main args)))))
+           (runtime-main (compiled-tool-main tool-id)))
+      (if runtime-main
+        (begin
+          ;; The managed installed product is built by the official compiler.
+          ;; execv retains argv, environment and process identity at the CLI edge.
+          (let (product (path-expand "lib/gerbil/tools/gxpkg" (gerbil-home)))
+            (when (and (file-exists? product)
+                       (runtime-tool-native-strings? (cons product args)))
+              (let (errno (runtime-tool-exec product (cons product args)))
+                (error "runtime command handoff failed" product errno))))
+          ;; Bootstrap generations without the executable retain runtime loading.
+          ;; core-eval-module initializes the prelude before the module body.
+          ;; Keep that runtime edge without constructing its macro interface.
+          (load-module "gerbil/base")
+          (load-module "gerbil/tools/gxpkg")
+          (apply (##global-var-ref (##make-global-var runtime-main)) args))
+        (begin
+          (init-expander!)
+          (let* ((tool-module (import-module tool-id #f #t))
+                 (tool-main-id (find-runtime-symbol tool-module 'main))
+                 (tool-main (eval tool-main-id)))
+            (apply tool-main args))))))))
 
 (def (bach-main program-name args)
   (match args
@@ -234,8 +353,10 @@ package: gerbil
        (displayln (gerbil-system-version-string)))
       (else
        ;; do gxi by default
+       (init-expander!)
        (apply gxi-main hd rest))))
     (else
+     (init-expander!)
      (gxi-main))))
 
 (def (main)

@@ -10,9 +10,10 @@ namespace: gxc
         "base"
         "compile"
         "optimize")
-(export compile-module compile-exe)
+(export compile-module compile-exe
+        call-with-compilation-output read-compilation-output execute-compilation-output)
 
-(extern namespace: #f gerbil-path) ;; needed until bootstrap re-generated
+(extern namespace: #f gerbil-path create-temporary-directory) ;; needed until bootstrap re-generated
 
 (def default-gerbil-gsc
   (path-expand "gsc" (path-expand "bin" (path-expand "~~"))))
@@ -32,8 +33,111 @@ namespace: gxc
 
 (def scheme-file-settings '(permissions: #o644 char-encoding: UTF-8 eol-encoding: lf))
 
+(def current-compilation-output (make-parameter #f))
+
+(def (record-compilation-file! path)
+  (alet (output (current-compilation-output))
+    (let* ((path (path-expand path))
+           (info (file-info path)))
+      (with-lock (vector-ref output 0)
+        (lambda ()
+          (hash-put! (vector-ref output 1) path
+            [(file-info-size info)
+             (time->seconds (file-info-last-modification-time info))]))))))
+
+;; The caller owns a fresh output file and the generated files until the
+;; frontend process has exited. No Scheme context, thread or thunk is exported.
+(def (call-with-compilation-output path thunk)
+  (when (or (current-compilation-output) (file-exists? path)
+            (file-exists? (string-append path ".tmp")))
+    (error "Compilation output requires a fresh, non-nested owner" path))
+  (let* ((output (vector (make-mutex 'compiler/output) (make-hash-table) []
+                         (make-hash-table)))
+         (result (parameterize ((current-compilation-output output)) (thunk))))
+    (with-output-to-file [path: (string-append path ".tmp") permissions: #o600
+                          char-encoding: 'UTF-8 eol-encoding: 'lf]
+      (lambda ()
+        (write ['compilation-output
+                ['files (hash->list (vector-ref output 1)) ...]
+                ['gsc (reverse (vector-ref output 2)) ...]])
+        (newline)))
+    (rename-file (string-append path ".tmp") path)
+    result))
+
+;; Validate the entire handoff before admitting any native job. These metadata
+;; checks assume exclusive workspace ownership, not adversarial file integrity.
+(def (read-compilation-output path)
+  (let (data (call-with-input-file path
+                (lambda (port)
+                  (let (data (read port))
+                    (unless (eof-object? (read port))
+                      (error "Trailing compilation output data" path))
+                    data))))
+    (match data
+      (['compilation-output ['files . files] ['gsc . jobs]]
+       (def inputs (make-hash-table))
+       (for-each
+        (lambda (entry)
+          (match entry
+            ([file size stamp]
+             (unless (and (string? file) (integer? size) (>= size 0)
+                          (real? stamp) (file-exists? file))
+               (error "Missing compilation product" entry))
+             (let (info (file-info file))
+               (unless (and (= size (file-info-size info))
+                            (= stamp (time->seconds (file-info-last-modification-time info))))
+                 (error "Changed compilation product" file)))
+             (hash-put! inputs file #t))
+            (_ (error "Invalid compilation product" entry))))
+        files)
+       (for-each
+        (lambda (job)
+          (match job
+            ([program cwd input phi? args environment]
+             (unless (and (string? program) (equal? program (gerbil-gsc))
+                          (string? cwd) (file-exists? cwd)
+                          (string? input) (hash-get inputs input)
+                          (boolean? phi?) (pair? args) (list? args)
+                          (andmap string? args)
+                          (list? environment) (andmap string? environment)
+                          (parameterize ((current-directory cwd))
+                            (equal? (path-expand (last args)) input)))
+               (error "Invalid native compilation job" job)))
+            (_ (error "Invalid native compilation job" job))))
+        jobs)
+       data)
+      (_ (error "Invalid compilation output" path)))))
+
+;; The caller must join the frontend owner before calling this procedure.
+;; Existing compiler workers execute only scalar native inputs after that join.
+(def (execute-compilation-output path (parallel? #t))
+  (match (read-compilation-output path)
+    (['compilation-output _ ['gsc . jobs]]
+     ;; An unknown completion retains this claim. Do not create another native
+     ;; generation by replaying the same phase output after an exception.
+     (let (claim (string-append path ".native"))
+       (create-directory claim)
+       (for-each
+        (lambda (job)
+          (match job
+            ([program cwd input phi? args environment]
+             (let (run (lambda ()
+                          (parameterize ((current-directory cwd))
+                            (invoke program args environment: environment))))
+               (if parallel?
+                 (add-compile-job! run `(compile-file ,input))
+                 (run))))))
+        jobs)
+       (when parallel? (execute-pending-compile-jobs!))
+       (call-with-output-file (path-expand "complete" claim)
+         (lambda (port)
+           (write ['native-compilation-complete (length jobs)] port)
+           (newline port)))))))
+
 (def (with-output-to-scheme-file path fun)
-  (with-output-to-file [path: path . scheme-file-settings] fun))
+  (begin0
+    (with-output-to-file [path: path . scheme-file-settings] fun)
+    (record-compilation-file! path)))
 
 (def +gerbil-gsc+ #f)
 (def (gerbil-gsc)
@@ -112,6 +216,7 @@ namespace: gxc
          (optimize    (pgetq optimize: opts))
          (debug       (pgetq debug: opts))
          (gen-ssxi    (pgetq generate-ssxi: opts))
+         (static?     (pgetq static: opts))
          (parallel?   (pgetq parallel: opts)))
 
     (when outdir
@@ -126,6 +231,7 @@ namespace: gxc
                    (current-compile-optimize optimize)
                    (current-compile-debug debug)
                    (current-compile-generate-ssxi gen-ssxi)
+                   (current-compile-static static?)
                    (current-compile-timestamp (compile-timestamp))
                    (current-compile-context `((compile-module ,srcpath)))
                    (current-compile-identifiers (make-bound-identifier-table))
@@ -189,15 +295,6 @@ namespace: gxc
   (def (get-libgerbil-ld-opts gerbil-libdir)
     (call-with-input-file (path-expand "libgerbil.ldd" gerbil-libdir) read))
 
-  (def (replace-extension path ext)
-    (string-append (path-strip-extension path) ext))
-
-  (def (replace-extension-with-c path)
-    (replace-extension path ".c"))
-
-  (def (replace-extension-with-object path)
-    (replace-extension path compiler-obj-suffix))
-
   (def (userlib-module? ctx)
     (and (not (exclude-module? ctx))
          (not (libgerbil-module? ctx))))
@@ -206,7 +303,22 @@ namespace: gxc
     (let (id-str (symbol->string (expander-context-id ctx)))
       (and (not (exclude-module? id-str))
            (or (string-prefix? "gerbil/" id-str)
-               (string-prefix? "std/" id-str)))))
+               (string-prefix? "std/" id-str))
+           ;; Namespace membership is not a precompiled-product receipt.
+           ;; Tools and source overrides use the ordinary dependency producer
+           ;; unless this installed generation already owns fresh C/object files.
+           (let* ((home (getenv "GERBIL_BUILD_PREFIX" (gerbil-home)))
+                  (scm (find-static-module-file ctx))
+                  (installed (path-expand
+                              (string-append (static-module-name (expander-context-id ctx)) ".scm")
+                              (path-expand "lib/static" home)))
+                  (c (replace-extension-with-c scm))
+                  (o (replace-extension-with-object scm)))
+             (and (equal? (path-normalize scm) (path-normalize installed))
+                  (file-exists? c)
+                  (file-exists? o)
+                  (not (file-newer? scm c))
+                  (not (file-newer? c o)))))))
 
   (def (exclude-module? ctx-or-str)
     (let (str (if (string? ctx-or-str)
@@ -248,8 +360,10 @@ namespace: gxc
            (libgerbil-c      (map replace-extension-with-c libgerbil-scm))
            (libgerbil-o      (map replace-extension-with-object libgerbil-scm))
            (src-deps         (filter userlib-module? deps))
-           (src-deps-scm     (map find-static-module-file src-deps))
-           (src-deps-scm     (filter not-file-empty? src-deps-scm))
+           (src-deps-with-scm
+            (filter (lambda (entry) (not-file-empty? (cdr entry)))
+                    (map (lambda (dep) (cons dep (find-static-module-file dep))) src-deps)))
+           (src-deps-scm     (map cdr src-deps-with-scm))
            (src-deps-scm     (map path-expand src-deps-scm))
            (src-deps-c       (map replace-extension-with-c src-deps-scm))
            (src-deps-o       (map replace-extension-with-object src-deps-scm))
@@ -310,32 +424,81 @@ namespace: gxc
       (with-output-to-scheme-file output-scm
                                   (cut generate-stub builtin-modules))
       (when (current-compile-invoke-gsc)
-        (let (compile-it
-              (lambda ()
-                (invoke (gerbil-gsc)
-                        ["-link"
-                         gsc-link-opts ...
-                         libgerbil-c ...
-                         src-deps-scm ...
-                         src-bin-scm
-                         output-scm])
-                (for-each compile-obj
-                          [src-deps-scm ... src-bin-scm output-scm #f]
-                          [src-deps-c ...   src-bin-c   output-c   output_-c])
-                (invoke (gerbil-gcc)
-                        ["-w" "-o" output-bin
-                         src-deps-o ...
-                         src-bin-o
-                         output-o output_-o
-                         libgerbil-o ...
-                         output-ld-opts ...
-                         (if (gerbil-enable-shared?) [rpath] []) ...
-                         "-L" gerbil-libdir "-lgambit"
-                         libgerbil-ld-opts ...])
-                ;; clean up
-                (for-each delete-file [output-c output_-c output-o output_-o])))
+        (let ((scm-paths [src-deps-scm ... src-bin-scm output-scm #f])
+              (c-paths [src-deps-c ... src-bin-c output-c output_-c]))
+          (def (prepare-link)
+            ;; GSC closes every generated C input before object admission.
+            (invoke (gerbil-gsc)
+                    ["-link" gsc-link-opts ... libgerbil-c ...
+                     src-deps-scm ... src-bin-scm output-scm]))
+          (def (link-executable (objects [src-deps-o ... src-bin-o]))
+            (invoke (gerbil-gcc)
+                    ["-w" "-o" output-bin
+                     objects ... output-o output_-o libgerbil-o ...
+                     output-ld-opts ...
+                     (if (gerbil-enable-shared?) [rpath] []) ...
+                     "-L" gerbil-libdir "-lgambit" libgerbil-ld-opts ...])
+            ;; Only a successful final link retires its temporary inputs.
+            (for-each delete-file [output-c output_-c output-o output_-o]))
+          (def (compile-it)
+            (prepare-link)
+            (for-each compile-obj scm-paths c-paths)
+            (link-executable))
           (if (current-compile-parallel)
-            (add-compile-job! compile-it)
+            (cond-expand
+              (darwin
+               ;; A closure never regenerates shared C. Matching graph products
+               ;; have one registered writer; other recipes get private outputs.
+               (let* ((private (create-temporary-directory
+                                [path: (string-append output-scm ".objects") permissions: #o700]))
+                      (modules (append src-deps-with-scm [(cons ctx src-bin-scm)]))
+                      (entries
+                       (map
+                        (lambda (entry)
+                          (let* ((mod (car entry))
+                                 (scm (path-expand (cdr entry)))
+                                 (runtime-c (runtime-c-for-static mod scm))
+                                 (key (native-runtime-key scm))
+                                 (producer (current-compile-output-job runtime-c key)))
+                            (if producer
+                              ;; Both object and C become readable on this handle.
+                              [runtime-c (replace-extension-with-object scm) producer producer]
+                              (let* ((c (path-expand (path-strip-directory
+                                                      (replace-extension-with-c scm)) private))
+                                     (ref (path-strip-directory (path-strip-extension scm)))
+                                     (generation
+                                      (add-compile-job!
+                                       (lambda ()
+                                         (invoke (gerbil-gsc)
+                                          ["-c" "-o" c "-module-ref" ref "-linker-name" ref
+                                           gsc-link-opts ... scm]))
+                                       `(generate-executable-c ,c)))
+                                     (object
+                                      (add-compile-job! (cut compile-obj #f c)
+                                        `(compile-executable-object ,c) [generation])))
+                                [c (replace-extension-with-object c) generation object]))))
+                        modules))
+                      (preparation
+                       (add-compile-job!
+                        (lambda ()
+                          ;; C operands are read-only GSC metadata inputs.
+                          (invoke (gerbil-gsc)
+                           ["-link" gsc-link-opts ... libgerbil-c ...
+                            (map car entries) ... output-scm]))
+                        `(prepare-executable-link ,output-bin)
+                        (map caddr entries)))
+                      (stub-objects
+                       (map (lambda (scm c)
+                              (add-compile-job! (cut compile-obj scm c)
+                                `(compile-executable-object ,c) [preparation]))
+                            [output-scm #f] [output-c output_-c])))
+                 (add-compile-job!
+                  (lambda ()
+                    (link-executable (map cadr entries))
+                    (delete-directory* private))
+                  `(link-executable ,output-bin)
+                  (append (map cadddr entries) stub-objects))))
+              (else (add-compile-job! compile-it)))
             (compile-it))))))
 
   (let* ((output-bin (compile-exe-output-file ctx opts))
@@ -687,14 +850,15 @@ namespace: gxc
            (scmrt (compile-output-file ctx #f ".scm"))
            (scms (compile-static-output-file ctx)))
       (when runtime-code?
-        (compile-scm-file scm0 runtime-code))
+        (compile-scm-file scm0 runtime-code #f scms))
       (parameterize ((current-compile-gsc-options #f))
         (compile-scm-file scmrt loader-code))
       (when (file-exists? scms)
         (delete-file scms))
       (if runtime-code?
         (copy-file scm0 scms)
-        (call-with-output-file scms void))))
+        (call-with-output-file scms void))
+      (record-compilation-file! scms)))
 
   (let (all-modules (cons ctx (lift-nested-modules ctx)))
     (for-each
@@ -784,7 +948,7 @@ namespace: gxc
     (reverse (unbox modules))))
 
 ;;; utilities
-(def (compile-scm-file path code (phi? #f))
+(def (compile-scm-file path code (phi? #f) (static-path #f))
   (verbose "compile " path)
   (with-output-to-scheme-file path
     (lambda ()
@@ -794,14 +958,49 @@ namespace: gxc
           (standard-bindings)
           (extended-bindings)
           ,@(if phi? '((inlining-limit 200)) '())))
+      ;; Keep small compilation-support units in their configured host mode.
+      ;; Gambit's existing header selects procedure hosts only above this
+      ;; finite limit. This is metadata, not an extra Scheme runtime action.
+      (cond-expand
+        (darwin
+         (when (and phi? (eq? (current-compilation-target) 'C))
+           (pretty-print '(##meta-info cc-options "-D___SINGLE_HOST_LIMIT=8192"))))
+        (else (void)))
       (pretty-print code)))
-  (when (current-compile-invoke-gsc)
-    (let (compile-it
-          (lambda ()
-            (gsc-compile-file path phi?)))
+  (cond
+   ((current-compilation-output)
+    => (lambda (output)
+         (let* ((input (path-expand path))
+                (job [(string-copy (gerbil-gsc)) (string-copy (current-directory)) input phi?
+                      (map string-copy (gsc-compile-file-arguments path phi?))
+                      (map (lambda (entry) (string-append (car entry) "=" (cdr entry)))
+                        (get-environment-variables))]))
+           (with-lock (vector-ref output 0)
+             (lambda ()
+               (when (hash-get (vector-ref output 3) input)
+                 (error "Duplicate native compilation input" input))
+               (hash-put! (vector-ref output 3) input #t)
+               (vector-set! output 2 (cons job (vector-ref output 2))))))))
+   ((current-compile-invoke-gsc)
+    (let* ((reuse? (cond-expand
+                    (darwin (and static-path (current-compile-static)
+                                 (eq? (current-compilation-target) 'C)
+                                 (not (gerbil-toolchain-static-path? static-path))))
+                    (else #f)))
+           (compile-it (lambda ()
+                         (if reuse?
+                           (gsc-compile-runtime-product path static-path)
+                           (gsc-compile-file path phi?)))))
       (if (current-compile-parallel)
-        (add-compile-job! compile-it `(compile-file ,path))
-        (compile-it)))))
+        (if reuse?
+          (add-compile-output-job!
+           [(replace-extension-with-c path)
+            (replace-extension-with-c static-path)
+            (replace-extension-with-object static-path)
+            (replace-extension path ".o1")]
+           (native-runtime-key static-path) compile-it `(compile-file ,path))
+          (add-compile-job! compile-it `(compile-file ,path)))
+        (compile-it))))))
 
 (def (gsc-link-options (phi? #f))
   (let lp ((rest (current-compile-gsc-options)) (opts []))
@@ -878,12 +1077,90 @@ namespace: gxc
 (def (not-string-empty? str)
   (not (string-empty? str)))
 
-(def (gsc-compile-file path phi?)
+(def (replace-extension path ext)
+  (string-append (path-strip-extension path) ext))
+
+(def (replace-extension-with-c path)
+  (replace-extension path ".c"))
+
+(def (replace-extension-with-object path)
+  (replace-extension path compiler-obj-suffix))
+
+(def (runtime-c-for-static ctx static-scm)
+  (path-expand
+   (string-append (module-id->path-string (expander-context-id ctx)) "~0.c")
+   (path-normalize (path-expand ".." (path-directory static-scm)))))
+
+(def (gerbil-toolchain-static-path? path)
+  (string-prefix?
+   (string-append (path-expand "lib/static"
+                    (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))) "/")
+   (path-expand path)))
+
+;; Graph-local equivalence only. The owner pins tools and source bytes; no
+;; timestamp-based cross-build reuse is inferred from this registered key.
+(def (native-runtime-key static-path)
+  (object->string
+   [(path-expand static-path) (gerbil-gsc) (gerbil-gcc) (current-directory)
+    (gsc-link-options) (gsc-cc-options) (gsc-ld-options) (gcc-ld-options)
+    (get-environment-variables)]))
+
+;; Gambit's linker identifier spelling, also used by the existing Bazel0007
+;; dynamic/static ABI alias. The public runtime entry keeps its .o1 identity.
+(def (c-linker-id name)
+  (call-with-output-string
+   (lambda (output)
+     (string-for-each
+      (lambda (character)
+        (cond
+         ((char=? character #\_) (display "__" output))
+         ((let (code (char->integer character))
+            (or (and (>= code 65) (<= code 90))
+                (and (>= code 97) (<= code 122))
+                (and (>= code 48) (<= code 57))))
+          (write-char character output))
+         (else
+          (display #\_ output)
+          (display (number->string (char->integer character) 16) output)
+          (display #\_ output)))) name))))
+
+(def (gsc-compile-runtime-product path static-path)
+  (let* ((runtime-c (replace-extension-with-c path))
+         (static-c (replace-extension-with-c static-path))
+         (static-o (replace-extension-with-object static-path))
+         (dynamic-o (replace-extension path ".o1"))
+         (ref (path-strip-directory (path-strip-extension static-path)))
+         (alias-option
+          (string-append "-Wl,-alias,____LNK_" (c-linker-id ref)
+                         ",____LNK_" (c-linker-id (path-strip-directory dynamic-o)))))
+    (invoke (gerbil-gsc)
+     ["-c" "-o" runtime-c "-module-ref" ref "-linker-name" ref
+      (gsc-link-options) ... path])
+    (when (file-exists? static-c) (delete-file static-c))
+    (copy-file runtime-c static-c)
+    (invoke (gerbil-gsc)
+     ["-obj" "-o" static-o (gsc-cc-options) ...
+      "-cc-options" "-D___DYNAMIC -fPIC" static-c])
+    (invoke "env"
+     [(string-append "GAMBITDIR_INCLUDE="
+        (cdr (assoc "GAMBITDIR_INCLUDE" (##shell-install-dirs '("include")))))
+      (string-append "BUILD_DYN_OUTPUT_FILENAME_PARAM=" dynamic-o)
+      (string-append "BUILD_DYN_INPUT_FILENAMES_PARAM=" static-o)
+      (string-append "BUILD_DYN_META_INFO_FILE_PARAM=" runtime-c)
+      (string-append "BUILD_DYN_LD_OPTIONS_PARAM="
+        (string-join (append (gcc-ld-options) [alias-option]) "\n"))
+      (path-expand "gambuild-C" (path-directory (gerbil-gsc))) "dyn"])
+    (unless (andmap file-exists? [runtime-c static-c static-o dynamic-o])
+      (error "Incomplete dynamic/static compiler product" path static-path))))
+
+(def (gsc-compile-file-arguments path phi?)
   (let ((gsc-link-opts (gsc-link-options phi?))
         (gsc-cc-opts (gsc-cc-options phi?))
         (gsc-ld-opts (gsc-ld-options phi?)))
-    (invoke (gerbil-gsc)
-            [gsc-cc-opts ... gsc-ld-opts ... gsc-link-opts ... path])))
+    [gsc-cc-opts ... gsc-ld-opts ... gsc-link-opts ... path]))
+
+(def (gsc-compile-file path phi?)
+  (invoke (gerbil-gsc) (gsc-compile-file-arguments path phi?)))
 
 (def (compile-output-file ctx n ext)
   (def (module-relative-path ctx)
@@ -962,9 +1239,11 @@ namespace: gxc
 
 (def (invoke program args
              stdout-redirection: (stdout-redirection #f)
-             stderr-redirection: (stderr-redirection #f))
+             stderr-redirection: (stderr-redirection #f)
+             environment: (environment #f))
   (verbose "invoke " [program . args])
   (let* ((proc (open-process [path: program arguments: args
+                                    (if environment [environment: environment] []) ...
                                     stdout-redirection: stdout-redirection
                                     stderr-redirection: stderr-redirection]))
          (output (and (or stdout-redirection stderr-redirection)
