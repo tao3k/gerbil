@@ -28,7 +28,7 @@
         :std/hash/misc
         :std/iter
         :std/misc/process
-        :std/net/request
+        (only-in :gerbil/expander current-expander-context make-top-context eval-syntax)
         :std/string/misc
         :std/text/pregexp
         :std/text/template
@@ -910,7 +910,17 @@
          (all-dirs (remove-duplicates (append default-dirs other-dirs))))
     (map pkg-directory-url all-dirs)))
 
+;; HTTP is needed only for directory search. Use the ordinary Gerbil
+;; importer so build, clean and dependency installation do not initialize it.
+(def (pkg-directory-http)
+  (parameterize ((current-expander-context (make-top-context)))
+    (eval-syntax '(import :std/net/request))
+    (apply values
+      (map eval-syntax '(http-get request-status request-status-text request-url request-text)))))
+
 (def (pkg-directory-list-all)
+  (defvalues (http-get request-status request-status-text request-url request-text)
+    (pkg-directory-http))
   (remove-duplicates
    (for/fold (result []) (url (pkg-directory-urls))
      (let (req (with-catch
@@ -934,6 +944,8 @@
            result))))))
 
 (def (pkg-directory-list dir)
+  (defvalues (http-get request-status request-status-text _request-url request-text)
+    (pkg-directory-http))
   (let* ((url (pkg-directory-url dir))
          (req (http-get url)))
     (if (fx= (request-status req) 200)
