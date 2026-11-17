@@ -12,6 +12,14 @@
 (run-process ["timeout" "--signal=TERM" "--kill-after=5s" "180s"
               "gerbil" "pkg" "deps" "--install"]
   stderr-redirection: #t
+  check-status: (lambda (status _)
+    (unless (zero? status)
+      (displayln "ISSUE-3 completed=false"
+                 " phase=" (if indexing-start "tagging" "before-tagging")
+                 " elapsed-seconds=" (- (real-time) began)
+                 " completed-tags=" completed-tags
+                 " process-status=" status)
+      (error "gerbil pkg deps --install failed" status)))
   coprocess: (lambda (port)
     (close-output-port port)
     (let loop ()
