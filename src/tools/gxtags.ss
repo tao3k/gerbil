@@ -5,6 +5,7 @@
 ;;; Usage: gxtags [-a] [-o tags-file] file-or-directory ...
 
 (import :gerbil/expander
+        (only-in :gerbil/runtime/init gerbil-load-expander!)
         (only-in :gerbil/compiler/base ast-case)
         (only-in :gerbil/core/expander syntax)
         :std/cli/getopt
@@ -34,6 +35,7 @@
 (def (gxtags-main (opt : HashTable))
   => :void
   (setup-local-env! opt)
+  (gerbil-load-expander!)
   (let (inputs (hash-ref opt 'input []))
     (make-tags (if (null? inputs) ["."] inputs)
                (hash-get opt 'output)

@@ -296,11 +296,22 @@ build_srfi() {
 build_tools () {
   feedback_low "Building gerbil tools"
   (cd tools && gxi ./build.ss) || die
+  if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" = yes ]; then
+    (cd tools && gxi ./build-aot.ss) || die
+  fi
   for tool in tools/gx*.ss; do
       # Test modules are run by gxtest, not installed as commands.
       case "${tool}" in *-test.ss) continue ;; esac
       toolname=$(basename "${tool}" .ss)
-      (cd "${GERBIL_BUILD_PREFIX}/bin" && ln -sf gerbil "${toolname}")
+      case "${GERBIL_BUILD_AOT_TOOLS:-no}:$toolname" in
+        yes:gxpkg|yes:gxtags|yes:gxtest)
+          test -x "${GERBIL_BUILD_PREFIX}/bin/$toolname" || die
+          test ! -L "${GERBIL_BUILD_PREFIX}/bin/$toolname" || die
+          ;;
+        *)
+          (cd "${GERBIL_BUILD_PREFIX}/bin" && ln -sf gerbil "$toolname") || die
+          ;;
+      esac
   done
 }
 

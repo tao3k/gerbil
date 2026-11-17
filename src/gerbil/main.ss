@@ -118,7 +118,9 @@ package: gerbil
   gerbil-runtime-init!)
 
 (def (init!)
-  (gerbil-runtime-init! builtin-modules)
+  (gerbil-runtime-init! builtin-modules))
+
+(def (init-expander!)
   (gerbil-load-expander!)
   ;; hook ##begin -- gambit wraps it around scripts
   (eval '(define-alias ##begin begin)))
@@ -198,7 +200,26 @@ package: gerbil
     => core-resolve-module-export)
    (else #f)))
 
+(def (runtime-tool-load-path?)
+  ;; A compiled tool must not bypass a user-supplied standard-library or
+  ;; expander provider. Package-private namespaces do not need the interpreter.
+  (let (libdir (path-expand "lib" (gerbil-home)))
+    (and (file-exists? libdir)
+         (let (installed (path-normalize libdir))
+           (andmap
+            (lambda (dir)
+              (or (not (file-exists? dir))
+                  (equal? (path-normalize dir) installed)
+                  (and (not (file-exists? (path-expand "std" dir)))
+                       (not (file-exists? (path-expand "gerbil" dir)))
+                       (let (prefix (core-library-package-path-prefix dir))
+                         (not (and prefix
+                                   (or (string-prefix? "std/" prefix)
+                                       (string-prefix? "gerbil/" prefix))))))))
+            (load-path))))))
+
 (def (tool-main program-name args)
+  (init-expander!)
   (cond
    ((equal? program-name "gxi")
     (apply gxi-main args))
@@ -211,6 +232,41 @@ package: gerbil
            (tool-main (eval tool-main-id)))
       (apply tool-main args)))))
 
+(cond-expand
+ (darwin
+  (extern exec-installed-tool)
+  (begin-foreign
+    (namespace ("gerbil/main#" exec-installed-tool))
+    (c-declare "#include <unistd.h>\n#include <errno.h>\n#include <signal.h>\n#include <pthread.h>")
+    (define exec-installed-tool
+      (c-lambda (nonnull-UTF-8-string nonnull-UTF-8-string-list) int
+        "sigset_t blocked, saved;
+         sigemptyset(&blocked);
+         sigaddset(&blocked, SIGALRM);
+         int result = pthread_sigmask(SIG_BLOCK, &blocked, &saved);
+         if (result == 0)
+           {
+             execv(___arg1, ___arg2);
+             result = errno;
+             pthread_sigmask(SIG_SETMASK, &saved, 0);
+           }
+         ___result = result;")))))
+
+(def (builtin-tool-main name args)
+  (cond-expand
+   (darwin
+    (when (member name '("gxpkg" "gxtags" "gxtest"))
+      (let (path (path-expand (string-append "bin/" name) (gerbil-home)))
+        (when (and (file-exists? path)
+                   (eq? (file-info-type (file-info path #f)) 'regular)
+                   (runtime-tool-load-path?))
+          ;; The new runtime installs its heartbeat handler before unblocking
+          ;; SIGALRM. A failed exec restores this process's signal mask.
+          (let (err (exec-installed-tool path (cons path args)))
+            (error "installed tool execution failed" path err))))))
+   (else (void)))
+  (tool-main name args))
+
 (def (bach-main program-name args)
   (match args
     ([hd . rest]
@@ -222,20 +278,22 @@ package: gerbil
          ([cmd]
           (cond
            ((assoc cmd builtin-tool-help)
-            => (lambda (help-cmd) (tool-main (cadr help-cmd) (cddr help-cmd))))
+            => (lambda (help-cmd) (builtin-tool-main (cadr help-cmd) (cddr help-cmd))))
            (else
             (displayln "no help for topic " cmd)
             (print-usage! program-name))))
          (else
           (print-usage! program-name))))
       ((assoc hd builtin-tool-commands)
-       => (lambda (cmd) (tool-main (cadr cmd) (append (cddr cmd) rest))))
+       => (lambda (cmd) (builtin-tool-main (cadr cmd) (append (cddr cmd) rest))))
       ((member hd '("-v" "--version" "version"))
        (displayln (gerbil-system-version-string)))
       (else
        ;; do gxi by default
+       (init-expander!)
        (apply gxi-main hd rest))))
     (else
+     (init-expander!)
      (gxi-main))))
 
 (def (main)

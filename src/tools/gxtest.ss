@@ -2,6 +2,7 @@
 ;;; © vyzo
 ;;; tool to run tests without the need of glue code
 (import :gerbil/expander
+        (only-in :gerbil/runtime/init gerbil-load-expander!)
         :std/cli/getopt
         :std/iter
         :std/hash/misc
@@ -34,6 +35,7 @@
 
 (def (gxtest-main opt)
   (setup-local-env! opt)
+  (gerbil-load-expander!)
   (let-hash opt
     (cond
      ((null? .args)
