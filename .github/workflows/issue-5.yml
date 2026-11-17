@@ -1,0 +1,57 @@
+name: Issue 5 release reproduction
+
+on:
+  push:
+    branches: [issues/5-gxpkg-static-link]
+
+permissions:
+  contents: read
+
+jobs:
+  separate-link:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Install the published Gerbil toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=gerbil-v0.19-2591dcd9b7c6d2c4e9dd8611a17c5b1a5d82bbdb-linux-x86_64-portable-full-single-host-unlimited-patcha379bb244bfa
+          archive="$RUNNER_TEMP/$tag.tar.gz"
+          release="$RUNNER_TEMP/gerbil-release"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/tao3k/gerbil-bazel/releases/download/$tag/$tag.tar.gz"
+          echo "3b345b1af68dfbbc0e73bae64941e4c8910d0ca192d81432ce699c5af385b565  $archive" | sha256sum --check
+          mkdir -p "$release"
+          tar -xzf "$archive" -C "$release" --strip-components=1
+      - name: Compare ordinary EXE linking with the package API
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/gerbil-release/activate"
+          export GERBIL_PATH="$RUNNER_TEMP/gerbil-package-state"
+          export GERBIL_BUILD_CORES=1
+          mkdir -p "$GERBIL_PATH/lib"
+          gerbil --version
+
+          gxc -exe -o "$RUNNER_TEMP/control" issues/5/control.ss
+          test "$("$RUNNER_TEMP/control")" = control-ok
+
+          for module in env gxpkg; do
+            static_input="$GERBIL_PREFIX/lib/static/gerbil__tools__$module"
+            test -s "$static_input.scm"
+            test ! -e "$static_input.o"
+          done
+
+          log="$RUNNER_TEMP/gxpkg-link.log"
+          if gxc -exe -o "$RUNNER_TEMP/probe" issues/5/probe.ss > "$log" 2>&1; then
+            "$RUNNER_TEMP/probe"
+            echo 'Expected the pinned release to reproduce the link failure.'
+            exit 1
+          fi
+          for module in env gxpkg; do
+            grep -E "cannot find .*gerbil__tools__${module}\\.o: No such file or directory" "$log" ||
+              { tail -n 80 "$log"; exit 1; }
+          done
+          echo "Reproduced issue #5 with the pinned release."
