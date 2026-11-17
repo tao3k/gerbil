@@ -3,6 +3,9 @@ name: Issue 5 release reproduction
 on:
   push:
     branches: [issues/release-matrix]
+    paths:
+      - 'issues/5/**'
+      - '.github/actions/release-gerbil/**'
   workflow_dispatch:
 
 permissions:

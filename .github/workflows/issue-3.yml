@@ -3,6 +3,10 @@ name: Issue 3 release reproduction
 on:
   push:
     branches: [issues/release-matrix]
+    paths:
+      - 'issues/3/**'
+      - 'issues/package-fixture.ss'
+      - '.github/actions/release-gerbil/**'
   workflow_dispatch:
 
 permissions:

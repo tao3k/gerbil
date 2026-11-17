@@ -1,4 +1,4 @@
-(import :std/misc/process :std/srfi/13)
+(import :std/misc/process)
 (def began (real-time))
 (def last-progress began)
 (def longest-gap 0)
