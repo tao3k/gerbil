@@ -722,20 +722,17 @@ TODO:
     (else opts)))
 
 (def (compile-exe/context mod opts settings)
-  (cond
-   ((or (settings-build-release settings)
-        (getenv "GERBIL_BUILD_RELEASE" #f))
-    (cond
-     ((or (settings-build-optimized settings)
-          (getenv "GERBIL_BUILD_OPTIMIZED" #f))
-      (compile-optimized-exe/static-linkage mod opts settings))
-      (else
-       (compile-exe/static-linkage mod opts settings))))
-   ((or (settings-build-optimized settings)
-        (getenv "GERBIL_BUILD_OPTIMIZED" #f))
-    (compile-optimized-exe mod opts settings))
-   (else
-    (compile-exe mod opts settings))))
+  (let* ((optimized? (or (settings-build-optimized settings)
+                         (getenv "GERBIL_BUILD_OPTIMIZED" #f)))
+         (compile-e (if optimized? compile-optimized-exe compile-exe))
+         (static-release?
+          (cond-expand
+           (darwin #f)
+           (else (or (settings-build-release settings)
+                     (getenv "GERBIL_BUILD_RELEASE" #f))))))
+    (if static-release?
+      (compile/static-linkage mod opts settings compile-e)
+      (compile-e mod opts settings))))
 
 (def (compile-exe mod opts settings)
   (def srcpath (source-path mod ".ss" settings))
