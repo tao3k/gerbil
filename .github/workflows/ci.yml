@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches-ignore: [issues/5-gxpkg-static-link]
+    branches-ignore: [issues/5-gxpkg-static-link, issues/release-matrix]
   pull_request:
 jobs:
   build:

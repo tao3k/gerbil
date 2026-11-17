@@ -1,0 +1,47 @@
+name: Issue 4 release reproduction
+
+on:
+  push:
+    branches: [issues/release-matrix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: ./.github/actions/release-gerbil
+      - name: Reproduce issue 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/issue-catalog"
+          gxi issues/package-fixture.ss "$fixture" 1
+          export GIT_CONFIG_GLOBAL="$fixture/gitconfig"
+          index="$GERBIL_PATH/pkg/TAGS"
+          (cd "$fixture/consumer" && gerbil pkg deps --install) > "$RUNNER_TEMP/install.log" 2>&1 ||
+            { cat "$RUNNER_TEMP/install.log"; exit 1; }
+          test -s "$index"
+          cp "$index" "$RUNNER_TEMP/installed.tags"
+          (cd "$GERBIL_PATH/pkg" && gxtags qualification.invalid) > "$RUNNER_TEMP/direct.log" 2>&1
+          grep '^TAG ' "$RUNNER_TEMP/direct.log"
+          cmp "$RUNNER_TEMP/installed.tags" "$index"
+          (cd "$fixture/consumer" && gerbil pkg retag) > "$RUNNER_TEMP/retag.log" 2>&1 ||
+            { cat "$RUNNER_TEMP/retag.log"; exit 1; }
+          cmp "$RUNNER_TEMP/installed.tags" "$index"
+          for command in install retag; do
+            if grep '^TAG ' "$RUNNER_TEMP/$command.log"; then
+              echo "ISSUE-4 $command: progress forwarded"
+            else
+              grep -F '... tagging packages' "$RUNNER_TEMP/$command.log"
+              echo "ISSUE-4 $command: reproduced hidden TAG events"
+            fi
+          done

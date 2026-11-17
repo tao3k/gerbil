@@ -1,0 +1,40 @@
+name: Issue 2 release reproduction
+
+on:
+  push:
+    branches: [issues/release-matrix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: ./.github/actions/release-gerbil
+      - name: Reproduce issue 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          gxi issues/2/import-closure.ss :std/encoding/json/reader
+          gxi issues/2/import-closure.ss :std/text/parser/ll1
+          log="$RUNNER_TEMP/reexport.log"
+          cd issues/2/reexport
+          if gerbil build > "$log" 2>&1; then
+            test "$("$GERBIL_PATH/bin/reexport-control")" = REEXPORT-LINKED-OK
+            echo "ISSUE-2 empty reexport: not reproduced"
+          else
+            if ! grep -E 'cannot find|file cannot be open|file not found|No such file' "$log" |
+                 grep -F 'std__import-check__public.o'; then
+              tail -n 100 "$log"
+              exit 1
+            fi
+            echo "ISSUE-2 empty reexport: reproduced"
+          fi

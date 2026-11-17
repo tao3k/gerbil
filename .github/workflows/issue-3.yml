@@ -1,0 +1,35 @@
+name: Issue 3 release reproduction
+
+on:
+  push:
+    branches: [issues/release-matrix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: ./.github/actions/release-gerbil
+      - name: Reproduce issue 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/issue-catalog"
+          gxi issues/package-fixture.ss "$fixture" 1000
+          export GIT_CONFIG_GLOBAL="$fixture/gitconfig"
+          probe="$PWD/issues/3/install.ss"
+          cd "$fixture/consumer"
+          gxi "$probe"
+          index="$GERBIL_PATH/pkg/TAGS"
+          test "$(grep -aFc $'\177ScopeContract\001' "$index")" = 1000
+          test "$(grep -aFc $'\177Scope.\001' "$index")" = 1000
+          echo "ISSUE-3 TAGS complete: 1000 owners"
