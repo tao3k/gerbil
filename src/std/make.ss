@@ -309,6 +309,76 @@ TODO:
     ;; Validate every product before admitting any final native compilation.
     (execute-compilation-output output (> (settings-parallelize settings) 1))))
 
+;; Source declarations supply scheduling hints, never dependency authority.
+;; Actual expanded imports and the original completion waits remain unchanged.
+(def (dependency-build-order specs module-id source-path)
+  (def consumers (make-hash-table-eq))
+  (def positions (make-hash-table-eq))
+  (def source-ids (make-hash-table))
+  (for-each (lambda (spec position)
+              (let ((id (module-id spec)) (path (source-path spec)))
+                (hash-put! consumers id 0)
+                (hash-put! positions id position)
+                (when (member (path-extension path) '(".ss" ".ssi"))
+                  (hash-put! source-ids
+                             (path-normalize (core-resolve-module-path path))
+                             id))))
+            specs (iota (length specs)))
+  (def (source-hints path)
+    (def seen (make-hash-table-eq))
+    (def (hint! datum)
+      (cond
+       ((symbol? datum)
+        (let (text (symbol->string datum))
+          (when (and (> (string-length text) 1)
+                     (eqv? (string-ref text 0) #\:))
+            (hash-put! seen (module-strip-nesting
+                            (string->symbol (substring text 1 (string-length text)))) #t))))
+       ((string? datum)
+        (alet (resolved
+               (with-catch false
+                 (lambda () (core-resolve-module-path datum path))))
+          (alet (id (hash-get source-ids (path-normalize resolved)))
+            (hash-put! seen id #t))))
+       ((pair? datum) (for-each hint! datum))))
+    ;; Inspect only declaration heads; do not copy unrelated function bodies.
+    (def (form! syntax)
+      (when (stx-pair? syntax)
+        (case (stx-e (stx-car syntax))
+          ((import) (for-each hint! (syntax->datum (stx-cdr syntax))))
+          ((begin) (for-each form! (syntax->list (stx-cdr syntax))))
+          ((module)
+           (for-each form! (syntax->list (stx-cdr (stx-cdr syntax)))))
+          ((cond-expand)
+           (for-each
+             (lambda (branch)
+               (when (stx-pair? branch)
+                 (for-each form! (syntax->list (stx-cdr branch)))))
+             (syntax->list (stx-cdr syntax)))))))
+    (when (and (member (path-extension path) '(".ss" ".ssi"))
+               (hash-key? source-ids
+                          (path-normalize (core-resolve-module-path path))))
+      (alet (body (core-read-module-declaration path))
+        (for-each form! (syntax->list body))))
+    (hash-keys seen))
+  (for-each
+    (lambda (spec)
+      (let (self (module-id spec))
+        (for-each
+          (lambda (dependency)
+            (when (and (not (eq? dependency self)) (hash-key? consumers dependency))
+              (hash-update! consumers dependency 1+ 0)))
+          (source-hints (source-path spec)))))
+    specs)
+  (list-sort
+    (lambda (left right)
+      (let* ((left-id (module-id left)) (right-id (module-id right))
+             (a (hash-ref consumers left-id)) (b (hash-ref consumers right-id)))
+        (if (= a b)
+          (< (hash-ref positions left-id) (hash-ref positions right-id))
+          (> a b))))
+    specs))
+
 (def (make-build buildspec-in settings)
   (parameterize ((current-compilation-target (settings-target settings)))
     (def buildspec (normalize-buildspec buildspec-in))
@@ -340,13 +410,19 @@ TODO:
     ;; import with mutex
     (def (import/mx mod)
       (with-lock import-mx (cut import-module mod #f #f)))
+    (def source-identities (make-hash-table))
     ;; spec module id
     (def (module-id spec)
       (let* ((file (spec-file spec settings))
              (ext (path-extension file)))
         (case ext
           ((".ss" ".ssi")
-           (expander-context-id (import/mx file)))
+           (with-lock import-mx
+             (lambda ()
+               (or (hash-get source-identities file)
+                   (let (id (core-read-module-id file))
+                     (hash-put! source-identities file id)
+                     id)))))
           (else
            (string->symbol file)))))
 
@@ -397,32 +473,29 @@ TODO:
 
     ;; the build worker itself
     (def (build-worker)
-      (try
-       (for (spec workch)
-         (build spec settings static-runtime-objects?)
-         (completion-post! (hash-ref completions (module-id spec)) 'done))
-       (catch (e)
-         (barrier-error! build-barrier e)
-         (raise e))))
+      (with-barrier-error build-barrier
+        (for (spec workch)
+          (build spec settings static-runtime-objects?)
+          (completion-post! (hash-ref completions (module-id spec)) 'done))))
 
     ;; the build coordinator
     (def (build-coordinator spec)
-      (let* ((file (spec-file spec settings))
-             (mod (import/mx file)))
-        ;; A custom language is executable compilation support. A fresh child
-        ;; must not evaluate its reader while that prelude is still building.
-        (alet (prelude (core-context-prelude mod))
-          (consider prelude (expander-context-id mod)))
-        (for (in (module-context-import mod))
-          (consider in (expander-context-id mod)))
-        (if (or (build? spec)
-                (build-dependent? spec mod))
-          ;; it needs to be built, put it to the work channel
-          (channel-put workch spec)
-          ;; no need to build, unblock dependents
-          (completion-post! (hash-ref completions (module-id spec)) 'done))
-        ;; clear the barrrier
-        (barrier-post! build-barrier)))
+      (with-barrier-error build-barrier
+        (let* ((file (spec-file spec settings))
+               (mod (import/mx file))
+               (id (expander-context-id mod)))
+          (when (hash-key? source-identities file)
+            (unless (eq? (module-id spec) id)
+              (error "module identity changed between native read and expansion" file)))
+          ;; A fresh child must wait for its custom language before use.
+          (alet (prelude (core-context-prelude mod))
+            (consider prelude id))
+          (for (in (module-context-import mod))
+            (consider in id))
+          (if (or (build? spec) (build-dependent? spec mod))
+            (channel-put workch spec)
+            (completion-post! (hash-ref completions (module-id spec)) 'done))
+          (barrier-post! build-barrier))))
 
     (def (consider in self)
       (cond
@@ -453,19 +526,16 @@ TODO:
       (let (id (module-id spec))
         (hash-put! completions id (make-completion `(build ,id)))))
 
-    ;; spawn a thread for each spec that waits for the dependency completions
-    ;; and pushes to the work channel if necessary.
-    (for (spec buildspec)
-      (spawn/name `(build ,(spec-file spec settings)) build-coordinator spec))
-
-    ;; spawn the workers and wait
-    (let (workers (map (lambda (i) (spawn/name `(worker ,i) build-worker))
-                       (iota build-worker-count)))
-      ;; wait for the coordinators to complete
+    ;; Discover priorities before starting workers or coordinator threads.
+    (let* ((ordered-specs
+            (dependency-build-order buildspec module-id (cut spec-file <> settings)))
+           (workers
+            (map (lambda (i) (spawn/name `(worker ,i) build-worker))
+                 (iota build-worker-count))))
+      (for (spec ordered-specs)
+        (spawn/name `(build ,(spec-file spec settings)) build-coordinator spec))
       (barrier-wait! build-barrier)
-      ;; close the channel (no more work)
       (channel-close workch)
-      ;; and wait for the workers to complete
       (for-each thread-join! workers))))
 
 ;; Dependencies may have been rebuilt since an earlier freshness check, including
