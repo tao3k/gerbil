@@ -252,6 +252,20 @@
         (check (BufferedWriter-write-varint bwr -314159) => 3)
         (check (get-memory-output-u8vector bwr) => u8v)))
 
+    (test-case "integer output refreshes a grown memory buffer"
+      (let (bwr (open-buffered-writer #f 16))
+        (for (i (in-range 15))
+          (BufferedWriter-write-u8 bwr 0))
+        (check (BufferedWriter-write-u16 bwr #x0102) => 2)
+        (check (get-memory-output-u8vector bwr)
+               => (u8vector 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2)))
+      (let (bwr (open-buffered-writer #f 16))
+        (for (i (in-range 16))
+          (BufferedWriter-write-u8 bwr 0))
+        (check (BufferedWriter-write-varuint bwr 300) => 2)
+        (check (get-memory-output-u8vector bwr)
+               => (u8vector 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 #xac #x02))))
+
     (test-case "char output"
       (let* ((input "the quick brown fox jumped over the lazy dog")
              (bwr (open-buffered-writer #f)))

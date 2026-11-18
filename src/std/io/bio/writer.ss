@@ -29,14 +29,15 @@
    (syntax-error "unsupported target")))
 
 
+;; A memory output drain can replace bio.buf. Reload it on every retry.
 (def (bio-write-uint (bio : basic-output-buffer) (uint : :integer) (len : :fixnum))
   => :fixnum
-  (let* ((buf bio.buf)
-         (buflen (u8vector-length buf)))
-    (let again ()
-      => :fixnum
-      (let* ((whi bio.whi)
-             (whi+len (fx+ whi len)))
+  (let again ()
+    => :fixnum
+    (let* ((buf bio.buf)
+           (buflen (u8vector-length buf))
+           (whi bio.whi)
+           (whi+len (fx+ whi len)))
         (cond
          ((fx< whi+len buflen)
           (let loop ((whi whi :- :fixnum)
@@ -51,7 +52,7 @@
                 len))))
          (else
           (__bio-output-buffer-drain! bio buf whi)
-          (again)))))))
+          (again))))))
 
 (def (bio-write-uint-generic (writer : BufferedWriter) (uint : :integer) (len : :fixnum))
   => :fixnum
@@ -112,10 +113,10 @@
 
 (def (bio-write-varuint (bio : basic-output-buffer) (uint : :integer) (max-bits : :fixnum))
   => :fixnum
-  (let* ((buf bio.buf)
-         (buflen (u8vector-length buf)))
-    (let loop ((whi bio.whi :- :fixnum) (uint uint :- :integer) (wrote 0 :- :fixnum))
-      => :fixnum
+  (let loop ((whi bio.whi :- :fixnum) (uint uint :- :integer) (wrote 0 :- :fixnum))
+    => :fixnum
+    (let* ((buf bio.buf)
+           (buflen (u8vector-length buf)))
       (cond
        ((fx< whi buflen)
         (if (> uint #x7f)
