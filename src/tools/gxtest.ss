@@ -19,6 +19,8 @@
     program: "gxtest"
     help: "run Gerbil tests"
     global-env-flag
+    (flag 'quiet "-q" "--quiet"
+          help: "run tests at quiet verbosity")
     (option 'verbosity "-v" "--verbosity"
             value: string->number
             default: 3
@@ -37,11 +39,9 @@
   (setup-local-env! opt)
   (gerbil-load-expander!)
   (let-hash opt
-    (cond
-     ((null? .args)
-      (run-tests ["."] .run .features .verbosity))
-     (else
-      (run-tests .args .run .features .verbosity)))))
+    (let ((args (if (null? .args) ["."] .args))
+          (verbosity (if (hash-get opt 'quiet) VERBOSITY-QUIET .verbosity)))
+      (exit (run-tests args .run .features verbosity)))))
 
 (def (run-tests args filter features verbosity)
   (def import-errors [])
