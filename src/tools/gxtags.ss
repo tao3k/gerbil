@@ -141,6 +141,7 @@
     (make-tags sources tagfile append? format)
     (let* ((workers (min jobs (length sources)))
            (width (quotient (+ (length sources) workers -1) workers))
+           (worker (path-expand "bin/gxtags" (gerbil-home)))
            (root (make-temporary-file-name "gxtags-workers-")))
       (create-directory root)
       (unwind-protect
@@ -165,7 +166,7 @@
                         (lambda (failure) (cons #f failure))
                         (lambda ()
                           (run-process/batch
-                            ["gxtags" "--global-env" "--jobs" "1" "--source-list" (car part)
+                            [worker "--global-env" "--jobs" "1" "--source-list" (car part)
                              "-o" (cdr part) "-t" (symbol->string format)])
                           (cons #t #f)))))))
               parts))
