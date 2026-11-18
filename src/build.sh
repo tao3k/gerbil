@@ -297,6 +297,9 @@ build_tools () {
   feedback_low "Building gerbil tools"
   (cd tools && gxi ./build.ss) || die
   if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" = yes ]; then
+    if [ "$(uname -s)" = Darwin ]; then
+      GERBIL_HOME="${GERBIL_BUILD_PREFIX}" gxi ./build/build-bach.ss || die
+    fi
     (cd tools && gxi ./build-aot.ss) || die
   fi
   for tool in tools/gx*.ss; do
