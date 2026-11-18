@@ -8,6 +8,7 @@
 (import
   (only-in :gerbil/core/expander syntax->datum core-expand1)
   (only-in :std/test test-suite test-case check check-exception)
+  (only-in :std/source this-source-file)
   (only-in :std/values first-value))
 
 ;;;;;;;;;;;;;;;; BEGIN quasiquote implementation
@@ -102,7 +103,7 @@
 
 (def quasiquote-test
   (test-suite "test gerbil quasiquote"
-    (gx#current-expander-context (gx#import-module "gerbil/test/quasiquote-test.ss" #f #t))
+    (gx#current-expander-context (gx#import-module (this-source-file) #f #t))
     (test-case "foo"
       (check (eval '(list 1 2 3)) => '(1 2 3))
       (when using-qq?
