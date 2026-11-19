@@ -11,6 +11,29 @@
         :std/interface)
 (export #t)
 
+;; The config file stores data. The standard logging callbacks are installed
+;; when constructing the running server.
+(defclass HttpdLogConfig
+  ((name    : :string)
+   (level   : :fixnum)
+   (dir     : :string)
+   (file    : :string)
+   (size    : :integer)
+   (backlog : :integer)
+   (flush   : :flonum))
+  final: #t)
+
+(defobject-untaint HttpdLogConfig)
+
+(def (httpd-log-options (cfg : HttpdLogConfig))
+  (LogRotateOpt name: cfg.name
+                level: cfg.level
+                dir: cfg.dir
+                file: cfg.file
+                size: cfg.size
+                backlog: cfg.backlog
+                flush: cfg.flush))
+
 (defclass Config
   (;; path to server root
    (root : :string)
@@ -25,7 +48,7 @@
    ;; understood by new-server
    (listen : :list)
    ;; the log options
-   (log : LogRotateOpt)
+   (log : HttpdLogConfig)
    ;; cache control
    (cache-ttl : :real)
    (cache-max-size : :fixnum)
@@ -121,10 +144,11 @@
 ;;     cfg))
 
 (def (save-config! cfg path)
+  (create-directory* (path-directory path))
   (call-with-file-writer path
     (lambda (writer)
       (using (buffered (open-buffered-writer writer) : BufferedWriter)
-        (write-object writer cfg)
+        (write-object buffered cfg)
         (buffered.flush)))))
 
 (def (write-config cfg)
@@ -141,7 +165,9 @@
   cfg)
 
 (def (load-httpd-config path)
-  (: (call-with-file-reader path read-object)
+  (: (call-with-file-reader path
+       (lambda (reader)
+         (read-object (open-buffered-reader reader))))
      Config))
 
 (def (load-default-server-config)
@@ -175,14 +201,18 @@
   (path-expand "httpd/log" (gerbil-path)))
 
 (def (default-httpd-config)
-  (Config root: (default-httpd-root)
-          handlers: []
-          enable-servlets: #t
-          listen: (default-httpd-listen)
-          log: (LogRotateOpt
-                name: "/net/httpd"
-                level: INFO
-                file: "request.log"
-                dir: (default-httpd-log-dir))
-          cache-ttl: 120.0
-          cache-max-size: 16384))
+  (using (defaults (LogRotateOpt) : LogRotateOpt)
+    (Config root: (default-httpd-root)
+            handlers: []
+            enable-servlets: #t
+            listen: (default-httpd-listen)
+            log: (HttpdLogConfig
+                  name: "/net/httpd"
+                  level: INFO
+                  file: "request.log"
+                  dir: (default-httpd-log-dir)
+                  size: defaults.size
+                  backlog: defaults.backlog
+                  flush: defaults.flush)
+            cache-ttl: 120.0
+            cache-max-size: 16384)))
