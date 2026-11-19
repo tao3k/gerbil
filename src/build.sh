@@ -269,6 +269,18 @@ build_stdlib () {
   (
     cd std
     if [ "${GERBIL_BUILD_TARGET:-C}" = C ]; then
+      if [ "$(uname -s)" = Linux ]; then
+        gambuild="$GERBIL_BUILD_PREFIX/bin/gambuild-C"
+        # GCC otherwise retains the expansion history of Gambit's C macros.
+        # Probe the compiler selected by Gambit, preserving its configured flags.
+        if native_cc="$("$gambuild" C_COMPILER)" &&
+           [ -n "$native_cc" ] &&
+           (set -f; $native_cc -ftrack-macro-expansion=0 -x c -fsyntax-only /dev/null) >/dev/null 2>&1 &&
+           native_flags="$("$gambuild" CORCXXFLAGS_GAMBUILD)"; then
+          CORCXXFLAGS_GAMBUILD="-ftrack-macro-expansion=0 $native_flags"
+          export CORCXXFLAGS_GAMBUILD
+        fi
+      fi
       # Start GSC and the C compiler only after the expansion process exits.
       plan_dir="$(mktemp -d "${TMPDIR:-/tmp}/gerbil-stdlib.XXXXXXXX")" || exit 1
       trap 'rm -rf -- "$plan_dir"' EXIT
