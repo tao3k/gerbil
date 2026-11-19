@@ -312,8 +312,6 @@ will and supports serveral commands:
   Gerbil runtime, prelude, expander and compiler, together with the
   entiry of stdlib.
 - `lang` builds the bundled alternative language preludes.
-- `r7rs-large` builds the R7RS large libraries included in Gerbil.
-- `srfi` builds the top level srfi package shims.
 - `tools` builds the gerbil tools.
 - `tags` builds a TAGS file for the Gerbil sources so that you can
   easily navigate code in emacs.
