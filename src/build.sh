@@ -266,7 +266,18 @@ debug_stage1_bach() {
 ## commands
 build_stdlib () {
   feedback_low "Building stdlib"
-  (cd std && gxi ./build.ss) || die
+  (
+    cd std
+    if [ "${GERBIL_BUILD_TARGET:-C}" = C ]; then
+      # Start GSC and the C compiler only after the expansion process exits.
+      plan_dir="$(mktemp -d "${TMPDIR:-/tmp}/gerbil-stdlib.XXXXXXXX")" || exit 1
+      trap 'rm -rf -- "$plan_dir"' EXIT
+      gxi ./build.ss --emit-native "$plan_dir/output" &&
+        gxi ./build.ss --compile-native "$plan_dir/output"
+    else
+      gxi ./build.ss
+    fi
+  ) || die
 }
 
 debug_stdlib () {
