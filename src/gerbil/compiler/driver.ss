@@ -274,23 +274,11 @@ namespace: gxc
 
 (def (compile-executable-module ctx opts)
   (if (pgetq full-program-optimization: opts)
-    (begin
-      (when (pgetq linked-support: opts)
-        (raise-compile-error "Linked support requires separate compilation" ctx))
-      (compile-executable-module/full-program-optimization ctx opts))
+    (compile-executable-module/full-program-optimization ctx opts)
     (compile-executable-module/separate ctx opts)))
 
 (def (compile-executable-module/separate ctx opts)
-  ;; The native builder owns the prepared initializer and verified C/objects.
-  (def linked-support (pgetq linked-support: opts))
-  (def linked-c (if linked-support (cdr linked-support) []))
-  (def linked-arguments
-    (if linked-support ["-nopreload" linked-c ... "-preload"] []))
-
   (def (generate-stub builtin-modules)
-    (when linked-support
-      (write (list (quote include) (car linked-support)))
-      (newline))
     (let (mod-main (find-runtime-symbol ctx 'main))
       (write `(define builtin-modules (quote ,builtin-modules)))
       (write `(define (gerbil-main)
@@ -442,12 +430,11 @@ namespace: gxc
             ;; GSC closes every generated C input before object admission.
             (invoke (gerbil-gsc)
                     ["-link" gsc-link-opts ... libgerbil-c ...
-                     src-deps-scm ... src-bin-scm linked-arguments ... output-scm]))
+                     src-deps-scm ... src-bin-scm output-scm]))
           (def (link-executable (objects [src-deps-o ... src-bin-o]))
             (invoke (gerbil-gcc)
                     ["-w" "-o" output-bin
                      objects ... output-o output_-o libgerbil-o ...
-                     (map replace-extension-with-object linked-c) ...
                      output-ld-opts ...
                      (if (gerbil-enable-shared?) [rpath] []) ...
                      "-L" gerbil-libdir "-lgambit" libgerbil-ld-opts ...])
@@ -497,7 +484,7 @@ namespace: gxc
                           ;; C operands are read-only GSC metadata inputs.
                           (invoke (gerbil-gsc)
                            ["-link" gsc-link-opts ... libgerbil-c ...
-                            (map car entries) ... linked-arguments ... output-scm]))
+                            (map car entries) ... output-scm]))
                         `(prepare-executable-link ,output-bin)
                         (map caddr entries)))
                       (stub-objects
