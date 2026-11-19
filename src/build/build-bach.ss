@@ -162,7 +162,7 @@
           ["-e" include-gambit-sharp]))
        (support (and work
                      (begin
-                       (eval '(import :std/build-script))
+                       (eval '(import :std/build-script :std/encoding/json))
                        (prepare-linked-support work build-home (gerbil-gsc) gsc-gx-macros))))
        (linked-c (if support (cdr support) []))
        (linked-loader (and support (car support)))
