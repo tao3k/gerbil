@@ -33,10 +33,6 @@ jobs:
         run: |
           export GERBIL_BUILD_CORES="$(nproc)"
           if [[ "$STDLIB_DIAGNOSTICS" == true ]]; then
-            # Four master workers left little memory headroom on the hosted runner.
-            if (( GERBIL_BUILD_CORES > 2 )); then
-              GERBIL_BUILD_CORES=2
-            fi
             bash .github/scripts/stdlib-diagnostics.sh
           else
             ./build.sh stdlib

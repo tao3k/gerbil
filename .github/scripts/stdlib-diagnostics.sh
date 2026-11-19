@@ -33,12 +33,39 @@ process_sample() {
         count++
         total += rss[pid]
         sub(/^.*\//, "", name[pid])
-        if (name[pid] ~ /^(gerbil|gxi|gxc)$/) frontend++
-        if (name[pid] == "gsc") gsc++
-        if (name[pid] ~ /^(cc1|cc1plus|clang|as)$/) native++
+        group=""
+        if (name[pid] ~ /^(gerbil|gxi|gxc)$/) { frontend++; group="frontend" }
+        if (name[pid] == "gsc") { gsc++; group="gsc" }
+        if (name[pid] ~ /^(cc1|cc1plus|clang|as)$/) { native++; group="native" }
+        if (group != "" && (group != "frontend" || !(group in largest) || rss[pid] > rss[largest[group]])) {
+          if (group == "frontend") largest[group]=pid
+          else compiler[pid]=group
+        }
       }
       printf "%d %d %d %d %d\n", count, total, frontend, gsc, native
+      if ("frontend" in largest) compiler[largest["frontend"]]="frontend"
+      for (pid in compiler)
+        printf "%s %s %s %s %s\n", compiler[pid], pid, parent[pid], name[pid], rss[pid]
     }'
+}
+
+# Include source/object operands only. Avoid copying complete process arguments.
+compiler_details() {
+  local rows="$1" group pid parent name rss arg input
+  while read -r group pid parent name rss; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    input=''
+    if [[ -r "/proc/$pid/cmdline" ]]; then
+      while IFS= read -r -d '' arg; do
+        case "$arg" in
+          -*) ;;
+          *.scm|*.c|*.o|*.o[0-9]*) input="${input:+$input,}${arg#"$PWD"/}" ;;
+        esac
+      done < "/proc/$pid/cmdline" 2>/dev/null || true
+    fi
+    printf '[stdlib diagnostics] compiler=%s pid=%s ppid=%s program=%s rss_KiB=%s inputs=%s\n' \
+      "$group" "$pid" "$parent" "$name" "$rss" "${input:-unobserved}"
+  done <<< "$rows"
 }
 
 peak_rss=0
@@ -78,6 +105,9 @@ sample() {
   printf '[stdlib diagnostics] elapsed_s=%s processes=%s frontend=%s gsc=%s native=%s tree_rss_KiB=%s sampled_tree_peak_KiB=%s peak_frontend=%s peak_gsc=%s peak_native=%s%s%s\n' \
     "$SECONDS" "$processes" "$frontend" "$gsc" "$native" "$rss" "$peak_rss" \
     "$peak_frontend" "$peak_gsc" "$peak_native" "$host" "$mem"
+  if [[ "$counts" == *$'\n'* ]]; then
+    compiler_details "${counts#*$'\n'}"
+  fi
   local last
   last="$(grep -F '... execute compile job ' "$log" | tail -n 1 || true)"
   printf '[stdlib diagnostics] last_dispatched=%s\n' "${last:-unobserved}"
