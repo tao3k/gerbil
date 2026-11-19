@@ -959,10 +959,9 @@ namespace: gxc
           (extended-bindings)
           ,@(if phi? '((inlining-limit 200)) '())))
       ;; Keep small compilation-support units in their configured host mode.
-      ;; Gambit's existing header selects procedure hosts only above this
-      ;; finite limit. This is metadata, not an extra Scheme runtime action.
+      ;; Larger units use Gambit's procedure hosts to avoid one huge C function.
       (cond-expand
-        (darwin
+        ((or darwin linux)
          (when (and phi? (eq? (current-compilation-target) 'C))
            (pretty-print '(##meta-info cc-options "-D___SINGLE_HOST_LIMIT=8192"))))
         (else (void)))
