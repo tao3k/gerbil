@@ -310,10 +310,19 @@ build_tools () {
   feedback_low "Building gerbil tools"
   (cd tools && gxi ./build.ss) || die
   if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" = yes ]; then
-    if [ "$(uname -s)" = Darwin ]; then
-      GERBIL_HOME="${GERBIL_BUILD_PREFIX}" gxi ./build/build-bach.ss || die
-    fi
-    (cd tools && gxi ./build-aot.ss) || die
+    (
+      unset GERBIL_LINKED_C_WORK
+      if [ "$(uname -s)" = Darwin ]; then
+        if [ -z "${GERBIL_BUILD_OPTIMIZED+x}" ]; then
+          GERBIL_LINKED_C_WORK=$(mktemp -d "${GERBIL_BUILD_PREFIX}/bin/.linked-c.XXXXXX") || exit 1
+          export GERBIL_LINKED_C_WORK
+          trap 'rm -rf -- "$GERBIL_LINKED_C_WORK"' 0
+          trap 'exit 1' HUP INT TERM
+        fi
+        GERBIL_HOME="${GERBIL_BUILD_PREFIX}" gxi ./build/build-bach.ss || exit 1
+      fi
+      cd tools && gxi ./build-aot.ss
+    ) || die
   fi
   for tool in tools/gx*.ss; do
       # Test modules are run by gxtest, not installed as commands.

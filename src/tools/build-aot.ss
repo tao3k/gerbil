@@ -2,8 +2,10 @@
 ;; -*- Gerbil -*-
 ;; Build the tools with the Gerbil runtime intact. They load modules and
 ;; source at run time, including bindings outside their static closure.
-(import :std/build-config
+(import :gerbil/compiler
+        :std/build-config
         :std/make)
+(include "../build/linked-support.ss")
 
 (def aot-tools
   '("gxpkg" "gxtags" "gxtest"))
@@ -23,10 +25,24 @@
     (ldflags "libcrypto" "-lcrypto")
     (if config-enable-zlib (ldflags "zlib" "-lz") "")))
 
-(def (aot-tool tool)
-  (list exe: tool
-        "-cc-options" aot-cc-options
-        "-ld-options" aot-ld-options))
+(def (prepared-tool-support staging build-prefix)
+  (cond-expand
+   (darwin
+    (let (producer (getenv "GERBIL_LINKED_C_WORK" #f))
+      (and producer
+           (select-linked-support
+            staging build-prefix
+            (getenv "GERBIL_GSC" (path-expand "bin/gsc" build-prefix))
+            (include-gambit-sharp)
+            ["-cc-options" "-g"]
+            producer))))
+   (else #f)))
+
+(def (aot-tool tool support)
+  [exe: tool
+   (if support [linked-support: support] []) ...
+   "-cc-options" aot-cc-options
+   "-ld-options" aot-ld-options])
 
 (def (main . _)
   (let* ((srcdir (current-directory))
@@ -41,7 +57,10 @@
                [path: (path-expand ".aot-tool" bindir) permissions: #o700]))
           (unwind-protect
             (begin
-              (make (list (aot-tool tool))
+              (make (list (aot-tool tool
+                                   (and (equal? tool "gxtest")
+                                        (not (getenv "GERBIL_BUILD_OPTIMIZED" #f))
+                                        (prepared-tool-support staging build-prefix))))
                 srcdir: srcdir
                 libdir: libdir
                 bindir: staging
