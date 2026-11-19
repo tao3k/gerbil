@@ -28,7 +28,15 @@ jobs:
       - name: Build Gerbil stage1
         run: GERBIL_BUILD_CORES=$(nproc) ./build.sh stage1
       - name: Build Gerbil stdlib
-        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh stdlib
+        env:
+          STDLIB_DIAGNOSTICS: ${{ matrix.gambit-version == '--with-gambit=master' }}
+        run: |
+          export GERBIL_BUILD_CORES="$(nproc)"
+          if [[ "$STDLIB_DIAGNOSTICS" == true ]]; then
+            bash .github/scripts/stdlib-diagnostics.sh
+          else
+            ./build.sh stdlib
+          fi
       - name: Build Gerbil libgerbil
         run: GERBIL_BUILD_CORES=$(nproc) ./build.sh libgerbil
       - name: Build Gerbil lang
