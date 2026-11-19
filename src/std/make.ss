@@ -808,6 +808,7 @@ TODO:
   (def srcpath (source-path mod ".ss" settings))
   (def binpath (binary-path mod opts settings))
   (def gsc-opts (compile-exe-gsc-opts opts))
+  (def linked-support (pgetq linked-support: opts))
   (def gxc-opts
     [invoke-gsc: #t
      output-file: binpath
@@ -815,6 +816,7 @@ TODO:
      debug: (settings-debug settings)
      full-program-optimization: (settings-full-program-optimization settings)
      parallel: (> (settings-parallelize settings) 1)
+     (when/list linked-support [linked-support: linked-support]) ...
      (when/list gsc-opts [gsc-options: gsc-opts]) ...])
   (gxc-compile mod gsc-opts settings #f)
   (message "... compile exe " mod " -> " binpath)
