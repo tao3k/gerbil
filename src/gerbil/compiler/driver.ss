@@ -280,6 +280,11 @@ namespace: gxc
       (compile-executable-module/full-program-optimization ctx opts))
     (compile-executable-module/separate ctx opts)))
 
+(def (executable-builtin-modules ctx (deps (find-runtime-module-deps ctx)))
+  (append gerbil-runtime-modules
+          (map (lambda (mod) (symbol->string (expander-context-id mod)))
+               (cons ctx deps))))
+
 (def (compile-executable-module/separate ctx opts)
   ;; The native builder owns the prepared initializer and verified C/objects.
   (def linked-support (pgetq linked-support: opts))
@@ -396,10 +401,7 @@ namespace: gxc
            (libgerbil-ld-opts (get-libgerbil-ld-opts gerbil-libdir))
            (rpath (gerbil-rpath gerbil-libdir))
            (builtin-modules
-            (remove-duplicates
-             (append gerbil-runtime-modules
-                     (map (lambda (mod) (symbol->string (expander-context-id mod)))
-                          (cons ctx deps))))))
+            (remove-duplicates (executable-builtin-modules ctx deps))))
 
       (def (compile-obj scm-path c-path)
         (let (o-path (replace-extension c-path compiler-obj-suffix))

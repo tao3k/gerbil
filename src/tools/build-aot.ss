@@ -3,6 +3,7 @@
 ;; Build the tools with the Gerbil runtime intact. They load modules and
 ;; source at run time, including bindings outside their static closure.
 (import :gerbil/compiler
+        :gerbil/expander
         :std/build-config
         :std/make)
 (include "../build/linked-support.ss")
@@ -25,13 +26,21 @@
     (ldflags "libcrypto" "-lcrypto")
     (if config-enable-zlib (ldflags "zlib" "-lz") "")))
 
-(def (supplemental-linked-support staging home shared roots)
+(def (supplemental-linked-support staging home tool shared roots)
   (let ((toolchain-lib (linked-support-root home))
         (package-lib (linked-support-root (gerbil-path)))
         (seen (make-table test: equal?))
+        (builtin (make-table test: equal?))
         (collector (path-expand "build/collect-linked-phases.ss" (getenv "GERBIL_SOURCE")))
         (gxi (path-expand "bin/gxi" home))
         (output (path-expand "linked-phases" staging)))
+    ;; Runtime initialization marks both names as builtin before the loader
+    ;; can select a provider. The gxi used for discovery may load them anyway.
+    (for-each
+     (lambda (mod)
+       (table-set! builtin mod #t)
+       (table-set! builtin (string-append mod "~0") #t))
+     (gxc#executable-builtin-modules (import-module (string-append tool ".ss"))))
     (for-each (lambda (input) (table-set! seen (path-expand (car input) toolchain-lib) #t))
               shared)
     (for-each
@@ -52,7 +61,9 @@
           ((not (eq? (table-ref seen path) 'supplemental))
            (loop rest stdlib packages))
           ((string-prefix? toolchain-lib path)
-           (let (input (linked-support-input toolchain-lib (path-expand "toolchain" staging) path))
+           (let* ((relative (substring path (string-length toolchain-lib) (string-length path)))
+                  (input (and (not (table-ref builtin (path-strip-extension relative) #f))
+                              (linked-support-input toolchain-lib (path-expand "toolchain" staging) path))))
              (loop rest (if input (cons input stdlib) stdlib) packages)))
           (else
            (let (input (linked-support-input package-lib (path-expand "package" staging)
@@ -104,7 +115,7 @@
     (unless (equal? sources (linked-support-source-digests inputs))
       (error "Lowered gxtest phase changed during build"))))
 
-(def (prepared-tool-support staging build-prefix roots)
+(def (prepared-tool-support staging build-prefix tool roots)
   (cond-expand
    (darwin
     (let* ((producer (getenv "GERBIL_LINKED_C_WORK" #f))
@@ -116,7 +127,7 @@
                        [])))
       (let-values (((stdlib packages)
                     (if (pair? roots)
-                      (supplemental-linked-support staging build-prefix shared roots)
+                      (supplemental-linked-support staging build-prefix tool shared roots)
                       (values [] []))))
         (let-values (((reused remaining)
                       (reuse-package-support staging build-prefix gsc packages)))
@@ -161,7 +172,7 @@
               (make (list (aot-tool tool
                                    (and (equal? tool "gxtest")
                                         (not (getenv "GERBIL_BUILD_OPTIMIZED" #f))
-                                        (prepared-tool-support staging build-prefix roots))))
+                                        (prepared-tool-support staging build-prefix tool roots))))
                 srcdir: srcdir
                 libdir: libdir
                 bindir: staging
