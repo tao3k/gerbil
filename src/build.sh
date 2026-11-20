@@ -284,7 +284,8 @@ build_stdlib () {
       # Start GSC and the C compiler only after the expansion process exits.
       plan_dir="$(mktemp -d "${TMPDIR:-/tmp}/gerbil-stdlib.XXXXXXXX")" || exit 1
       trap 'rm -rf -- "$plan_dir"' EXIT
-      gxi ./build.ss --emit-native "$plan_dir/output" &&
+      # Give the isolated frontend less spare heap between collections.
+      gxi -:live-ratio=60 ./build.ss --emit-native "$plan_dir/output" &&
         gxi ./build.ss --compile-native "$plan_dir/output"
     else
       gxi ./build.ss
