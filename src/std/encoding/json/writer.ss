@@ -2,7 +2,7 @@
 ;;; © vyzo
 ;;; json writer
 (import :std/error
-        :std/io
+        :std/io/interface
         :std/serde/serialize
         :std/format
         :std/format/ioutil

@@ -1,7 +1,7 @@
 ;;; -*- Gerbil -*-
 ;;; © vyzo
 ;;; json io interface
-(import :std/io
+(import :std/io/interface
         :std/io/bio/api
         ./env
         ./writer
