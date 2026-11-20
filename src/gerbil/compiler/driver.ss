@@ -1136,23 +1136,10 @@ namespace: gxc
           (display (number->string (char->integer character) 16) output)
           (display #\_ output)))) name))))
 
-(def (gsc-compile-runtime-product path static-path)
-  (let* ((runtime-c (replace-extension-with-c path))
-         (static-c (replace-extension-with-c static-path))
-         (static-o (replace-extension-with-object static-path))
-         (dynamic-o (replace-extension path ".o1"))
-         (ref (path-strip-directory (path-strip-extension static-path)))
-         (alias-option
-          (string-append "-Wl,-alias,____LNK_" (c-linker-id ref)
-                         ",____LNK_" (c-linker-id (path-strip-directory dynamic-o)))))
-    (invoke (gerbil-gsc)
-     ["-c" "-o" runtime-c "-module-ref" ref "-linker-name" ref
-      (gsc-link-options) ... path])
-    (when (file-exists? static-c) (delete-file static-c))
-    (copy-file runtime-c static-c)
-    (invoke (gerbil-gsc)
-     ["-obj" "-o" static-o (gsc-cc-options) ...
-      "-cc-options" "-D___DYNAMIC -fPIC" static-c])
+(def (link-runtime-product gsc runtime-c static-o dynamic-o ref ld-options)
+  (let (alias-option
+        (string-append "-Wl,-alias,____LNK_" (c-linker-id ref)
+                       ",____LNK_" (c-linker-id (path-strip-directory dynamic-o))))
     (invoke "env"
      [(string-append "GAMBITDIR_INCLUDE="
         (cdr (assoc "GAMBITDIR_INCLUDE" (##shell-install-dirs '("include")))))
@@ -1160,8 +1147,25 @@ namespace: gxc
       (string-append "BUILD_DYN_INPUT_FILENAMES_PARAM=" static-o)
       (string-append "BUILD_DYN_META_INFO_FILE_PARAM=" runtime-c)
       (string-append "BUILD_DYN_LD_OPTIONS_PARAM="
-        (string-join (append (gcc-ld-options) [alias-option]) "\n"))
-      (path-expand "gambuild-C" (path-directory (gerbil-gsc))) "dyn"])
+        (string-join (append ld-options [alias-option]) "\n"))
+      (path-expand "gambuild-C" (path-directory gsc)) "dyn"])))
+
+(def (gsc-compile-runtime-product path static-path)
+  (let* ((gsc (gerbil-gsc))
+         (runtime-c (replace-extension-with-c path))
+         (static-c (replace-extension-with-c static-path))
+         (static-o (replace-extension-with-object static-path))
+         (dynamic-o (replace-extension path ".o1"))
+         (ref (path-strip-directory (path-strip-extension static-path))))
+    (invoke gsc
+     ["-c" "-o" runtime-c "-module-ref" ref "-linker-name" ref
+      (gsc-link-options) ... path])
+    (when (file-exists? static-c) (delete-file static-c))
+    (copy-file runtime-c static-c)
+    (invoke gsc
+     ["-obj" "-o" static-o (gsc-cc-options) ...
+      "-cc-options" "-D___DYNAMIC -fPIC" static-c])
+    (link-runtime-product gsc runtime-c static-o dynamic-o ref (gcc-ld-options))
     (unless (andmap file-exists? [runtime-c static-c static-o dynamic-o])
       (error "Incomplete dynamic/static compiler product" path static-path))))
 

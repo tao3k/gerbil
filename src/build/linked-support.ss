@@ -119,6 +119,50 @@ END
                      (c-file (path-expand (string-append relative ".c") work)))
                 [relative ref (file-digest image) scm c-file])))))
 
+;; The package compiler can emit a relocatable runtime object and link its
+;; dynamic image from the same object. Prove that relationship before using
+;; the object in a different executable. Other package phases have no such
+;; companion and are generated from their lowered Scheme in the tools build.
+(def (reuse-linked-runtime-input work toolchain-lib package-lib gsc input)
+  (define (verify relative ref digest lowered scheme runtime-c c-file object)
+    (with-exception-catcher
+     (lambda (_) #f)
+     (lambda ()
+       (let* ((files [lowered scheme runtime-c c-file object])
+              (before (file-digests files)))
+         (match before
+           ([source static emitted companion product]
+            (and (equal? source static)
+                 (equal? emitted companion)
+                 (not (native-load-effects? object))
+                 (let* ((image (path-expand relative work))
+                        (staged-c (string-append image ".c"))
+                        (staged-object (linked-support-object staged-c)))
+                   (create-directory* (path-directory image))
+                   (gxc#link-runtime-product gsc runtime-c object image ref [])
+                   (and (equal? digest (file-digest image))
+                        (equal? before (file-digests files))
+                        (begin
+                          (copy-file c-file staged-c)
+                          (copy-file object staged-object)
+                          (and (equal? [companion product] (file-digests [staged-c staged-object]))
+                               [relative (string->symbol ref) digest lowered staged-c])))))))))))
+  (match input
+    ([relative _ digest lowered _]
+     (def suffix "~0.o1")
+     (and (string-suffix? suffix relative)
+          (let* ((module-path (substring relative 0 (- (string-length relative)
+                                                      (string-length suffix))))
+                 (ref (string-join (string-split module-path #\/) "__"))
+                 (name (string-append "static/" ref))
+                 (scheme (path-expand (string-append name ".scm") package-lib))
+                 (c-file (path-expand (string-append name ".c") package-lib))
+                 (object (linked-support-object c-file))
+                 (runtime-c (string-append (path-strip-extension lowered) ".c")))
+            (and (not (file-exists? (path-expand (string-append name ".scm") toolchain-lib)))
+                 (andmap file-exists? [scheme runtime-c c-file object])
+                 (verify relative ref digest lowered scheme runtime-c c-file object)))))))
+
 (def (write-linked-loader path inputs (package-inputs []))
   (def (registry rows)
     (map (match <> ([path ref digest _ _] [path ref digest])) rows))
