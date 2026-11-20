@@ -14,7 +14,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install dependencies
-        run: sudo apt-get -y install openssl libssl-dev sqlite3 libsqlite3-dev gdb
+        run: sudo apt-get -y install openssl libssl-dev sqlite3 libsqlite3-dev
+      - name: Install debugger and verify native core capture
+        run: |
+          sudo apt-get -y install --no-install-recommends gdb
+          cores="$(mktemp -d "$RUNNER_TEMP/gerbil-cores.XXXXXXXX")"
+          original_pattern="$(sysctl -n kernel.core_pattern)"
+          trap 'sudo sysctl -q -w "kernel.core_pattern=$original_pattern"; rm -rf -- "$cores"' EXIT
+          sudo sysctl -q -w "kernel.core_pattern=$cores/%e.%p.%s.%t"
+          ulimit -c unlimited
+          rc=0
+          bash -c 'kill -s SEGV "$$"' || rc=$?
+          test "$rc" -eq 139
+          find "$cores" -name '*.11.*' -type f -size +0c -print -quit | grep -q .
       - name: Build and fingerprint one Gambit
         run: bash .github/scripts/shared-gc-abba.sh setup
       - name: AB baseline 1f5afe2
