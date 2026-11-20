@@ -776,7 +776,7 @@
          (dirs (filter (lambda (file) (file-directory? (path-expand file root)))
                        (directory-files root))))
     (displayln "... tagging packages")
-    (run-process ["gxtags" dirs ...]
+    (run-process [(path-expand "bin/gxtags" (gerbil-home)) dirs ...]
                  directory: root)))
 
 ;; package directory search

@@ -2,6 +2,7 @@
 ;;; © vyzo
 ;;; script to build "BACH", the universal gerbil binary
 (import :gerbil/compiler)
+(include "linked-support.ss")
 
 (def build-home
   (getenv "GERBIL_BUILD_PREFIX" (gerbil-home)))
@@ -114,14 +115,20 @@
 (def bach-main
   "gerbil/main")
 
-(def (invoke program args)
-  (let* ((proc (open-process [path: program arguments: args
-                                    stdout-redirection: #f
-                                    stderr-redirection: #f]))
-         (status (process-status proc)))
-    (close-port proc)
-    (unless (zero? status)
-      (error "process exited abnormally" program status))))
+(def (link-build-support?)
+  (cond-expand
+   (darwin
+    (and (equal? (getenv "GERBIL_BUILD_AOT_TOOLS" "no") "yes")
+         (equal? (path-normalize (gerbil-home)) (path-normalize build-home))))
+   (else #f)))
+
+;; Select the compiled support reached by the standard build script. Keep the
+;; normal dynamic images for provider overrides and for other Gerbil executables.
+(def (build-support-inputs work)
+  (eval '(import :std/build-script))
+  (let (prefix (linked-support-root build-home))
+    (filter-map (lambda (entry) (linked-support-input prefix work (cdr entry)))
+                (list-sort (lambda (a b) (string<? (car a) (car b))) (list-modules)))))
 
 (def (static-file-name mod)
   (path-expand (string-append (string-join (string-split mod #\/) "__") ".scm")
@@ -136,6 +143,15 @@
 (def (replace-extension-with-object path)
   (replace-extension path compiler-obj-suffix))
 
+(def (group-build-support inputs)
+  (let* ((count (min (gxc#available-build-cores) (length inputs)))
+         (groups (make-vector count [])))
+    (let distribute ((rest inputs) (index 0))
+      (unless (null? rest)
+        (vector-set! groups index (cons (car rest) (vector-ref groups index)))
+        (distribute (cdr rest) (modulo (+ index 1) count))))
+    (map reverse (vector->list groups))))
+
 ;; first compile the module
 (displayln "... compile " bach-main)
 (compile-module (string-append bach-main ".ss")
@@ -145,7 +161,12 @@
                  invoke-gsc: #f static: #t])
 
 ;; and then compile the binary
-(let* ((builtin-modules-scm (map static-file-name builtin-modules))
+(def (link-bach work (share? #f))
+ (let* ((inputs (if work (build-support-inputs work) []))
+       (link-support? (pair? inputs))
+       (linked-c (map (lambda (input) (list-ref input 4)) inputs))
+       (linked-loader (and link-support? (path-expand "build-support.scm" work)))
+       (builtin-modules-scm (map static-file-name builtin-modules))
        (builtin-modules-c (map replace-extension-with-c builtin-modules-scm))
        (builtin-modules-o (map replace-extension-with-object builtin-modules-scm))
        (bach-main-scm (static-file-name bach-main))
@@ -160,8 +181,23 @@
           ["-e" "(define-cond-expand-feature|enable-smp|)"
            "-e" include-gambit-sharp]
           ["-e" include-gambit-sharp]))
+       (object-options
+        (let (options ["-cc-options" compiler-debug-option])
+          (cond-expand
+           (darwin (if share?
+                     (native-support-object-options (gerbil-gsc) options)
+                     options))
+           (else options))))
+       (recipe
+        (and link-support? share?
+             (equal? (path-normalize (current-directory))
+                     (path-normalize (getenv "GERBIL_SOURCE")))
+             (linked-support-recipe build-home (gerbil-gsc) gsc-gx-macros object-options)))
+       (source-digests (and recipe (linked-support-source-digests inputs)))
        (output-bin
         (path-expand "gerbil" gerbil-bindir))
+       (link-output
+        (if work (path-expand ".gerbil-new" work) output-bin))
        (gerbil-shared?
         (member "--enable-shared" (string-split (configure-command-string) #\')))
        (rpath-options
@@ -169,28 +205,50 @@
           [(string-append (cond-expand (darwin "-Wl,-rpath,") (else "-Wl,-rpath="))
 		                  gambit-libdir)]
           [])))
-  (displayln "... link " output-bin)
-  (invoke (gerbil-gsc)
-          ["-link" "-o" bach-link-c
-           "-track-scheme"
-           gsc-gx-macros ...
-           builtin-modules-scm ...
-           bach-main-scm])
-  (for-each (lambda (path-c)
-              (add-compile-job!
-               (lambda () (invoke (gerbil-gsc) ["-obj" "-cc-options" compiler-debug-option path-c]))
-               `(compile ,path-c)))
-            [builtin-modules-c ... bach-main-c bach-link-c])
+  (when link-support?
+    (displayln "... link " (length inputs) " installed build support modules")
+    (generate-linked-support-c (gerbil-gsc) work (group-build-support inputs) gsc-gx-macros)
+    (write-linked-loader linked-loader inputs))
+  (def (prepare-link)
+    (displayln "... link " output-bin)
+    (invoke (gerbil-gsc)
+            ["-link" "-o" bach-link-c
+             "-track-scheme"
+             gsc-gx-macros ...
+             builtin-modules-scm ...
+             (if link-support? ["-nopreload" linked-c ... "-preload" linked-loader] []) ...
+             bach-main-scm]))
+  (def (compile-object path-c)
+    (invoke (gerbil-gsc) ["-obj" object-options ... path-c]))
+  (def (submit-object path-c)
+    (add-compile-job! (cut compile-object path-c) `(compile ,path-c)))
+  (let (generated-c
+        [builtin-modules-c ...
+         (if link-support? [(replace-extension-with-c linked-loader)] []) ...
+         bach-main-c bach-link-c])
+    ;; Reap the link planner before any native object compilers are started.
+    (prepare-link)
+    (for-each submit-object [linked-c ... generated-c ...]))
   (execute-pending-compile-jobs!)
+  (for-each
+   (lambda (c-file)
+     (when (native-load-effects? (replace-extension-with-object c-file))
+       (error "build support object has load-time native effects" c-file)))
+   linked-c)
   (displayln "... build " output-bin)
   (invoke (gerbil-gcc)
-          [(link-output-options output-bin) ...
+          [(link-output-options link-output) ...
            rpath-options ...
            builtin-modules-o ...
+           (map replace-extension-with-object linked-c) ...
+           (if link-support? [(replace-extension-with-object linked-loader)] []) ...
            bach-main-o
            bach-link-o
            (link-with-libgambit-options) ...
            default-ld-options ...])
+  (when work (rename-file link-output output-bin #t))
+  (when recipe
+    (write-linked-support-receipt work recipe inputs source-digests))
   ;; clean up
   (delete-file bach-main-scm)
   (delete-file bach-link-c)
@@ -199,4 +257,15 @@
               (let (path (path-expand (string-append bach-main ext) gerbil-libdir))
                 (when (file-exists? path)
                   (delete-file path))))
-            '(".ssi" ".scm" "~0.scm" )))
+            '(".ssi" ".scm" "~0.scm" ))))
+
+(if (link-build-support?)
+  (let (shared (getenv "GERBIL_LINKED_C_WORK" #f))
+    (if shared
+      (link-bach shared #t)
+      (let (work (create-temporary-directory
+                  [path: (path-expand ".bach" gerbil-bindir) permissions: #o700]))
+        (unwind-protect
+          (link-bach work)
+          (delete-file-or-directory work #t)))))
+  (link-bach #f))

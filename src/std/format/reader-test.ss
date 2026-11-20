@@ -38,7 +38,11 @@
       (check (read-object-from-string "1.1" (reader-environment))
 	     => 1.1)
       (check (read-object-from-string "1.10000" (reader-environment))
-	     => 1.1))
+	     => 1.1)
+      (check (read-object-from-string "(flush .1)" (reader-environment))
+             => '(flush 0.1))
+      (check (read-object-from-string "(head . tail)" (reader-environment))
+             => '(head . tail)))
     (test-case "read ratnums"
       (check (read-object-from-string "1/3" (reader-environment))
 	     => 1/3)

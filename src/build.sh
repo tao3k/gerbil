@@ -266,7 +266,31 @@ debug_stage1_bach() {
 ## commands
 build_stdlib () {
   feedback_low "Building stdlib"
-  (cd std && gxi ./build.ss) || die
+  (
+    cd std
+    if [ "${GERBIL_BUILD_TARGET:-C}" = C ]; then
+      if [ "$(uname -s)" = Linux ]; then
+        gambuild="$GERBIL_BUILD_PREFIX/bin/gambuild-C"
+        # GCC otherwise retains the expansion history of Gambit's C macros.
+        # Probe the compiler selected by Gambit, preserving its configured flags.
+        if native_cc="$("$gambuild" C_COMPILER)" &&
+           [ -n "$native_cc" ] &&
+           (set -f; $native_cc -ftrack-macro-expansion=0 -x c -fsyntax-only /dev/null) >/dev/null 2>&1 &&
+           native_flags="$("$gambuild" CORCXXFLAGS_GAMBUILD)"; then
+          CORCXXFLAGS_GAMBUILD="-ftrack-macro-expansion=0 $native_flags"
+          export CORCXXFLAGS_GAMBUILD
+        fi
+      fi
+      # Start GSC and the C compiler only after the expansion process exits.
+      plan_dir="$(mktemp -d "${TMPDIR:-/tmp}/gerbil-stdlib.XXXXXXXX")" || exit 1
+      trap 'rm -rf -- "$plan_dir"' EXIT
+      # Give the isolated frontend less spare heap between collections.
+      gxi -:live-ratio=60 ./build.ss --emit-native "$plan_dir/output" &&
+        gxi ./build.ss --compile-native "$plan_dir/output"
+    else
+      gxi ./build.ss
+    fi
+  ) || die
 }
 
 debug_stdlib () {
@@ -283,24 +307,44 @@ build_lang () {
   (cd lang && gxi ./build.ss) || die
 }
 
-build_r7rs_large() {
-  feedback_low "Building R7RS large"
-  (cd r7rs-large && gxi ./build.ss) || die
-}
-
-build_srfi() {
-    feedback_low "Building SRFI shims"
-    (cd srfi && gxi ./build.ss) || die
-}
-
 build_tools () {
+  if [ "$#" -gt 0 ]; then
+    if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" != yes ] ||
+       [ "$(uname -s)" != Darwin ] || [ -n "${GERBIL_BUILD_OPTIMIZED+x}" ]; then
+      feedback_err "gxtest source roots require the Darwin AOT tools build with GERBIL_BUILD_OPTIMIZED unset"
+      return 1
+    fi
+  fi
   feedback_low "Building gerbil tools"
   (cd tools && gxi ./build.ss) || die
+  if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" = yes ]; then
+    (
+      unset GERBIL_LINKED_C_WORK
+      if [ "$(uname -s)" = Darwin ]; then
+        if [ -z "${GERBIL_BUILD_OPTIMIZED+x}" ]; then
+          GERBIL_LINKED_C_WORK=$(mktemp -d "${GERBIL_BUILD_PREFIX}/bin/.linked-c.XXXXXX") || exit 1
+          export GERBIL_LINKED_C_WORK
+          trap 'rm -rf -- "$GERBIL_LINKED_C_WORK"' 0
+          trap 'exit 1' HUP INT TERM
+        fi
+        GERBIL_HOME="${GERBIL_BUILD_PREFIX}" gxi ./build/build-bach.ss || exit 1
+      fi
+      cd tools && gxi ./build-aot.ss "$@"
+    ) || die
+  fi
   for tool in tools/gx*.ss; do
       # Test modules are run by gxtest, not installed as commands.
       case "${tool}" in *-test.ss) continue ;; esac
       toolname=$(basename "${tool}" .ss)
-      (cd "${GERBIL_BUILD_PREFIX}/bin" && ln -sf gerbil "${toolname}")
+      case "${GERBIL_BUILD_AOT_TOOLS:-no}:$toolname" in
+        yes:gxpkg|yes:gxtags|yes:gxtest)
+          test -x "${GERBIL_BUILD_PREFIX}/bin/$toolname" || die
+          test ! -L "${GERBIL_BUILD_PREFIX}/bin/$toolname" || die
+          ;;
+        *)
+          (cd "${GERBIL_BUILD_PREFIX}/bin" && ln -sf gerbil "$toolname") || die
+          ;;
+      esac
   done
 }
 
@@ -379,7 +423,8 @@ else
          build_lang || die
          ;;
       "tools")
-         build_tools || die
+         shift
+         build_tools "$@" || die
          ;;
       "tags")
          build_tags || die
@@ -400,8 +445,8 @@ else
       *)
          feedback_err "Unknown command."
          feedback_err \
-           "Correct usage: ./build.sh [prepare|gambit|boot-gxi|stage0|stage1|stdlib|libgerbil|lang|r7rs-large|srfi|tools|tags]"
-         die
+           "Correct usage: ./build.sh [prepare|gambit|boot-gxi|stage0|stage1|stdlib|libgerbil|lang|tools|tags]"
+         exit 1
          ;;
   esac
 fi

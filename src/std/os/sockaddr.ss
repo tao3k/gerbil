@@ -28,10 +28,26 @@
   => :fixnum
   "___arg1->sa_family")
 
-(def-C (sockaddr-family-set! (sa     : sockaddr)
-                             (family : :fixnum))
-  => :void
-  "___arg1->sa_family = ___arg2")
+(cond-expand
+ (darwin
+  ;; Darwin sockaddr structures carry their native size in the leading
+  ;; sa_len byte.  Leaving it zero produces EINVAL from bind/connect even
+  ;; when sa_family and the address payload are otherwise valid.
+  (def-C (sockaddr-family-set! (sa     : sockaddr)
+                               (family : :fixnum))
+    => :void
+    "___arg1->sa_family = ___arg2;
+     switch (___arg2) {
+       case AF_INET:  ___arg1->sa_len = sizeof(struct sockaddr_in); break;
+       case AF_INET6: ___arg1->sa_len = sizeof(struct sockaddr_in6); break;
+       case AF_UNIX:  ___arg1->sa_len = sizeof(struct sockaddr_un); break;
+       default:       ___arg1->sa_len = sizeof(struct sockaddr); break;
+     }"))
+ (else
+  (def-C (sockaddr-family-set! (sa     : sockaddr)
+                               (family : :fixnum))
+    => :void
+    "___arg1->sa_family = ___arg2")))
 
 (def-C (sockaddr_in-port (sa : sockaddr_in))
   => :fixnum

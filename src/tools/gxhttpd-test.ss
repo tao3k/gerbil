@@ -1,11 +1,15 @@
 (import :std/test
-        :std/sugar
+        :std/error
         :std/source
         :std/misc/process
         :std/misc/ports
+        (only-in :std/io tcp-connect Socket-close)
+        (only-in :std/net/address InetAddress localhost4)
+        (only-in :std/os/error OSError-errno ECONNREFUSED)
         :std/os/signal
-        :std/net/request
-        :gerbil/gambit)
+        (only-in :std/os/socket SocketConnectError?)
+        (only-in :std/time/timeout timeout->deadline timeout->abs-timeout)
+        :std/net/request)
 (export gxhttpd-server-test test-setup! test-cleanup!)
 
 (def httpd-process #f)
@@ -21,14 +25,34 @@
   (invoke "gerbil" ["build"] directory: test-directory)
   (invoke "gerbil" ["httpd" "config"
                     "--root" "content"
-                    "--listen" (object->string '("127.0.0.1:8080"))
+                    "--listen" (object->string '("inet4:127.0.0.1:8080"))
                     "--handlers" (object->string '(("/handler" . :test/site/handler)))
                     "--enable-servlets"]
           directory: test-directory)
   (set! httpd-process
     (open-process [path: "gerbil" arguments: ["httpd" "server"]
                          directory: test-directory]))
-  (thread-sleep! 1))
+  (with-catch
+    (lambda (exn)
+      (ignore-errors (test-cleanup!))
+      (raise exn))
+    wait-httpd-ready!))
+
+(def (wait-httpd-ready!)
+  (let* ((address (InetAddress localhost4 8080))
+         (deadline (timeout->deadline 60)))
+    (let loop ()
+      (with-catch
+        (lambda (exn)
+          (if (and (SocketConnectError? exn)
+                   (= (OSError-errno exn) ECONNREFUSED)
+                   (< (##current-time-point) (timeout->abs-timeout deadline)))
+            (begin
+              (thread-sleep! 0.1)
+              (loop))
+            (raise exn)))
+        (lambda ()
+          (Socket-close (tcp-connect address deadline)))))))
 
 (def (test-cleanup!)
   (when httpd-process

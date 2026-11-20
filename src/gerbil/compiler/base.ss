@@ -283,55 +283,196 @@ namespace: gxc
                        props)))
           (else runtime-props))))
 
-;; parallel build support
-(def __compile-jobs [])
-(def __available-cores
-  (string->number
-   (getenv "GERBIL_BUILD_CORES" "1")))
-(def __jobs-mx (make-mutex))
-(def __jobs-cv (make-condition-variable))
+;; Parallel build support. Fixed workers start while the frontend produces work,
+;; as in the installed Darwin streaming executor. Dependencies are completion
+;; records, not Scheme threads waiting for a bounded native-worker permit.
+(def (available-build-cores)
+  (let* ((value (getenv "GERBIL_BUILD_CORES" #f))
+         (configured (and value (string->number value))))
+    (if (and (integer? configured) (> configured 0)) configured (##core-count))))
+(def __available-cores (available-build-cores))
+(defstruct compile-executor (submit close output-job))
+(defstruct compile-output-result (owner completed? failed? callbacks))
+(defstruct compile-job-record (body name result remaining failed?))
+(def __compile-executor #f)
+(def __compile-executor-mx (make-mutex 'compile-executor-lifecycle))
 
-(def (add-compile-job! thunk (name (current-compile-context)))
-  (mutex-lock! __jobs-mx)
-  (let (job (make-compile-job thunk name))
-    (set! __compile-jobs (cons job __compile-jobs)))
-  (mutex-unlock! __jobs-mx))
+(def (open-compile-executor)
+  (def mx (make-mutex 'compile-worker-pool))
+  (def cv (make-condition-variable 'compile-worker-pool))
+  (def front [])
+  (def back [])
+  (def outputs (make-hash-table))
+  (def producer-closed? #f)
+  (def active 0)
+  (def first-error? #f)
+  (def first-error #f)
 
-(def (pending-compile-jobs)
-  (mutex-lock! __jobs-mx)
-  (let (result (reverse! __compile-jobs))
-    (set! __compile-jobs [])
-    (mutex-unlock! __jobs-mx)
-    result))
+  (def (submit! thunk name dependencies paths key)
+    (unless (and (list? dependencies) (andmap compile-output-result? dependencies))
+      (error "Invalid compiler task dependencies" name))
+    (set! dependencies
+          (foldr (lambda (dep result) (if (memq dep result) result (cons dep result)))
+                 [] dependencies))
+    (match (make-compile-job thunk name)
+      ([body job-name]
+       (let* ((result (make-compile-output-result mx #f #f []))
+              (job (make-compile-job-record body job-name result 0 #f)))
+         (with-lock mx
+           (lambda ()
+             (when (and producer-closed? (not (memq (current-thread) workers)))
+               (error "Compiler producer admission is closed" name))
+             (for-each (lambda (dep)
+                         (unless (eq? (compile-output-result-owner dep) mx)
+                           (error "Compiler dependency belongs to a retired graph" name))) dependencies)
+             ;; Prepare every alias and callback cell before publishing any.
+             ;; A failed allocation leaves the previous graph authoritative.
+             (let* ((index (hash-copy outputs))
+                    (waiting (filter (lambda (dep) (not (compile-output-result-completed? dep))) dependencies))
+                    (callbacks (map (lambda (dep) (cons dep (cons job (compile-output-result-callbacks dep)))) waiting)))
+               (for-each (lambda (path)
+                           (when (hash-get index path) (error "Duplicate compile output producer" path))
+                           (hash-put! index path (cons result key))) paths)
+               (let (queue (if (null? waiting) (cons job back) back))
+                 (set! (compile-job-record-remaining job) (length waiting))
+                 (set! (compile-job-record-failed? job)
+                       (ormap compile-output-result-failed? dependencies))
+                 (for-each (lambda (entry) (set! (compile-output-result-callbacks (car entry)) (cdr entry))) callbacks)
+                 (set! outputs index)
+                 (set! back queue)
+                 (condition-variable-broadcast! cv)))))
+         result))))
+
+  (def (output-job path key)
+    (with-lock mx
+      (lambda ()
+        (alet (entry (hash-get outputs path))
+          (and (equal? (cdr entry) key) (car entry))))))
+
+  (def (next-job)
+    (mutex-lock! mx)
+    (let wait ()
+      (cond
+       ((pair? front)
+        (let (job (car front))
+          (set! front (cdr front))
+          (set! active (fx1+ active))
+          (mutex-unlock! mx)
+          job))
+       ((pair? back) (set! front (reverse! back)) (set! back []) (wait))
+       ((and producer-closed? (fxzero? active)) (mutex-unlock! mx) #f)
+       (else (mutex-unlock! mx cv) (mutex-lock! mx) (wait)))))
+
+  (def (complete! job success? value)
+    (with-lock mx
+      (lambda ()
+        (let* ((result (compile-job-record-result job))
+               (callbacks (compile-output-result-callbacks result))
+               ;; Allocate queue cells before changing completion or counters.
+               (ready (filter (lambda (dependent) (fx= (compile-job-record-remaining dependent) 1)) callbacks))
+               (queue (append ready back)))
+          (when (and (not success?) (not first-error?))
+            (set! first-error? #t)
+            (set! first-error value))
+          (set! (compile-output-result-completed? result) #t)
+          (set! (compile-output-result-failed? result) (not success?))
+          (for-each
+           (lambda (dependent)
+             (unless success? (set! (compile-job-record-failed? dependent) #t))
+             (set! (compile-job-record-remaining dependent) (fx1- (compile-job-record-remaining dependent))))
+           callbacks)
+          (set! (compile-output-result-callbacks result) [])
+          (set! back queue))
+        (set! active (fx1- active))
+        (condition-variable-broadcast! cv))))
+
+  (def (worker)
+    (let loop ()
+      (alet (job (next-job))
+        (with-catch
+         (lambda (error) (complete! job #f error))
+         (lambda ()
+           (if (compile-job-record-failed? job)
+             (complete! job #f #f)
+             (begin
+               (with-verbose-mutex (displayln "... execute compile job " (compile-job-record-name job)))
+               ((compile-job-record-body job))
+               (complete! job #t #f)))))
+        (loop))))
+
+  (def workers
+    (map (lambda (index) (make-thread worker `(compile-worker ,index)))
+         (iota (max 1 __available-cores))))
+  (for-each thread-start! workers)
+
+  (def (close!)
+    (with-lock mx (lambda () (set! producer-closed? #t) (condition-variable-broadcast! cv)))
+    (for-each join! workers)
+    (when first-error? (raise first-error)))
+  (make-compile-executor submit! close! output-job))
+
+(def (current-or-open-compile-executor)
+  (with-lock __compile-executor-mx
+    (lambda ()
+      (unless __compile-executor (set! __compile-executor (open-compile-executor)))
+      __compile-executor)))
+
+(def (add-compile-job! thunk (name (current-compile-context)) (dependencies []))
+  (let (executor (current-or-open-compile-executor))
+    ((compile-executor-submit executor) thunk name dependencies [] #f)))
+
+(def (add-compile-output-job! paths key thunk (name (current-compile-context)))
+  (unless (and (pair? paths) (andmap string? paths))
+    (error "Invalid compiler output set" paths))
+  (let (executor (current-or-open-compile-executor))
+    ((compile-executor-submit executor) thunk name [] (map path-expand paths) key)))
+
+(def (current-compile-output-job path key)
+  (let (executor (with-lock __compile-executor-mx (lambda () __compile-executor)))
+    (and executor ((compile-executor-output-job executor) (path-expand path) key))))
 
 (def (execute-pending-compile-jobs!)
-  (let loop ()
-    (let (pending (pending-compile-jobs))
-      (unless (null? pending)
-        (for-each thread-start! pending)
-        (for-each join! pending)))))
+  (let (executor (with-lock __compile-executor-mx (lambda () __compile-executor)))
+    (when executor
+      (unwind-protect
+        ((compile-executor-close executor))
+        (with-lock __compile-executor-mx
+          (lambda ()
+            (when (eq? __compile-executor executor) (set! __compile-executor #f))))))))
 
 (def (make-compile-job thunk name)
-  (make-thread
-   (lambda ()
-     (let loop ()
-       (mutex-lock! __jobs-mx)
-       (if (> __available-cores 0)
-         (begin
-           (set! __available-cores (1- __available-cores))
-           (mutex-unlock! __jobs-mx)
-           (with-verbose-mutex
-            (displayln "... execute compile job " name))
-           (unwind-protect
-             (thunk)
-             (mutex-lock! __jobs-mx)
-             (set! __available-cores (fx1+ __available-cores))
-             (condition-variable-signal! __jobs-cv)
-             (mutex-unlock! __jobs-mx)))
-         (begin
-           (mutex-unlock! __jobs-mx __jobs-cv)
-           (loop)))))
-   name))
+  ;; The official executor created the job thread here, so Gambit captured the
+  ;; compiler parameterization at submission. A fixed worker pool must retain
+  ;; the same semantic explicitly.
+  (let ((output-dir (current-compile-output-dir))
+        (invoke-gsc (current-compile-invoke-gsc))
+        (gsc-options (current-compile-gsc-options))
+        (keep-scm (current-compile-keep-scm))
+        (verbose (current-compile-verbose))
+        (optimize (current-compile-optimize))
+        (debug (current-compile-debug))
+        (generate-ssxi (current-compile-generate-ssxi))
+        (static (current-compile-static))
+        (timestamp (current-compile-timestamp))
+        (decls (current-compile-decls))
+        (context (current-compile-context))
+        (parallel (current-compile-parallel)))
+    [(lambda ()
+       (parameterize ((current-compile-output-dir output-dir)
+                      (current-compile-invoke-gsc invoke-gsc)
+                      (current-compile-gsc-options gsc-options)
+                      (current-compile-keep-scm keep-scm)
+                      (current-compile-verbose verbose)
+                      (current-compile-optimize optimize)
+                      (current-compile-debug debug)
+                      (current-compile-generate-ssxi generate-ssxi)
+                      (current-compile-static static)
+                      (current-compile-timestamp timestamp)
+                      (current-compile-decls decls)
+                      (current-compile-context context)
+                      (current-compile-parallel parallel))
+         (thunk)))
+     name]))
 
 (defrules go! ()
   ((_ expr)

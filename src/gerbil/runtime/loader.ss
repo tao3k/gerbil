@@ -14,6 +14,12 @@ namespace: #f
 (def __load-path [])
 (def __load-order (make-hash-table))
 (def __load-order-next 1)
+(cond-expand
+ (darwin
+  (def __load-linked-module #f)
+  (def (__set-load-linked-module! load-linked)
+    (set! __load-linked-module load-linked)))
+ (else (void)))
 
 (def (load-path) => :list
   __load-path)
@@ -59,7 +65,11 @@ namespace: #f
                (mutex-unlock! __load-mx)
                (raise exn))
            (lambda ()
-             (let (loaded-path (load path))
+             (let (loaded-path
+                   (cond-expand
+                    (darwin (or (and __load-linked-module (__load-linked-module path))
+                                (load path)))
+                    (else (load path))))
                (mutex-lock! __load-mx)
                (hash-put! __modules modpath loaded-path)
                (unless (hash-get __load-order modpath)

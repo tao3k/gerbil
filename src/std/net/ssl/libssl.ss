@@ -507,6 +507,7 @@ error:
 
 
 #ifndef ___GERBIL_FFI_RELEASE_PKEY
+#define ___GERBIL_FFI_RELEASE_PKEY
 static ___SCMOBJ ffi_release_EVP_PKEY (void *ptr)
 {
   EVP_PKEY_free ((EVP_PKEY*)ptr);
