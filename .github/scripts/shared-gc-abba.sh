@@ -49,7 +49,7 @@ case "${1:?}" in
   ab-candidate|ba-candidate) rev="$candidate" ;;
   report)
     cat "$state/results.tsv"
-    test "$(wc -l < "$state/results.tsv")" -eq 4
+    test "$(wc -l < "$state/results.tsv")" -ge 2
     awk -F '\t' '$3 != 0 || $4 != 0 { fail=1 } END { exit fail }' "$state/results.tsv"
     exit 0
     ;;
@@ -114,7 +114,35 @@ awk -v label="$label" '
 ./build.sh tools
 unset GERBIL_BUILD_CORES
 ./install.sh
-(PATH=/opt/gerbil/bin:$PATH gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...) || test_rc=$?
+(
+  cores="$state/$label-cores"
+  mkdir -m 700 "$cores" || exit 125
+  original_pattern="$(sysctl -n kernel.core_pattern)" || exit 125
+  trap 'sudo sysctl -q -w "kernel.core_pattern=$original_pattern"' EXIT
+  sudo sysctl -q -w "kernel.core_pattern=$cores/%e.%p.%s.%t" || exit 125
+  ulimit -c unlimited || exit 125
+  (
+    PATH=/opt/gerbil/bin:$PATH gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...
+  ) || test_rc=$?
+  if [ "$test_rc" -eq 139 ]; then
+    exe="$(realpath /opt/gerbil/bin/gxtest)"
+    echo "CRASH_CAPTURE $label executable=$exe"
+    file "$exe"
+    for core in "$cores"/*.11.*; do
+      [ -f "$core" ] || continue
+      echo "CRASH_CORE $(basename "$core")"
+      DEBUGINFOD_URLS= gdb -q -nx -batch "$exe" "$core" \
+        -ex 'set print frame-arguments none' \
+        -ex 'info program' -ex 'info symbol $pc' -ex 'x/i $pc' \
+        -ex 'bt 60' -ex 'thread apply all bt 16' -ex 'info sharedlibrary' || true
+      touch "$state/crash-captured"
+    done
+    sudo dmesg --color=never | awk '/segfault at/ { line=$0 } END { if (line) print line }' || true
+  fi
+  rm -rf -- "$cores"
+  exit "$test_rc"
+) || test_rc=$?
+test "$test_rc" != 125
 printf 'PAIR_TEST %s %s exit=%s\n' "$label" "$rev" "$test_rc"
 printf '%s\t%s\t%s\t%s\n' "$label" "$rev" "$test_rc" "$profile_rc" >> "$state/results.tsv"
 # Only remove the dedicated install that this disposable hosted job created.

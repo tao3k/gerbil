@@ -1,29 +1,30 @@
-name: Gerbil shared GC paired comparison
+name: Gerbil shared gxtest crash capture
 on:
   push:
     branches: [ci/shared-gc-abba]
 permissions:
   contents: read
 jobs:
-  shared-abba:
+  shared-crash:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Install dependencies
-        run: sudo apt-get -y install openssl libssl-dev sqlite3 libsqlite3-dev
+        run: sudo apt-get -y install openssl libssl-dev sqlite3 libsqlite3-dev gdb
       - name: Build and fingerprint one Gambit
         run: bash .github/scripts/shared-gc-abba.sh setup
       - name: AB baseline 1f5afe2
         run: bash .github/scripts/shared-gc-abba.sh ab-baseline
       - name: AB candidate d2fbaf0
         run: bash .github/scripts/shared-gc-abba.sh ab-candidate
-      - name: BA candidate d2fbaf0
-        run: bash .github/scripts/shared-gc-abba.sh ba-candidate
-      - name: BA baseline 1f5afe2
-        run: bash .github/scripts/shared-gc-abba.sh ba-baseline
+      - name: Repeat candidate if no crash was captured
+        run: |
+          if [[ ! -f "$RUNNER_TEMP/gerbil-shared-gc-pair/crash-captured" ]]; then
+            bash .github/scripts/shared-gc-abba.sh ba-candidate
+          fi
       - name: Report the original test conclusions
         run: bash .github/scripts/shared-gc-abba.sh report
