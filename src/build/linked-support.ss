@@ -11,6 +11,31 @@
       (error "process exited abnormally" program status))
     (if (eof-object? output) "" output)))
 
+(def (native-support-object-options gsc object-options)
+  (if (getenv "GERBIL_BUILD_DEBUG" #f)
+    object-options
+    (with-exception-catcher
+     (lambda (_) object-options)
+     (lambda ()
+       (let (driver (path-expand "gambuild-C" (path-directory gsc)))
+         (match (words (invoke driver ["C_COMPILER"] #t))
+           ([compiler]
+            (let (proc
+                  (open-process
+                   [path: compiler
+                    arguments: ["-Werror" "-x" "c" "-fsyntax-only"
+                                "-g" "-fvar-tracking-assignments" "/dev/null"]
+                    stdin-redirection: #f stdout-redirection: #t stderr-redirection: #t]))
+              (unwind-protect
+                (begin
+                  (read-line proc #f)
+                  ;; Keep line information and avoid GCC's expensive assignment annotations.
+                  (if (zero? (process-status proc))
+                    ["-cc-options" "-g -fno-var-tracking-assignments"]
+                    object-options))
+                (close-port proc))))
+           (else object-options)))))))
+
 (def (words line)
   (filter (lambda (word) (not (string-empty? word)))
           (string-split (string-map (lambda (c) (if (char-whitespace? c) #\space c)) line)

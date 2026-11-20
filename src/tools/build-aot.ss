@@ -32,8 +32,7 @@
         (seen (make-table test: equal?))
         (builtin (make-table test: equal?))
         (collector (path-expand "build/collect-linked-phases.ss" (getenv "GERBIL_SOURCE")))
-        (gxi (path-expand "bin/gxi" home))
-        (output (path-expand "linked-phases" staging)))
+        (gxi (path-expand "bin/gxi" home)))
     ;; Runtime initialization marks both names as builtin before the loader
     ;; can select a provider. The gxi used for discovery may load them anyway.
     (for-each
@@ -43,33 +42,54 @@
      (gxc#executable-builtin-modules (import-module (string-append tool ".ss"))))
     (for-each (lambda (input) (table-set! seen (path-expand (car input) toolchain-lib) #t))
               shared)
-    (for-each
-     (lambda (source)
-       (let (path (path-normalize (path-expand source (path-directory (getenv "GERBIL_SOURCE")))))
-         (unless (file-exists? path) (error "Missing gxtest source root" source))
-         (invoke gxi [collector output path])
+    (let* ((paths
+            (map (lambda (source)
+                   (let (path (path-normalize
+                               (path-expand source (path-directory (getenv "GERBIL_SOURCE")))))
+                     (unless (file-exists? path) (error "Missing gxtest source root" source))
+                     path))
+                 roots))
+           (outputs
+            (map (lambda (index)
+                   (path-expand (string-append "linked-phases-" (number->string index)) staging))
+                 (iota (length paths)))))
+      ;; Each root keeps its own expander state and provider resolution.
+      (for-each (lambda (path output)
+                  (add-compile-job! (lambda () (invoke gxi [collector output path]))
+                                    `(collect-linked-phases ,path)))
+                paths outputs)
+      (execute-pending-compile-jobs!)
+      (for-each
+       (lambda (output)
          (for-each (lambda (image)
                      (unless (table-ref seen image #f) (table-set! seen image 'supplemental)))
-                   (call-with-input-file output read))))
-     roots)
-    (let loop ((paths (list-sort string<? (map car (table->list seen))))
-               (stdlib [])
-               (packages []))
-      (match paths
-        ([path . rest]
-         (cond
-          ((not (eq? (table-ref seen path) 'supplemental))
-           (loop rest stdlib packages))
-          ((string-prefix? toolchain-lib path)
-           (let* ((relative (substring path (string-length toolchain-lib) (string-length path)))
-                  (input (and (not (table-ref builtin (path-strip-extension relative) #f))
-                              (linked-support-input toolchain-lib (path-expand "toolchain" staging) path))))
-             (loop rest (if input (cons input stdlib) stdlib) packages)))
-          (else
-           (let (input (linked-support-input package-lib (path-expand "package" staging)
-                                             path "gerbil-link:package/"))
-             (loop rest stdlib (if input (cons input packages) packages))))))
-        (else (values (reverse stdlib) (reverse packages)))))))
+                   (call-with-input-file output read)))
+       outputs))
+    (let* ((paths (list-sort string<? (map car (table->list seen))))
+           (toolchain-work (path-expand "toolchain" staging))
+           (package-work (path-expand "package" staging))
+           (results
+            (filter-map
+             (lambda (path)
+               (and (eq? (table-ref seen path) 'supplemental)
+                    (let* ((toolchain? (string-prefix? toolchain-lib path))
+                           (relative (and toolchain? (substring path (string-length toolchain-lib)
+                                                                (string-length path)))))
+                      (and (not (and relative (table-ref builtin (path-strip-extension relative) #f)))
+                           (let (result (box #f))
+                             (add-compile-job!
+                              (lambda ()
+                                (set-box! result
+                                  (if toolchain?
+                                    (linked-support-input toolchain-lib toolchain-work path)
+                                    (linked-support-input package-lib package-work path "gerbil-link:package/"))))
+                              `(verify-linked-phase ,path))
+                             [toolchain? result])))))
+             paths)))
+      (execute-pending-compile-jobs!)
+      ;; Preserve path order independently of worker completion.
+      (values (filter-map (lambda (row) (and (car row) (unbox (cadr row)))) results)
+              (filter-map (lambda (row) (and (not (car row)) (unbox (cadr row)))) results)))))
 
 (def (reuse-package-support staging home gsc inputs)
   (if (null? inputs)
@@ -78,10 +98,28 @@
           (toolchain-lib (linked-support-root home))
           (package-lib (linked-support-root (gerbil-path)))
           (seen (make-table test: eq?)))
-      (let loop ((todo inputs) (reused []) (remaining []))
+      (def results
+        (map (lambda (input)
+               (let (result (box #f))
+                 ;; The queue owner creates shared directories before dispatch.
+                 (when (with-exception-catcher
+                        (lambda (_) #f)
+                        (lambda ()
+                          (create-directory* (path-directory (path-expand (car input) work)))
+                          #t))
+                   (add-compile-job!
+                    (lambda ()
+                      (set-box! result
+                        (reuse-linked-runtime-input work toolchain-lib package-lib gsc input)))
+                    `(verify-runtime-product ,(car input))))
+                 [input result]))
+             inputs))
+      (execute-pending-compile-jobs!)
+      ;; Select the first admitted provider in the original input order.
+      (let loop ((todo results) (reused []) (remaining []))
         (match todo
-          ([input . rest]
-           (let (prepared (reuse-linked-runtime-input work toolchain-lib package-lib gsc input))
+          ([[input result] . rest]
+           (let (prepared (unbox result))
              (if (and prepared (not (table-ref seen (cadr prepared) #f)))
                (begin
                  (table-set! seen (cadr prepared) #t)
@@ -121,7 +159,7 @@
     (let* ((producer (getenv "GERBIL_LINKED_C_WORK" #f))
            (gsc (getenv "GERBIL_GSC" (path-expand "bin/gsc" build-prefix)))
            (gsc-options (include-gambit-sharp))
-           (object-options ["-cc-options" "-g"])
+           (object-options (native-support-object-options gsc ["-cc-options" "-g"]))
            (shared (or (and producer
                             (select-linked-support build-prefix gsc gsc-options object-options producer))
                        [])))

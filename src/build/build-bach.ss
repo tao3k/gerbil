@@ -181,7 +181,13 @@
           ["-e" "(define-cond-expand-feature|enable-smp|)"
            "-e" include-gambit-sharp]
           ["-e" include-gambit-sharp]))
-       (object-options ["-cc-options" compiler-debug-option])
+       (object-options
+        (let (options ["-cc-options" compiler-debug-option])
+          (cond-expand
+           (darwin (if share?
+                     (native-support-object-options (gerbil-gsc) options)
+                     options))
+           (else options))))
        (recipe
         (and link-support? share?
              (equal? (path-normalize (current-directory))
