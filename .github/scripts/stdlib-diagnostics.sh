@@ -14,6 +14,8 @@ if [[ -r /proc/self/cgroup ]]; then
   if [[ -n "$cgroup_path" && -r "/sys/fs/cgroup$cgroup_path/memory.current" ]]; then
     cgroup="/sys/fs/cgroup${cgroup_path%/}"
     echo "[stdlib diagnostics] memory cgroup=$cgroup"
+  else
+    cgroup_path=
   fi
 fi
 
@@ -21,15 +23,32 @@ fi
 # build, so separate the frontend, GSC, and C compiler rather than adding
 # them together as if they were independent Gerbil workers.
 process_sample() {
-  ps -e -o pid=,ppid=,rss=,comm= | awk -v root="$1" '
+  ps -e -o pid=,ppid=,rss=,comm= | awk -v root="$1" -v cgroup_path="${cgroup_path:-}" '
+    function in_sample_cgroup(pid,   path,line,member) {
+      path="/proc/" pid "/cgroup"
+      while ((getline line < path) > 0) {
+        if (line !~ /^0::/) continue
+        member=substr(line,4)
+        close(path)
+        return member == cgroup_path || cgroup_path == "/" || index(member,cgroup_path "/") == 1
+      }
+      close(path)
+      return 0
+    }
     { parent[$1]=$2; rss[$1]=$3; name[$1]=$4 }
     END {
       for (pid in parent) {
         p=pid
         while (p != root && p in parent && parent[p] != p)
           p=parent[p]
-        if (p != root)
+        if (p != root) {
+          if (cgroup_path != "" && in_sample_cgroup(pid)) {
+            other_count++
+            other_total += rss[pid]
+            if (other_pid == "" || rss[pid] > rss[other_pid]) other_pid=pid
+          }
           continue
+        }
         count++
         total += rss[pid]
         sub(/^.*\//, "", name[pid])
@@ -42,7 +61,11 @@ process_sample() {
           else compiler[pid]=group
         }
       }
-      printf "%d %d %d %d %d\n", count, total, frontend, gsc, native
+      printf "%d %d %d %d %d", count, total, frontend, gsc, native
+      if (cgroup_path != "")
+        printf " other_cgroup_processes=%d other_cgroup_rss_KiB=%d other_top_comm=%s other_top_rss_KiB=%d",
+          other_count, other_total, (other_pid == "" ? "none" : name[other_pid]), rss[other_pid]
+      printf "\n"
       if ("frontend" in largest) compiler[largest["frontend"]]="frontend"
       for (pid in compiler)
         printf "%s %s %s %s %s\n", compiler[pid], pid, parent[pid], name[pid], rss[pid]
@@ -73,9 +96,9 @@ peak_frontend=0
 peak_gsc=0
 peak_native=0
 sample() {
-  local counts processes rss frontend gsc native host mem='' key value
+  local counts processes rss frontend gsc native other host mem='' key value
   counts="$(process_sample "$build_pid")" || return 1
-  read -r processes rss frontend gsc native <<< "$counts"
+  read -r processes rss frontend gsc native other <<< "$counts"
   if (( rss > peak_rss )); then peak_rss=$rss; fi
   if (( frontend > peak_frontend )); then peak_frontend=$frontend; fi
   if (( gsc > peak_gsc )); then peak_gsc=$gsc; fi
@@ -96,6 +119,11 @@ sample() {
         mem+=" $key=$value"
       fi
     done
+    if [[ -r "$cgroup/memory.stat" ]]; then
+      mem+="$(awk '$1 ~ /^(anon|file|kernel|shmem|file_mapped|file_dirty|file_writeback|inactive_file|slab_reclaimable)$/ {
+        printf " memory.stat.%s=%s", $1, $2
+      }' "$cgroup/memory.stat")"
+    fi
     if [[ -r "$cgroup/memory.events" ]]; then
       while read -r key value; do
         mem+=" memory.events.$key=$value"
@@ -104,7 +132,7 @@ sample() {
   fi
   printf '[stdlib diagnostics] elapsed_s=%s processes=%s frontend=%s gsc=%s native=%s tree_rss_KiB=%s sampled_tree_peak_KiB=%s peak_frontend=%s peak_gsc=%s peak_native=%s%s%s\n' \
     "$SECONDS" "$processes" "$frontend" "$gsc" "$native" "$rss" "$peak_rss" \
-    "$peak_frontend" "$peak_gsc" "$peak_native" "$host" "$mem"
+    "$peak_frontend" "$peak_gsc" "$peak_native" "$host" "$mem${other:+ $other}"
   if [[ "$counts" == *$'\n'* ]]; then
     compiler_details "${counts#*$'\n'}"
   fi
