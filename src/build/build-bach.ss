@@ -126,23 +126,9 @@
 ;; normal dynamic images for provider overrides and for other Gerbil executables.
 (def (build-support-inputs work)
   (eval '(import :std/build-script))
-  (let (prefix (path-expand "" (path-expand "lib" (path-normalize build-home))))
-    (filter-map
-     (lambda (entry)
-       (let* ((image (cdr entry))
-              (scm (and (string? image) (string-prefix? prefix image)
-                        (string-append (path-strip-extension image) ".scm")))
-              (ext (and scm (path-extension image))))
-         (and scm (string-prefix? ".o" ext)
-              (> (string-length ext) 2)
-              (string->number (substring ext 2 (string-length ext)))
-              (file-exists? scm)
-              (standalone-build-support? image)
-              (let* ((relative (substring image (string-length prefix) (string-length image)))
-                     (ref (string->symbol (string-append "gerbil-link:" relative)))
-                     (c-file (path-expand (string-append relative ".c") work)))
-                [relative ref (file-digest image) scm c-file]))))
-     (list-sort (lambda (a b) (string<? (car a) (car b))) (list-modules)))))
+  (let (prefix (linked-support-root build-home))
+    (filter-map (lambda (entry) (linked-support-input prefix work (cdr entry)))
+                (list-sort (lambda (a b) (string<? (car a) (car b))) (list-modules)))))
 
 (def (static-file-name mod)
   (path-expand (string-append (string-join (string-split mod #\/) "__") ".scm")
@@ -157,42 +143,14 @@
 (def (replace-extension-with-object path)
   (replace-extension path compiler-obj-suffix))
 
-(def (generate-build-support-c work inputs options)
-  (def (write-generator name group)
-    (let (generator (path-expand name work))
-      (call-with-output-file generator
-        (lambda (port)
-          (for-each
-           (match <>
-             ([_ ref _ scm c-file]
-              (create-directory* (path-directory c-file))
-              (write
-               `(unless (compile-file-to-target ,scm options: '((module-ref ,ref))
-                                                output: ,c-file)
-                  (exit 1))
-               port)
-              (newline port)))
-           group)))
-      generator))
-
-  (def (compile-group generator)
-    (invoke (gerbil-gsc) [options ... "-e"
-                          (string-append "(load " (object->string generator) ")")]))
-
+(def (group-build-support inputs)
   (let* ((count (min (gxc#available-build-cores) (length inputs)))
          (groups (make-vector count [])))
     (let distribute ((rest inputs) (index 0))
       (unless (null? rest)
         (vector-set! groups index (cons (car rest) (vector-ref groups index)))
         (distribute (cdr rest) (modulo (+ index 1) count))))
-    (let submit ((index 0))
-      (when (< index count)
-        (let* ((name (if (zero? index) "generate.scm"
-                        (string-append "generate-" (number->string index) ".scm")))
-               (generator (write-generator name (reverse (vector-ref groups index)))))
-          (add-compile-job! (cut compile-group generator) `(generate-c ,generator)))
-        (submit (+ index 1))))
-    (execute-pending-compile-jobs!)))
+    (map reverse (vector->list groups))))
 
 ;; first compile the module
 (displayln "... compile " bach-main)
@@ -243,7 +201,7 @@
           [])))
   (when link-support?
     (displayln "... link " (length inputs) " installed build support modules")
-    (generate-build-support-c work inputs gsc-gx-macros)
+    (generate-linked-support-c (gerbil-gsc) work (group-build-support inputs) gsc-gx-macros)
     (write-linked-loader linked-loader inputs))
   (def (prepare-link)
     (displayln "... link " output-bin)

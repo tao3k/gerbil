@@ -308,6 +308,13 @@ build_lang () {
 }
 
 build_tools () {
+  if [ "$#" -gt 0 ]; then
+    if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" != yes ] ||
+       [ "$(uname -s)" != Darwin ] || [ -n "${GERBIL_BUILD_OPTIMIZED+x}" ]; then
+      feedback_err "gxtest source roots require the Darwin AOT tools build with GERBIL_BUILD_OPTIMIZED unset"
+      return 1
+    fi
+  fi
   feedback_low "Building gerbil tools"
   (cd tools && gxi ./build.ss) || die
   if [ "${GERBIL_BUILD_AOT_TOOLS:-no}" = yes ]; then
@@ -322,7 +329,7 @@ build_tools () {
         fi
         GERBIL_HOME="${GERBIL_BUILD_PREFIX}" gxi ./build/build-bach.ss || exit 1
       fi
-      cd tools && gxi ./build-aot.ss
+      cd tools && gxi ./build-aot.ss "$@"
     ) || die
   fi
   for tool in tools/gx*.ss; do
@@ -416,7 +423,8 @@ else
          build_lang || die
          ;;
       "tools")
-         build_tools || die
+         shift
+         build_tools "$@" || die
          ;;
       "tags")
          build_tags || die

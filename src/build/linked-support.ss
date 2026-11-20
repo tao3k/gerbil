@@ -101,7 +101,27 @@ static int gerbil_linked_module_matches(const char *path, const char *hex)
 END
 )
 
-(def (write-linked-loader path inputs)
+(def (linked-support-root home)
+  (path-expand "" (path-normalize (path-expand "lib" home))))
+
+(def (linked-support-input prefix work image (reference-prefix "gerbil-link:"))
+  (and (string? image)
+       (string-prefix? prefix image)
+       (let* ((ext (path-extension image))
+              (scm (string-append (path-strip-extension image) ".scm")))
+         (and (string-prefix? ".o" ext)
+              (> (string-length ext) 2)
+              (string->number (substring ext 2 (string-length ext)))
+              (file-exists? scm)
+              (standalone-build-support? image)
+              (let* ((relative (substring image (string-length prefix) (string-length image)))
+                     (ref (string->symbol (string-append reference-prefix relative)))
+                     (c-file (path-expand (string-append relative ".c") work)))
+                [relative ref (file-digest image) scm c-file])))))
+
+(def (write-linked-loader path inputs (package-inputs []))
+  (def (registry rows)
+    (map (match <> ([path ref digest _ _] [path ref digest])) rows))
   (call-with-output-file path
     (lambda (port)
       (write `(c-declare ,digest-c-code) port) (newline port)
@@ -111,17 +131,22 @@ END
       (newline port)
       (write
        `(__set-load-linked-module!
-         (let* ((home (or (getenv "GERBIL_HOME" #f)
-                          (getenv "GERBIL_BUILD_PREFIX" #f)
-                          (gerbil-home)))
-                (root (with-exception-catcher
-                       (lambda (_) #f)
-                       (lambda () (path-normalize (path-expand "lib" home)))))
-                (linked (make-table test: equal?)))
-           (when root
-             (for-each (lambda (row)
-                         (table-set! linked (path-expand (car row) root) (cdr row)))
-                       ',(map (match <> ([path ref digest _ _] [path ref digest])) inputs)))
+         (let ((linked (make-table test: equal?)))
+           (define (register home rows)
+             (let ((root (with-exception-catcher
+                           (lambda (_) #f)
+                           (lambda () (path-normalize (path-expand "lib" home))))))
+               (when root
+                 (for-each (lambda (row)
+                             (table-set! linked (path-expand (car row) root) (cdr row)))
+                           rows))))
+           (register (or (getenv "GERBIL_HOME" #f)
+                         (getenv "GERBIL_BUILD_PREFIX" #f)
+                         (gerbil-home))
+                     ',(registry inputs))
+           ,@(if (pair? package-inputs)
+               [`(register (gerbil-path) ',(registry package-inputs))]
+               [])
            (lambda (path)
              (let ((row (table-ref linked path #f)))
                (and row
@@ -129,6 +154,37 @@ END
                     (begin (##load-module (car row)) path))))))
        port)
       (newline port))))
+
+(def (generate-linked-support-c gsc work groups options)
+  (def (write-generator name group)
+    (let (generator (path-expand name work))
+      (call-with-output-file generator
+        (lambda (port)
+          (for-each
+           (match <>
+             ([_ ref _ scm c-file]
+              (create-directory* (path-directory c-file))
+              (write
+               `(unless (compile-file-to-target ,scm options: '((module-ref ,ref))
+                                                output: ,c-file)
+                  (exit 1))
+               port)
+              (newline port)))
+           group)))
+      generator))
+
+  (def (compile-group generator)
+    (invoke gsc [options ... "-e"
+                          (string-append "(load " (object->string generator) ")")]))
+
+  (let submit ((rest groups) (index 0))
+    (unless (null? rest)
+      (let* ((name (if (zero? index) "generate.scm"
+                       (string-append "generate-" (number->string index) ".scm")))
+             (generator (write-generator name (car rest))))
+        (add-compile-job! (cut compile-group generator) `(generate-c ,generator))
+        (submit (cdr rest) (+ index 1)))))
+  (execute-pending-compile-jobs!))
 
 (def (support-file-digests files)
   (if (null? files)
@@ -235,7 +291,7 @@ END
 
 ;; Reuse belongs to this tools build. The runtime still resolves the selected
 ;; image and checks its digest before invoking the lazy linked initializer.
-(def (select-linked-support staging home gsc gsc-options object-options work)
+(def (select-linked-support home gsc gsc-options object-options work)
   (with-exception-catcher
    (lambda (_) #f)
    (lambda ()
@@ -248,9 +304,5 @@ END
                            (inputs
                             (verified-linked-support
                              (filter-map (cut find-linked-support-input <> lib work) rows))))
-                      (and (pair? inputs)
-                           (let (loader (path-expand "linked-support.scm" staging))
-                             (write-linked-loader loader inputs)
-                             (displayln "... link " (length inputs) " prepared support objects")
-                             (cons loader (map (lambda (input) (list-ref input 4)) inputs)))))))
+                      inputs)))
               (else #f)))))))
