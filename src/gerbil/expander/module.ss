@@ -319,18 +319,55 @@ static int gerbil_registered_sdk_protected(const char *path) {
   (normalized-directory (path-normalize (path-expand "lib" (gerbil-home)))))
 
 (def (selected-sdk-layout? root)
+  (def interface-extensions '(".ssi" ".ss" ".sld" ".scm"))
+  (def image-extensions '(".o1" ".scm"))
+
+  (def (same-provider? entry earlier extensions)
+    (and (member (path-extension entry) extensions)
+         (let (stem (path-expand (path-strip-extension entry) earlier))
+           (ormap (lambda (extension) (file-exists? (string-append stem extension)))
+                  extensions))))
+
+  ;; Check only branches with a provider in the selected SDK. The sealed
+  ;; Reader may use std and gerbil, including deferred phase and runtime images.
+  (def (shadowed-tree? earlier installed interfaces? images?)
+    (and (file-exists? earlier) (file-exists? installed)
+         (case (file-info-type (file-info installed #f))
+           ((symbolic-link) #t)
+           ((directory)
+            (or (not (eq? (file-info-type (file-info earlier #t)) 'directory))
+                (ormap (lambda (entry)
+                         (or (and interfaces? (same-provider? entry earlier interface-extensions))
+                             (and images? (same-provider? entry earlier image-extensions))
+                             (shadowed-tree? (path-expand entry earlier)
+                                             (path-expand entry installed)
+                                             interfaces? images?)))
+                       (directory-files installed))))
+           (else #f))))
+
+  (def (shadows-sdk? directory)
+    (let* ((prefix (core-library-package-path-prefix directory))
+           (package (and prefix (normalized-directory prefix))))
+      ;; Runtime images use the raw load path. Interface resolution strips a
+      ;; gerbil.pkg prefix before searching a package directory.
+      (or (shadowed-tree? (path-expand "std" directory) (path-expand "std" root) (not prefix) #t)
+          (shadowed-tree? (path-expand "gerbil" directory) (path-expand "gerbil" root) (not prefix) #t)
+          (and package
+               (or (member package '("std" "gerbil"))
+                   (string-prefix? "std/" package) (string-prefix? "gerbil/" package))
+               (shadowed-tree? directory (path-expand package root) #t #f)))))
+
   (with-catch
    (lambda (_) #f)
    (lambda ()
-     (andmap (lambda (directory)
-               (or (not (file-exists? directory))
-                   (equal? root (normalized-directory (path-normalize directory)))
-                   ;; The registered plan uses only the SDK's std and gerbil
-                   ;; namespaces. A prefixed package may map them indirectly.
-                   (and (not (core-library-package-path-prefix directory))
-                        (not (file-exists? (path-expand "std" directory)))
-                        (not (file-exists? (path-expand "gerbil" directory))))))
-             (load-path)))))
+     (let loop ((paths (load-path)))
+       (match paths
+         ([directory . rest]
+          (cond
+           ((not (file-exists? directory)) (loop rest))
+           ((equal? root (normalized-directory (path-normalize directory))) #t)
+           (else (and (not (shadows-sdk? directory)) (loop rest)))))
+         (else #f))))))
 
 (extern namespace: #f __reader-socket-split __reader-socket-members
         __reader-socket-publication __reader-socket-implementation)
