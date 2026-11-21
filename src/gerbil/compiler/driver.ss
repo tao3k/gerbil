@@ -97,6 +97,8 @@ namespace: gxc
 (def (delete-directory* dir)
   (delete-file-or-directory dir #t))
 
+(def current-compile-dependency-observer (make-parameter #f))
+
 (def (compile-module srcpath (opts []))
   (unless (string? srcpath)
     (raise-compile-error "Invalid module source path" srcpath))
@@ -112,8 +114,24 @@ namespace: gxc
          (optimize    (pgetq optimize: opts))
          (debug       (pgetq debug: opts))
          (gen-ssxi    (pgetq generate-ssxi: opts))
-         (parallel?   (pgetq parallel: opts)))
+         (parallel?   (pgetq parallel: opts))
+         (binding-observer (pgetq binding-observer: opts))
+         (dependency-observer (pgetq dependency-observer: opts))
+         (transformer-uses []))
 
+    (def (note-transformer ctx phi owner owner-phi binding method)
+      (let ((use-module (core-context-top ctx))
+            (provider-module (core-context-top owner)))
+        (set! transformer-uses
+          (cons ['transformer (and use-module (expander-context-id use-module)) phi
+                             (and provider-module (expander-context-id provider-module))
+                             owner-phi binding method]
+                transformer-uses))))
+
+    (when (and binding-observer (not (procedure? binding-observer)))
+      (raise-compile-error "Expected a procedure for binding-observer:" srcpath))
+    (when (and dependency-observer (not (procedure? dependency-observer)))
+      (raise-compile-error "Expected a procedure for dependency-observer:" srcpath))
     (when outdir
       (with-driver-mutex (create-directory* outdir)))
     (when optimize
@@ -131,9 +149,17 @@ namespace: gxc
                    (current-compile-identifiers (make-bound-identifier-table))
                    (current-compile-parallel parallel?)
                    (current-compilation-target target)
-                   (current-expander-compiling? #t))
+                   (current-expander-compiling? #t)
+                   (current-compile-dependency-observer dependency-observer))
       (verbose "compile " srcpath)
-      (compile-top-module (with-driver-mutex (import-module srcpath))))))
+      (let (ctx
+            (parameterize ((current-expander-macro-observer
+                            (and dependency-observer note-transformer)))
+              (with-driver-mutex (import-module srcpath))))
+        ;; Do not run a recording callback while holding the driver lock.
+        (when dependency-observer
+          (for-each dependency-observer (reverse transformer-uses)))
+        (compile-top-module ctx binding-observer)))))
 
 (def (compile-exe srcpath (opts []))
   (unless (string? srcpath)
@@ -618,7 +644,21 @@ namespace: gxc
 (def (file-empty? path)
   (zero? (file-info-size (file-info path #t))))
 
-(def (compile-top-module ctx)
+(def (compile-top-module ctx (binding-observer #f))
+  ;; Both phases use the compiler's resolved provider, including a private
+  ;; binding brought into the caller's code by a hygienic transformer.
+  (def dependency-observer (current-compile-dependency-observer))
+
+  (def (observe kind context phase binding symbol)
+    (unless (local-binding? binding)
+      (let* ((owner (and (module-binding? binding) (module-binding-context binding)))
+             (row [kind (expander-context-id context) phase
+                        (and owner (expander-context-id owner))
+                        (and owner (binding-phi binding))
+                        symbol]))
+        (when binding-observer (binding-observer row))
+        (when dependency-observer (dependency-observer row)))))
+
   (parameterize ((current-expander-context ctx)
                  (current-expander-phi 0)
                  (current-expander-marks [])
@@ -633,8 +673,10 @@ namespace: gxc
       (with-driver-mutex (optimize! ctx)))
     (collect-bindings ctx)
 
-    (compile-runtime-code ctx)
-    (compile-meta-code ctx)
+    (parameterize ((current-compile-binding-observer
+                    (and (or binding-observer dependency-observer) observe)))
+      (compile-runtime-code ctx)
+      (compile-meta-code ctx))
 
     (when (and (current-compile-optimize)
                (current-compile-generate-ssxi))
@@ -686,6 +728,9 @@ namespace: gxc
            (scm0 (compile-output-file ctx 0 ".scm"))
            (scmrt (compile-output-file ctx #f ".scm"))
            (scms (compile-static-output-file ctx)))
+      (when (current-compile-dependency-observer)
+        ((current-compile-dependency-observer)
+         ['runtime (expander-context-id ctx) rtm scm0 scmrt runtime-code loader-code]))
       (when runtime-code?
         (compile-scm-file scm0 runtime-code))
       (parameterize ((current-compile-gsc-options #f))
@@ -739,11 +784,18 @@ namespace: gxc
              (parameterize ((current-expander-context phi-ctx)
                             (current-expander-phi phi))
                (generate-runtime-phi code)))
-         (compile-scm-file (compile-output-file ctx n ".scm") code #t)))))
+         (let (path (compile-output-file ctx n ".scm"))
+           (when (current-compile-dependency-observer)
+             ((current-compile-dependency-observer)
+              ['phase (expander-context-id phi-ctx) phi path code]))
+           (compile-scm-file path code #t))))))
 
   (let ((values ssi-code phi-code)
         (generate-meta-code ctx))
     (compile-ssi ssi-code)
+    (when (current-compile-dependency-observer)
+      ((current-compile-dependency-observer)
+       ['interface (expander-context-id ctx) (compile-output-file ctx #f ".ssi")]))
     (for-each compile-phi phi-code)))
 
 (def (compile-ssxi-code ctx)

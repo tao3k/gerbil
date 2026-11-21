@@ -642,8 +642,8 @@ namespace: gx
 
 ;;; user identifiers
 (def (free-identifier=? xid yid)
-  (let ((xe (resolve-identifier xid))
-        (ye (resolve-identifier yid)))
+  (let ((xe (resolve-identifier-binding xid))
+        (ye (resolve-identifier-binding yid)))
     (cond
      ((and xe ye)                       ; both bound
       (or (eq? xe ye)

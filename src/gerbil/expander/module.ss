@@ -7,10 +7,128 @@ namespace: gx
 
 (export #t)
 (import "common" "stx" "core" "top")
+(extern namespace: #f __compile-top __compile-top-source)
 (declare (not safe))
 
 (def __module-registry (make-hash-table))
 (def __module-pkg-cache (make-hash-table))
+
+;; A context key can hold its prelude and the outstanding phase visits from
+;; its first expansion. Path and module-id entries still hold contexts.
+(defstruct module-phase-visits (prelude pending activation)
+  final: #t print: ())
+
+(def current-defer-compiled-phase-images? (make-parameter #f))
+(def current-module-phase-visits (make-parameter #f))
+
+(def (deferred-phase-visits)
+  (and (current-defer-compiled-phase-images?) (current-module-phase-visits)))
+
+(def (record-module-phase-visit! visits visit (image #f))
+  (set-box! visits (cons (cons image visit) (unbox visits))))
+
+(def (complete-module-phase-visits! ctx)
+  (let (state (hash-get __module-registry ctx))
+    (when (module-phase-visits? state)
+      (let (pending (&module-phase-visits-pending state))
+        (when pending
+          (force pending)
+          (set! (&module-phase-visits-pending state) #f))))))
+
+(def (use-module-context ctx)
+  (when (module-context? ctx)
+    (if (current-defer-compiled-phase-images?)
+      (let ((visits (current-module-phase-visits))
+            (state (hash-get __module-registry ctx)))
+        (when (and visits (module-phase-visits? state)
+                   (&module-phase-visits-pending state))
+          (record-module-phase-visit! visits (lambda () (complete-module-phase-visits! ctx)))))
+      (complete-module-phase-visits! ctx)))
+  ctx)
+
+;; The original import would read these contexts without visiting a module.
+;; A context with outstanding phase visits is not ready.
+(def (cached-phase-origin path)
+  (def (ready ctx)
+    (and (module-context? ctx)
+         (let (state (hash-get __module-registry ctx))
+           (or (not (module-phase-visits? state))
+               (not (&module-phase-visits-pending state))))
+         ctx))
+  (cond
+   ((hash-get __module-registry path) => ready)
+   (else
+    (match path
+      ([root . nested]
+       (let lp ((ctx (ready (hash-get __module-registry root))) (rest nested))
+         (and ctx
+              (match rest
+                ([id . tail]
+                 (let (binding (resolve-identifier-binding id 0 ctx))
+                   (and (syntax-binding? binding)
+                        (lp (ready (&syntax-binding-e binding)) tail))))
+                ([] ctx)))))
+      (else #f)))))
+
+(def (compiled-phase-visit image origins)
+  (let ((ctx (current-expander-context))
+        (phi (current-expander-phi))
+        (marks (current-expander-marks))
+        (path (current-expander-path))
+        (import (current-expander-module-import)))
+    (lambda ()
+      (parameterize ((current-expander-context ctx)
+                     (current-expander-phi phi)
+                     (current-expander-marks marks)
+                     (current-expander-path path)
+                     (current-expander-module-import
+                      (if (null? origins) import
+                        (lambda (path reload?)
+                          (cond ((and (not reload?) (assoc path origins)) => cdr)
+                                (else (import path reload?)))))))
+        (load-module image)))))
+
+(def (load-compiled-phase-image image (origins []))
+  (cond
+   ((deferred-phase-visits)
+    => (lambda (visits)
+         (let (contexts
+               (if (null? origins) []
+                 (and (eq? (current-expander-module-import) core-import-module)
+                      (let/cc unavailable
+                        (map (lambda (path)
+                               (let (ctx (cached-phase-origin path))
+                                 (if ctx (cons path ctx) (unavailable #f))))
+                             origins)))))
+           (if contexts
+             (record-module-phase-visit! visits (compiled-phase-visit image contexts) image)
+             (load-module image)))))
+   (else (load-module image))))
+
+(def (make-compiled-phase-expander images id)
+  (def (transformer)
+    (let (value (##global-var-ref (##make-global-var id)))
+      ;; Compiled syntax bindings also carry type information and constants.
+      (when (or (##unbound? value) (expander? value) (expander-context? value))
+        (error "compiled transformer is not available" id images))
+      value))
+  (cond
+   ((deferred-phase-visits)
+    => (lambda (visits)
+         (let (expander
+               (make-deferred-user-expander
+                (lambda ()
+                  (for-each (lambda (image)
+                              (cond ((assoc image (unbox visits)) => (lambda (entry) ((cdr entry))))
+                                    (else (load-module image))))
+                            images)
+                  (transformer))
+                (current-expander-context) (fx1- (current-expander-phi))))
+           (record-module-phase-visit!
+            visits (lambda () (set! (&expander-e expander) (transformer))))
+           expander)))
+   (else (transformer))))
+
 
 (defstruct module-import (source name phi weak?)
   final: #t print: (name))
@@ -108,8 +226,19 @@ namespace: gx
   (let recur ((e obj))
     (cond
      ((module-context? e)
-      (cond ((core-context-prelude e) => recur))
-      (force-e module-context-e e))
+      (let (root (registered-reader-activation e))
+        (cond
+         ((and root (not (current-defer-compiled-phase-images?))
+               (registered-phase-zero?) (selected-sdk-layout? root)
+               (native-phase-replay?) (not (current-expander-macro-observer)))
+          (parameterize ((current-defer-compiled-phase-images? #t)
+                           (__reader-socket-split (selected-reader-socket-split? root)))
+            (recur e)))
+         (else
+          (unless (current-defer-compiled-phase-images?)
+            (complete-module-phase-visits! e))
+          (cond ((core-context-prelude e) => recur))
+          (force-e module-context-e e)))))
      ((prelude-context? e)
       (force-e prelude-context-e e))
      ((stx-string? e)
@@ -129,12 +258,519 @@ namespace: gx
      (else #f))))
 
 (def (core-module->prelude-context ctx)
+  (unless (current-defer-compiled-phase-images?)
+    (complete-module-phase-visits! ctx))
+  (let (cached (hash-get __module-registry ctx))
+    (cond
+     ((module-phase-visits? cached)
+      (or (&module-phase-visits-prelude cached)
+          (let (pre (make-prelude-context ctx))
+            (set! (&module-phase-visits-prelude cached) pre)
+            pre)))
+     (cached cached)
+     (else
+      (let (pre (make-prelude-context ctx))
+        (hash-put! __module-registry ctx pre)
+        pre)))))
+
+;; A verified build plan can supply the inputs to this expansion without
+;; opening the interface again. Reloads always read the current source.
+(def current-expander-module-plan (make-parameter #f))
+
+;; The installation selects a single plan at a fixed entry in the SDK.
+;; A Reader import never searches the module or package directories for plans.
+(def current-registered-reader (make-parameter #f))
+(def current-reader-projected-contexts (make-parameter #f))
+
+(def (reader-projected-path? path)
+  (let (contexts (current-reader-projected-contexts))
+    (and contexts (hash-key? contexts path))))
+
+(def (registered-projection? body)
+  (and (vector? body) (= (vector-length body) 2)
+       (eq? (vector-ref body 0) 'scoped-runtime-projection)))
+
+(extern namespace: #f __registered-sdk-protected? __find-library-module __eval-import)
+(begin-foreign
+  (c-declare "
+#include <sys/stat.h>
+
+static int gerbil_registered_sdk_protected(const char *path) {
+#if defined(__APPLE__)
+  struct stat info;
+  return lstat(path, &info) == 0 && !S_ISLNK(info.st_mode) &&
+    (info.st_flags & (UF_IMMUTABLE | SF_IMMUTABLE)) != 0;
+#else
+  return 0;
+#endif
+}")
+  (define __registered-sdk-protected?
+    (c-lambda (nonnull-char-string) bool "gerbil_registered_sdk_protected")))
+
+(def (registered-reader-activation ctx)
+  (let (state (hash-get __module-registry ctx))
+    (and (module-phase-visits? state) (&module-phase-visits-activation state))))
+
+(def (normalized-directory path)
+  (let ((n (string-length path)))
+    (if (and (> n 1) (string-suffix? "/" path)) (substring path 0 (fx1- n)) path)))
+
+(def (selected-sdk-library-root)
+  (normalized-directory (path-normalize (path-expand "lib" (gerbil-home)))))
+
+(def (selected-sdk-layout? root)
+  (with-catch
+   (lambda (_) #f)
+   (lambda ()
+     (andmap (lambda (directory)
+               (or (not (file-exists? directory))
+                   (equal? root (normalized-directory (path-normalize directory)))
+                   ;; The registered plan uses only the SDK's std and gerbil
+                   ;; namespaces. A prefixed package may map them indirectly.
+                   (and (not (core-library-package-path-prefix directory))
+                        (not (file-exists? (path-expand "std" directory)))
+                        (not (file-exists? (path-expand "gerbil" directory))))))
+             (load-path)))))
+
+(extern namespace: #f __reader-socket-split __reader-socket-members
+        __reader-socket-publication __reader-socket-implementation)
+
+;; All raw member entries must share the protected carrier. A loaded
+;; member makes the ordinary evaluator keep its existing publication.
+(def (selected-reader-socket-split? root)
+  (with-catch
+   (lambda (_) #f)
+   (lambda ()
+     (let* ((publication (path-expand (string-append __reader-socket-publication ".o1") root))
+            (implementation (path-expand (string-append __reader-socket-implementation ".o1") root)))
+       (and (equal? publication (__find-library-module __reader-socket-publication))
+            (equal? implementation (__find-library-module __reader-socket-implementation))
+            (__registered-sdk-protected? publication)
+            (__registered-sdk-protected? implementation)
+            (__registered-sdk-protected? (normalized-directory (path-directory publication)))
+            (let (info (file-info publication #t))
+              (andmap
+               (lambda (image)
+                 (let* ((path (path-expand (string-append image ".o1") root))
+                        (state (file-info path #t))
+                        (owner (substring image 0 (fx- (string-length image) 2)))
+                        (stamp (string->symbol (string-append owner "::timestamp"))))
+                   (and (equal? path (__find-library-module image))
+                        (__registered-sdk-protected? path)
+                        (equal? (##file-info-device info) (##file-info-device state))
+                        (equal? (##file-info-inode info) (##file-info-inode state))
+                        (##unbound? (##global-var-ref (##make-global-var stamp))))))
+               __reader-socket-members)))))))
+
+(def (registered-sdk-stamp path)
+  (let (info (file-info path #t))
+    [(file-info-size info) (##file-info-device info) (##file-info-inode info)
+     (time->seconds (##file-info-last-change-time info))]))
+
+(def (selected-reader-inputs root reader)
+  (or (read-selected-reader-inputs root reader "gerbil/reader-private-plan.bin")
+      (read-selected-reader-inputs root reader "gerbil/reader-plan.bin")))
+
+(def (read-selected-reader-inputs root reader filename)
+  (with-catch
+   (lambda (_) #f)
+   (lambda ()
+     (let ((registration (path-expand filename root))
+           (projected (make-hash-table))
+           (checked (make-hash-table))
+           (table (make-hash-table))
+           (prefix (string-append root "/")))
+       (def (protected? path)
+         (cond
+          ((hash-get checked path))
+          ((and (or (equal? path root) (string-prefix? prefix path))
+                (__registered-sdk-protected? path)
+                (let (parent (normalized-directory (path-directory path)))
+                  (if (equal? path root)
+                    (__registered-sdk-protected? parent)
+                    (protected? parent))))
+           (hash-put! checked path #t)
+           #t)
+          (else #f)))
+       (and (protected? registration)
+            (let* ((size (file-info-size (file-info registration #t)))
+                   (bytes (make-u8vector size)))
+              (call-with-input-file registration
+                (lambda (port)
+                  (and (= (read-subu8vector bytes 0 size port) size)
+                       (match (u8vector->object bytes)
+                         (['gerbil-selected-reader-v1 expected guards providers rows]
+                          (and (equal? reader expected)
+                               (pair? guards) (= (length providers) 9) (= (length rows) 74)
+                               (andmap (match <>
+                                         ([path stamp]
+                                          (and (protected? path)
+                                               (equal? stamp (registered-sdk-stamp path))))
+                                         (else #f)) guards)
+                               (andmap (match <>
+                                         ([name expected globals]
+                                          (and (equal? expected (__find-library-module name))
+                                               (andmap (lambda (id)
+                                                         (not (##unbound?
+                                                               (##global-var-ref (##make-global-var id)))))
+                                                       globals)))
+                                         (else #f)) providers)
+                               (andmap (lambda (row)
+                                         (let ((path (car row)) (input (cdr row)))
+                                           (and (protected? path)
+                                                (vector? input) (= (vector-length input) 4)
+                                                (protected? (vector-ref input 0))
+                                                (not (hash-key? table path))
+                                                (let (body (vector-ref input 3))
+                                                  (and (or (not (registered-projection? body))
+                                                           (and (not (hash-key? __module-registry path))
+                                                                (not (hash-key? __module-registry (vector-ref input 1)))
+                                                                (begin (hash-put! projected path #f) #t)))
+                                                       (begin (hash-put! table path input) #t))))))
+                                       rows)
+                               (hash-key? table reader)
+                               [table (and (positive? (hash-length projected)) projected)]))
+                         (else #f)))))))))))
+
+(def (registered-phase-zero?)
+  (let (phase (current-import-expander-phi))
+    (and (fxzero? (current-expander-phi))
+         (or (not phase) (fxzero? phase)))))
+
+(def (run-registered-reader-plan path root plan run)
+  (with ([table projected] plan)
+    (parameterize ((current-expander-module-plan (cut hash-get table <>))
+                   (current-reader-projected-contexts projected)
+                   (current-defer-compiled-phase-images? #t)
+                   (current-registered-reader (cons path root)))
+      (run))))
+
+(def (registered-facade-reader-root path reload?)
+  (let (registered (current-registered-reader))
+    (and registered (not reload?) (registered-phase-zero?)
+         (current-expander-module-plan) (current-defer-compiled-phase-images?)
+         (string-suffix? "/std/encoding/json/reader.ssi" path)
+         (let* ((root (cdr registered))
+                (facade (path-expand "std/encoding/json.ssi" root))
+                (parents (current-expander-path))
+                (api-path [(path-expand "std/encoding/json/api.ssi" root) facade]))
+           (and (equal? facade (car registered))
+                (equal? path (path-expand "std/encoding/json/reader.ssi" root))
+                ;; IO reexports can reach Reader before API's direct import.
+                (or (equal? parents api-path)
+                    (equal? parents (cons (path-expand "std/encoding/json/io.ssi" root)
+                                          api-path)))
+                root)))))
+
+(def (with-registered-reader path reload? run)
   (cond
-   ((hash-get __module-registry ctx))
-   (else
-    (let (pre (make-prelude-context ctx))
-      (hash-put! __module-registry ctx pre)
-      pre))))
+   ((registered-facade-reader-root path reload?)
+    => (lambda (root)
+         (parameterize ((current-registered-reader (cons path root)))
+           (run))))
+   ((or reload? (pair? (current-expander-path)) (current-expander-module-plan)
+        (current-defer-compiled-phase-images?) (current-expander-compiling?)
+        (not (registered-phase-zero?))
+        (not (eq? (current-expander-module-import) core-import-module))
+        (not (eq? (current-expander-module-eval) core-eval-module))
+        (current-expander-macro-observer) (not (native-phase-replay?)))
+    (run))
+   ((or (string-suffix? "/std/encoding/json/reader.ssi" path)
+        (string-suffix? "/std/encoding/json.ssi" path))
+    (let* ((root (selected-sdk-library-root))
+           (reader (path-expand "std/encoding/json/reader.ssi" root))
+           (facade (path-expand "std/encoding/json.ssi" root)))
+      (cond
+       ((and (equal? path reader) (selected-sdk-layout? root)
+             (selected-reader-inputs root reader))
+        => (lambda (table) (run-registered-reader-plan path root table run)))
+       ((and (equal? path facade) (selected-sdk-layout? root))
+        (let ((context (hash-get __module-registry reader))
+              (named-reader (hash-get __module-registry 'std/encoding/json/reader))
+              (api (path-expand "std/encoding/json/api.ssi" root)))
+          (cond
+           ((and context (eq? context named-reader)
+                 (equal? root (registered-reader-activation context)))
+            (parameterize ((current-defer-compiled-phase-images? #t)
+                           (current-registered-reader (cons path root)))
+              (run)))
+           ;; Use the original facade/API import order. In particular the
+           ;; Reader is visited at its declaration, even on a cold facade.
+           ((and (not context) (not named-reader)
+                 (not (hash-key? __module-registry api))
+                 (not (hash-key? __module-registry 'std/encoding/json/api))
+                 (__registered-sdk-protected? api)
+                 (__registered-sdk-protected? (path-expand "std/encoding/json/io.ssi" root))
+                 (selected-reader-inputs root reader))
+            => (lambda (table) (run-registered-reader-plan path root table run)))
+           (else (run)))))
+       (else (run)))))
+   (else (run))))
+
+;; Cache the proof only at one dynamic activation. A false entry is an
+;; unfinished visit, so a cycle falls back to the ordinary evaluator.
+(def (empty-runtime-import-frontier? root initial-phase)
+  (let ((visited (make-hash-table-eq)) (count 0))
+    (def (visit ctx phase)
+      (let (states (or (hash-get visited ctx) []))
+        (cond
+         ((assv phase states) => cdr)
+         ((fx>= count 20000) #f)
+         (else
+          (let (state (cons phase #f))
+            (hash-put! visited ctx (cons state states))
+            (set! count (fx1+ count))
+            (and (andmap (cut empty-step? <> phase) (&module-context-import ctx))
+                 (begin (set-cdr! state #t) #t)))))))
+    (def (empty-step? in phase)
+      (cond
+       ((module-context? in) (not (fxzero? phase)))
+       ((module-import? in)
+        (let (effective (+ phase (&module-import-phi in)))
+          (and (fixnum? effective) (not (fxzero? effective)))))
+       ((import-set? in)
+        (let (effective (+ phase (&import-set-phi in)))
+          (and (fixnum? effective)
+               (or (fxnegative? effective)
+                   (and (fxpositive? effective) (visit (&import-set-source in) effective))))))
+       (else #f)))
+    (visit root initial-phase)))
+
+(def (eval-registered-imports imports)
+  (for-each (lambda (in)
+              (unless (and (import-set? in) (fxpositive? (&import-set-phi in))
+                           (empty-runtime-import-frontier? (&import-set-source in) (&import-set-phi in)))
+                (__eval-import in)))
+            imports))
+
+(def (eval-imported-module-code ctx body)
+  (let (registered (current-registered-reader))
+    (if (and registered (eq? (expander-context-id ctx) 'gerbil/base)
+             (equal? (&module-context-path ctx) (path-expand "gerbil/base.ssi" (cdr registered)))
+             (member (path-expand "std/ffi.ssi" (cdr registered)) (current-expander-path))
+             (native-phase-replay?) (not (current-expander-macro-observer)))
+      (let (forms (syntax->list body))
+        (if (and (pair? forms) (eq? (stx-e (car forms)) '%#begin)
+                 (equal? (map (lambda (form) (stx-e (stx-car form))) (cdr forms))
+                         '(%#import %#import %#export)))
+          (begin
+            (eval-registered-imports (cdr (stx-e (cadr forms))))
+            (eval-registered-imports (cdr (stx-e (caddr forms))))
+            (void))
+          (eval-syntax* body)))
+      (eval-syntax* body))))
+
+(def (read-module-for-expansion path reload?)
+  (let* ((plan (and (not reload?) (current-expander-module-plan)))
+         (input (and plan (plan path))))
+    (if (and (vector? input) (= (vector-length input) 4))
+      (let (body (vector-ref input 3))
+        (values (vector-ref input 0) (vector-ref input 1) (vector-ref input 2)
+                (if (and (reader-projected-path? path) (registered-projection? body))
+                  (vector-ref body 1)
+                  body)))
+      (core-read-module path))))
+
+;; A prepared compiled interface has already classified its declarations.
+;; First pass binds in source order. The ordinary expander elaborates
+;; exports and pending expressions from the reversed first-pass stack.
+;; Prepared phase operations still publish the canonical expanded forms.
+;; A custom evaluator or compiler must see the corresponding ordinary call.
+(def (native-phase-replay?)
+  (let (compile (current-expander-compile))
+    (and (eq? (current-expander-eval) ##eval)
+         (or (eq? compile __compile-top-source) (eq? compile __compile-top)))))
+
+;; Prepared phase operations already supply the two literal arguments.
+;; The remaining expanded syntax records the original call for reflection.
+(def (compiled-phase-literal-expression expression procedure first second)
+  (let (source (stx-source expression))
+    (def (quoted value)
+      (core-quote-syntax (core-list '%#quote value) source))
+    (core-quote-syntax
+     (core-list '%#call
+                (core-quote-syntax (core-list '%#ref (core-quote-syntax procedure source)) source)
+                (quoted first) (quoted second))
+     source)))
+
+(def (replay-compiled-phase-visit operation)
+  (match operation
+    ([form expression image origins]
+     (if (native-phase-replay?)
+       (parameterize ((current-expander-phi (fx1+ (current-expander-phi))))
+         (let (expanded
+               (if (and (current-registered-reader) (not (current-expander-macro-observer)))
+                 (compiled-phase-literal-expression expression 'gx#load-compiled-phase-image image origins)
+                 (core-expand-expression expression)))
+           (load-compiled-phase-image image origins)
+           (core-quote-syntax (core-cons '%#begin-syntax [expanded]) (stx-source form))))
+       (core-expand-begin-syntax% form)))))
+
+(def (replay-compiled-phase-syntax operation)
+  (match operation
+    ([form binder expression images entry]
+     (if (native-phase-replay?)
+       (let-values (((expanded value)
+                     (parameterize ((current-expander-phi (fx1+ (current-expander-phi))))
+                       (let (expanded
+                             (if (and (current-registered-reader) (not (current-expander-macro-observer)))
+                               (compiled-phase-literal-expression expression 'gx#make-compiled-phase-expander images entry)
+                               (core-expand-expression expression)))
+                         (values expanded (make-compiled-phase-expander images entry))))))
+         (core-bind-syntax! binder value)
+         (core-quote-syntax
+          [(core-quote-syntax '%#define-syntax) (core-quote-syntax binder) expanded]
+          (stx-source form)))
+       (core-expand-define-syntax% form)))))
+
+;; Copy only the lexical graph owned by the compiled expression. Keep
+;; external phase contexts and canonical type metadata in the live SDK.
+;; A copy has its own marks, local binding IDs and source locations.
+(def (contract-local-context? context)
+  (let loop ((ctx context))
+    (or (local-context? ctx)
+        (and (phi-context? ctx)
+             (phi-context-down ctx)
+             (loop (phi-context-down ctx))))))
+
+(def (copy-expanded-load-contract expression before after refuse)
+  (let (memo (make-hash-table-eq))
+    (def (keep! old fresh)
+      (hash-put! memo old fresh)
+      fresh)
+    (def (copy x)
+      (cond
+       ((hash-get memo x))
+       ((pair? x)
+        (let (out (keep! x (cons #f #f)))
+          (set-car! out (copy (car x)))
+          (set-cdr! out (copy (cdr x)))
+          out))
+       ((uninterned-symbol? x) (keep! x (gensym x)))
+       ((string? x)
+        (keep! x (if (equal? x before) after (string-copy x))))
+       ((vector? x)
+        (let* ((len (vector-length x)) (out (keep! x (make-vector len))))
+          (let loop ((i 0))
+            (when (< i len)
+              (vector-set! out i (copy (vector-ref x i)))
+              (loop (1+ i))))
+          out))
+       ((hash-table? x)
+        (let (out (keep! x (hash-new x)))
+          (hash-for-each (lambda (k v) (hash-put! out (copy k) (copy v))) x)
+          out))
+       ((and (expander-context? x) (not (contract-local-context? x))) x)
+       ((##structure? x)
+        (let* ((type (##structure-type x)) (id (##type-id type)))
+          (case id
+            ((gerbil/core#class-type-info::t) x)
+            ((gerbil#AST::t gx#identifier-wrap::t gx#syntax-wrap::t gx#syntax-quote::t
+              gx#local-context::t gx#phi-context::t gx#local-binding::t gx#syntax-binding::t
+              gx#user-expander::t gx#expander-mark::t gerbil/core/contract~TypeEnv#type-env::t)
+             (let ((out (keep! x (##structure-copy x))) (len (##structure-length x)))
+               (let loop ((i 1))
+                 (when (< i len)
+                   (##unchecked-structure-set! out
+                     (copy (##unchecked-structure-ref x i type copy-expanded-load-contract))
+                     i type copy-expanded-load-contract)
+                   (loop (1+ i))))
+               out))
+            (else (refuse #f)))))
+       ((or (symbol? x) (number? x) (char? x) (keyword? x) (null? x)
+            (boolean? x) (##type? x)) x)
+       (else (refuse #f))))
+    (copy expression)))
+
+
+
+(def (compiled-load-form-literal form)
+  (match form
+    (['%#call ['%#ref 'load-module] ['%#quote (? string? literal)]] literal)
+    (else #f)))
+
+(def (ordinary-load-contract?)
+  (def (stock-expression? key expand)
+    (let (binding (resolve-identifier-binding key))
+      (and (expression-form-binding? binding)
+           (eq? (expander-e (syntax-binding-e binding)) expand))))
+  (let* ((loader (resolve-identifier-binding 'load-module))
+         (macro (and (runtime-binding? loader) (runtime-binding-macro loader)))
+         (syntax (and macro (resolve-identifier-binding macro)))
+         (expander (and (syntax-binding? syntax) (syntax-binding-e syntax))))
+    (and (user-expander? expander)
+         (eq? (binding-id loader) 'load-module)
+         (eq? (binding-id syntax) '|[:0:]#@load-module|)
+         (eq? (expander-context-id (user-expander-context expander)) 'gerbil/runtime/loader)
+         (eq? (expander-e expander)
+              (##global-var-ref (##make-global-var (binding-id syntax))))
+         (stock-expression? '%#call core-expand-call%)
+         (stock-expression? '%#ref core-expand-ref%)
+         (stock-expression? '%#quote core-expand-quote%))))
+
+(def (captured-load-contract? expanded literal)
+  (match (syntax->datum expanded)
+    (['%#let-values [[['modpath] ['%#quote name]]] _] (equal? name literal))
+    (else #f)))
+
+(def (core-expand-imported-module body ctx)
+  (cond
+   ((and (vector? body)
+         (= 2 (vector-length body))
+         (eq? 'compiled-interface-declarations (vector-ref body 0)))
+    (parameterize ((current-expander-context ctx) (current-expander-phi 0))
+      (core-bind-feature! 'gerbil-module #t)
+      (let ((contract-template #f) (contract-literal #f))
+        (def (expand-compiled-load form)
+          (let (literal (and (native-phase-replay?)
+                             (not (current-expander-macro-observer))
+                             (compiled-load-form-literal form)))
+            (cond
+             ((and literal contract-template
+                   (ordinary-load-contract?)
+                   (call/cc
+                    (lambda (refuse)
+                      (copy-expanded-load-contract contract-template contract-literal literal refuse)))))
+             (else
+              (let (expanded (core-expand-expression form))
+                (set! contract-template
+                  (and literal (ordinary-load-contract?)
+                       (captured-load-contract? expanded literal) expanded))
+                (set! contract-literal literal)
+                expanded)))))
+        (let (pending
+              (foldl
+               (lambda (item reverse-forms)
+                 (let* ((form (cdr item))
+                        (action
+                         (case (car item)
+                           ((%#import) (cons 'ready (core-expand-import% form)))
+                           ((phase-zero-import)
+                            (cons 'ready (core-expand-import% (car form) #f (cdr form))))
+                           ((phase-visit) (cons 'ready (replay-compiled-phase-visit form)))
+                           ((phase-syntax) (cons 'ready (replay-compiled-phase-syntax form)))
+                           ((%#define-runtime) (cons 'ready (core-expand-define-runtime% form)))
+                           ((%#define-syntax) (cons 'ready (core-expand-define-syntax% form)))
+                           ((%#define-alias) (cons 'ready (core-expand-define-alias% form)))
+                           ((%#begin-syntax) (cons 'ready (core-expand-begin-syntax% form)))
+                           ((%#export) (cons 'export form))
+                           ((%#call) (cons 'expression form))
+                           ((compiled-load) (cons 'compiled-load form))
+                           (else (error "unsupported declaration operation" item)))))
+                   (cons action reverse-forms)))
+               [] (vector-ref body 1)))
+          (foldl
+           (lambda (entry forward-forms)
+             (unless (eq? (car entry) 'compiled-load)
+               (set! contract-template #f))
+             (cons (case (car entry)
+                     ((export) (core-expand-export% (cdr entry)))
+                     ((expression) (core-expand-expression (cdr entry)))
+                     ((compiled-load) (expand-compiled-load (cdr entry)))
+                     (else (cdr entry)))
+                   forward-forms))
+           [] pending)))))
+   (else (core-expand-module-begin body ctx))))
 
 (def (core-import-module rpath (reload? #f))
   (def (import-source path)
@@ -147,8 +783,10 @@ namespace: gx
                    (current-expander-path
                     (cons path (current-expander-path)))
                    (current-import-expander-phi #f)
-                   (current-export-expander-phi #f))
-      (let-values (((pre id ns body) (core-read-module path)))
+                   (current-export-expander-phi #f)
+                   (current-module-phase-visits
+                    (and (current-defer-compiled-phase-images?) (box []))))
+      (let-values (((pre id ns body) (read-module-for-expansion path reload?)))
         (let* ((prelude
                 (cond
                  ((prelude-context? pre) pre)
@@ -165,17 +803,31 @@ namespace: gx
                (ctx
                 (make-module-context id prelude ns path))
                (body
-                (core-expand-module-begin body ctx))
+                (core-expand-imported-module body ctx))
                (body
                 (core-quote-syntax
                  (core-cons '%#begin body)
                  path ctx [])))
           (set! (&module-context-e ctx)
-            (delay-atomic (eval-syntax* body)))
+            (delay-atomic (eval-imported-module-code ctx body)))
           (set! (&module-context-code ctx)
             body)
-          (hash-put! __module-registry path ctx)
-          (hash-put! __module-registry id ctx)
+          (let* ((registered (current-registered-reader))
+                 (activation (and registered (equal? path (car registered)) (cdr registered)))
+                 (visits (current-module-phase-visits))
+                 (ordered (and visits (pair? (unbox visits)) (reverse (unbox visits)))))
+            (when (or ordered activation)
+              (hash-put! __module-registry ctx
+                (make-module-phase-visits
+                 #f (and ordered (delay-atomic (for-each (lambda (entry) ((cdr entry))) ordered)))
+                 activation))))
+          (if (reader-projected-path? path)
+            ;; Only the sealed Reader expansion sees the smaller lexical surface.
+            ;; Native initialization remains at its original phase-zero edge.
+            (hash-put! (current-reader-projected-contexts) path ctx)
+            (begin
+              (hash-put! __module-registry path ctx)
+              (hash-put! __module-registry id ctx)))
           ctx))))
 
   (def (import-submodule rpath)
@@ -194,19 +846,24 @@ namespace: gx
             (else ctx))))))
 
   (cond
-   ((and (not reload?) (hash-get __module-registry rpath)))
+   ((and (not reload?) (hash-get __module-registry rpath)) => use-module-context)
    ((list? rpath)
     (import-submodule rpath))
    ((core-library-module-path? rpath)
     (let (ctx (core-import-module (core-resolve-library-module-path rpath)
                                   reload?))
-      (hash-put! __module-registry rpath ctx)
+      (unless (reader-projected-path? (&module-context-path ctx))
+        (hash-put! __module-registry rpath ctx))
       ctx))
    (else
     (let (npath (path-normalize rpath))
       (cond
-       ((and (not reload?) (hash-get __module-registry npath)))
-       (else (import-source npath)))))))
+       ((and (not reload?) (reader-projected-path? npath)
+             (hash-get (current-reader-projected-contexts) npath)) => use-module-context)
+       ((and (not reload?) (hash-get __module-registry npath)) => use-module-context)
+       (else
+        (with-registered-reader npath reload?
+          (lambda () (use-module-context (import-source npath))))))))))
 
 (def (core-read-module path)
   (with-catch
@@ -543,7 +1200,7 @@ namespace: gx
                         (force-weak? #f))
   (with ((module-import source key phi weak?) in)
     (core-bind! key
-                (let (e (core-resolve-module-export source))
+                (let (e (core-find-module-export source))
                   (make-import-binding (&binding-id e) key phi
                                        e (&module-export-context source)
                                        (or force-weak? weak?)))
@@ -553,6 +1210,9 @@ namespace: gx
   (core-bind-import! in ctx #t))
 
 (def (core-resolve-module-export out)
+  (publish-syntax-binding! (core-find-module-export out)))
+
+(def (core-find-module-export out)
   (def (subst key)
     (match key
       ([id . mark]
@@ -740,7 +1400,7 @@ namespace: gx
        (parameterize ((current-phi (current-expander-phi)))
          (K body [])))))))
 
-(def (core-expand-import% stx (internal-expand? #f))
+(def (core-expand-import% stx (internal-expand? #f) (phase-zero-edges #f))
   (def (expand1 hd K rest r)
     (cond
      ((core-bound-module? hd)
@@ -876,10 +1536,46 @@ namespace: gx
         (module-import? e)
         (module-context? e)))
 
-  (let (rbody (core-expand-import/export stx expanded-import?
-                                         'apply-import-expander
-                                         current-import-expander-phi
-                                         expand1))
+  ;; Compiled interface rows contain only unmarked, zero-phase import clauses.
+  ;; Resolve providers in source order and hand the reversed result to import!.
+  (def (replay-phase-zero edges)
+    (foldl
+     (lambda (edge rest)
+       (let ((path (vector-ref edge 1))
+             (source (vector-ref edge 2)))
+         (case (vector-ref edge 0)
+           ((whole)
+            (expand1 source (lambda (_ result) result) [] rest))
+           ((runtime)
+            (cons (import-module path) rest))
+           ((names)
+            (let ((ctx (import-module path))
+                  (exports (make-hash-table-eq)))
+              (for-each
+               (lambda (out)
+                 (when (fxzero? (&module-export-phi out))
+                   (hash-put! exports (&module-export-name out) out)))
+               (&module-context-export ctx))
+              (foldl
+               (lambda (names result)
+                 (let (out (hash-get exports (cdr names)))
+                   (unless out
+                     (raise-syntax-error #f "Bad syntax; no matching export" stx source))
+                   (cons (core-module-export->import out (car names) 0) result)))
+               rest (vector-ref edge 3))))
+           (else
+            (error "Unknown compiled import clause" edge)))))
+     [] edges))
+
+  (let (rbody (if (and phase-zero-edges
+                       (fxzero? (current-expander-phi))
+                       (not (current-import-expander-phi)))
+                (parameterize ((current-import-expander-phi 0))
+                  (replay-phase-zero phase-zero-edges))
+                (core-expand-import/export stx expanded-import?
+                                            'apply-import-expander
+                                            current-import-expander-phi
+                                            expand1)))
     (if internal-expand?
       (reverse rbody)
       (core-quote-syntax
@@ -939,7 +1635,8 @@ namespace: gx
       (id
        (identifier? id)
        (cond
-        ((core-resolve-identifier id (current-export-expander-phi))
+        ((core-find-identifier id (current-export-expander-phi)
+                               (current-expander-context))
          => (lambda (bind)
               (K rest (cons (make-export bind) r))))
         (else
@@ -948,7 +1645,7 @@ namespace: gx
        (and (stx-fixnum? phi) (identifier? id) (identifier? name))
        (let (phi (stx-e phi))
          (cond
-          ((core-resolve-identifier id phi)
+          ((core-find-identifier id phi (current-expander-context))
            => (lambda (bind)
                 (K rest (cons (make-export bind phi (current-expander-context)
                                            name)
@@ -959,7 +1656,7 @@ namespace: gx
       ((rename: id name)
        (let (phi (current-export-expander-phi))
          (cond
-          ((core-resolve-identifier id phi)
+          ((core-find-identifier id phi (current-expander-context))
            => (lambda (bind)
                 (K rest (cons (make-export bind phi (current-expander-context)
                                            name)

@@ -210,6 +210,9 @@ namespace: #f
     ;; initialize the load path
     (let* ((home (gerbil-home))
            (libdir (path-expand "lib" home))
+           ;; Resolve a published SDK version when its library root exists.
+           ;; Build-tree tools may start before installation.
+           (libdir (if (file-exists? libdir) (path-normalize libdir) libdir))
            (userpath
             (path-expand "lib" (gerbil-path)))
            (loadpath

@@ -147,6 +147,22 @@ namespace: gx
 ;; user macros  -- [phi displaced] mark algebra
 (defstruct (user-expander macro-expander) (context phi)
   print: ())
+
+(defstruct deferred-transformer (value)
+  final: #t print: ())
+
+(def (make-deferred-user-expander load ctx phi)
+  (make-user-expander (make-deferred-transformer (make-atomic-promise load))
+                      ctx phi))
+
+(def (user-expander-transformer expander)
+  (let (value (&expander-e expander))
+    (if (deferred-transformer? value)
+      (let (transformer (force (&deferred-transformer-value value)))
+        (set! (&expander-e expander) transformer)
+        transformer)
+      value)))
+
 (defstruct expander-mark (subst context phi trace)
   print: ())
 
@@ -206,7 +222,7 @@ namespace: gx
     (raise-syntax-error #f "Bad syntax; illegal expression" stx hd))
 
   (def (expand-e form hd)
-    (let (bind (if (binding? form) form (resolve-identifier form)))
+    (let (bind (if (binding? form) form (resolve-identifier-binding form)))
       (cond
        ((core-expander-binding? bind)
         (core-apply-expander (&syntax-binding-e bind)
@@ -223,7 +239,7 @@ namespace: gx
      ((sealed-expression? hd) hd)
      ((stx-pair? hd)
       (let* ((form (stx-car hd))
-             (bind (and (identifier? form) (resolve-identifier form))))
+             (bind (and (identifier? form) (resolve-identifier-binding form))))
         (cond
          ((or (not bind)
               (not (core-expander-binding? bind)))
@@ -260,7 +276,7 @@ namespace: gx
 
 (def (core-expand1 stx)
   (def (step hd)
-    (let (bind (resolve-identifier hd))
+    (let (bind (resolve-identifier-binding hd))
       (cond
        ((runtime-binding? bind) stx)
        ((syntax-binding? bind)
@@ -327,7 +343,7 @@ namespace: gx
        (let (hd (core-expand-head hd))
          (core-syntax-case hd ()
            ((form . body)
-            (let (bind (and (identifier? form) (resolve-identifier form)))
+            (let (bind (and (identifier? form) (resolve-identifier-binding form)))
               (if (special-form-binding? bind)
                 (case (&binding-id bind)
                   ((%#begin)
@@ -473,13 +489,35 @@ namespace: gx
         ((_ . body)
          (core-cons id body))))))
 
+(def current-expander-macro-observer
+  (make-parameter #f))
+
 (def (core-apply-user-expander self stx (method 'apply-macro-expander))
+  (when (current-expander-macro-observer)
+    (let (binding
+          (core-syntax-case stx ()
+            ((head . _)
+             (identifier? head)
+             (resolve-identifier head))
+            (head
+             (identifier? head)
+             (resolve-identifier head))
+            (else #f)))
+      ((current-expander-macro-observer)
+       (current-expander-context) (current-expander-phi)
+       (&user-expander-context self) (&user-expander-phi self)
+       (and (syntax-binding? binding)
+            (eq? (&syntax-binding-e binding) self)
+            (binding-id binding))
+       method)))
+
   (when __DEBUG-EXPANDER
     (displayln "@expand " (syntax->datum stx))
     (force-output))
 
-  (with ((user-expander K ctx phi) self)
-    (core-apply-user-macro K stx ctx phi method)))
+  (core-apply-user-macro (user-expander-transformer self) stx
+                         (&user-expander-context self) (&user-expander-phi self)
+                         method))
 
 (def (core-apply-user-macro K stx ctx phi method)
   (let (mark (make-expander-mark #f ctx phi stx))
@@ -493,15 +531,33 @@ namespace: gx
   core-apply-user-expander)
 
 ;;; identifier bindings
+;; A binding returned to clients must support direct access to its slots.
+(def (publish-syntax-binding! bind)
+  (let lp ((target bind))
+    (cond
+     ((import-binding? target) (lp (&import-binding-e target)))
+     ((syntax-binding? target)
+      (let (e (&syntax-binding-e target))
+        (when (user-expander? e)
+          (user-expander-transformer e))))))
+  bind)
+
 (def (resolve-identifier stx
                          (phi (current-expander-phi))
                          (ctx (current-expander-context)))
-  (let lp ((bind (core-resolve-identifier stx phi ctx)))
+  (publish-syntax-binding! (resolve-identifier-binding stx phi ctx)))
+
+;; Internal name resolution keeps canonical binding identity without reading
+;; the transformer. Registration and identity tests use this path.
+(def (resolve-identifier-binding stx
+                                 (phi (current-expander-phi))
+                                 (ctx (current-expander-context)))
+  (let lp ((bind (core-find-identifier stx phi ctx)))
     (cond
      ((import-binding? bind)
       (lp (&import-binding-e bind)))
      ((alias-binding? bind)
-      (lp (core-resolve-identifier (&alias-binding-e bind) phi ctx)))
+      (lp (core-find-identifier (&alias-binding-e bind) phi ctx)))
      (else bind))))
 
 (def (bind-identifier! stx val
@@ -518,6 +574,9 @@ namespace: gx
 (def (core-resolve-identifier stx
                               (phi (current-expander-phi))
                               (ctx (current-expander-context)))
+  (publish-syntax-binding! (core-find-identifier stx phi ctx)))
+
+(def (core-find-identifier stx phi ctx)
   (let lp ((e stx) (marks (current-expander-marks)))
     (cond
      ((symbol? e)
@@ -770,13 +829,15 @@ namespace: gx
 
 (def (core-bound-identifier? id (bound? core-expander-binding?))
   (and (identifier? id)
-       (bound? (resolve-identifier id))))
+       (bound? (if (eq? bound? core-expander-binding?)
+                 (resolve-identifier-binding id)
+                 (resolve-identifier id)))))
 
 (def (core-identifier=? x y)
   (def (y=? xid)
     ((if (list? y) memq eq?) xid y))
 
-  (let (bind (resolve-identifier x))
+  (let (bind (resolve-identifier-binding x))
     (if (binding? bind)
       (y=? (&binding-id bind))
       (y=? (stx-e x)))))

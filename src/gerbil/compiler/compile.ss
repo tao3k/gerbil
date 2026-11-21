@@ -925,15 +925,28 @@ namespace: gxc
          (compile-e self #'K)
          (compile-e self #'E)]))))
 
+;; Collect binding identities while emitting the runtime and phase bodies.
+;; An absent binding denotes a backend symbol with no resolved source owner.
+(def current-compile-binding-observer (make-parameter #f))
+
+(def (generate-observed-binding-id kind id)
+  (let (symbol (generate-runtime-binding-id id))
+    (when (current-compile-binding-observer)
+      ((current-compile-binding-observer)
+       kind (current-expander-context) (current-expander-phi)
+       (and (syntax-quote? id) (resolve-identifier id))
+       symbol))
+    symbol))
+
 (def (generate-runtime-ref% self stx)
   (ast-case stx ()
     ((_ id)
-     (generate-runtime-binding-id #'id))))
+     (generate-observed-binding-id 'ref #'id))))
 
 (def (generate-runtime-setq% self stx)
   (ast-case stx ()
     ((_ id expr)
-     ['set! (generate-runtime-binding-id #'id)
+     ['set! (generate-observed-binding-id 'set! #'id)
        (compile-e self #'expr)])))
 
 (def (generate-runtime-struct-instancep% self stx)
