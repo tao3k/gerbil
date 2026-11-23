@@ -594,8 +594,9 @@
 (C-ffi-macrology)
 (C-include "<stdint.h>")
 
-(def-C-const __LITTLE_ENDIAN)
-(def native-endianness (if (zero? __LITTLE_ENDIAN) 'big 'little))
+(def-C-lambda native-little-endian? () bool
+  "const uint16_t word = 1; ___return(*(const unsigned char*)&word == 1);")
+(def native-endianness (if (native-little-endian?) 'little 'big))
 
 (def-C-lambda &u8vector-u16-ref/native (scheme-object int) unsigned-int16
   "uint16_t res = *(uint16_t*)(U8_DATA(___arg1) + ___arg2); ___return(res);")
