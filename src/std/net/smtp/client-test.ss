@@ -176,8 +176,11 @@
                           (expect (SMTP-domain smtp) (StreamSocket-domain sock))
                           (expect (SMTP-address smtp) (StreamSocket-address sock))
                           (expect (SMTP-peer-address smtp) addr)
+                          (SMTP-setsockopt smtp IPPROTO_TCP.TCP_NODELAY 0)
+                          (expect (SMTP-getsockopt smtp IPPROTO_TCP.TCP_NODELAY) 0)
                           (SMTP-setsockopt smtp IPPROTO_TCP.TCP_NODELAY 1)
-                          (expect (SMTP-getsockopt smtp IPPROTO_TCP.TCP_NODELAY) 1)
+                          ;; Darwin returns the enabled flag as a nonzero bitmask.
+                          (expect (zero? (SMTP-getsockopt smtp IPPROTO_TCP.TCP_NODELAY)) #f)
                           (SMTP-set-input-timeout! smtp (IOTimeout 3))
                           (SMTP-set-output-timeout! smtp (IOTimeout 3)))
                         (expect (SMTP-EHLO smtp "again.local") ["250-local" "250 OK"])
