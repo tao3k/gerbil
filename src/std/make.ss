@@ -250,6 +250,26 @@ TODO:
   (def max-heap (##get-max-heap))
   (unless (and (>= max-heap 0) (zero? (modulo max-heap 1024)))
     (error "Separate compiler cannot preserve the exact heap bound" max-heap))
+  ;; Preserve the declared package preludes registered by the build script.
+  ;; Send source identities instead of the parent's live expander contexts.
+  (def preludes
+    (filter-map
+     (lambda (prelude)
+       (and (core-library-module-path? prelude)
+            (let (binding (resolve-identifier prelude 0 (core-context-root)))
+              (and (syntax-binding? binding)
+                   (let (context (syntax-binding-e binding))
+                     (and (module-context? context)
+                          (let (path (module-context-path context))
+                            (and (string? path)
+                                 [prelude (expander-context-id context) path]))))))))
+     (delete-duplicates/hash
+      (map (lambda (spec)
+             (let-values (((prelude ns pkg)
+                           (core-read-module-package (spec-file spec settings) #f #f)))
+               prelude))
+           buildspec)
+      from-end?: #t)))
   (create-directory* (settings-libdir settings))
   ;; Task context is private build metadata, not an installable library product.
   (def cache-root
@@ -289,6 +309,16 @@ TODO:
                             (include ,(path-expand "lib/_gambit#.scm"
                                         (getenv "GERBIL_BUILD_PREFIX" (gerbil-home)))))))
                  [])
+             (for-each
+              (lambda (entry)
+                (apply
+                 (lambda (name identity path)
+                   (let (context (core-import-module path))
+                     (unless (eq? (expander-context-id context) identity)
+                       (error "Private compiler prelude changed identity" name path))
+                     (core-bind-root-syntax! name context #t)))
+                 entry))
+              ',preludes)
              (parameterize ((current-compilation-target ',(settings-target settings)))
                (eval '(begin
                         (import :std/make)
