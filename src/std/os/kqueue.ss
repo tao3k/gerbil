@@ -57,7 +57,8 @@
 
 (def-C-type/pointer kevent "ffi_kevent" release: "ffi_free")
 (def-C-type uintptr_t unsigned-long)
-(def-C-type void* (pointer "void"))
+;; kevent stores an opaque pointer and accepts every foreign tag.
+(def-C-type void* (pointer "void" #f))
 
 (def-C-syscall (ffi-kqueue)
   "kqueue()")

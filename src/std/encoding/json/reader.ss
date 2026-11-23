@@ -2,7 +2,7 @@
 ;;; © vyzo
 ;;; json reader
 (import :std/error
-        :std/io
+        :std/io/interface
         :std/io/bio/api
         :std/list/walist
         :std/encoding/hex

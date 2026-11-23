@@ -16,7 +16,9 @@
 (import
   (for-syntax :std/number/misc)
   :std/error
-  :std/io
+  :std/io/bio/api
+  (only-in :std/io/interface/bio BufferedReader)
+  (only-in :std/io/util with-buffered-reader)
   (only-in :std/text/parser/base ParseError? raise-parse-error)
   :std/iter
   :std/vector/u8vector

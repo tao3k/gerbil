@@ -33,7 +33,13 @@
 (def (parse (reader : BufferedReader)
             (env    : ReaderEnv)
             (anchor : Anchor))
-  (let loop ((sk [] :- :list) (esc? #f :- :boolean))
+  (parse-seeded reader env anchor []))
+
+(def (parse-seeded (reader : BufferedReader)
+                   (env    : ReaderEnv)
+                   (anchor : Anchor)
+                   (prefix : :list))
+  (let loop ((sk prefix :- :list) (esc? #f :- :boolean))
     (let (next (reader.peek-char-utf8))
       (cond
        ((eof-object? next)
@@ -200,6 +206,9 @@
                ((eq? next #\.)
                 (reader.read-char-utf8)
                 (cond
+                 ((let (following (reader.peek-char-utf8))
+                    (and (char? following) (char<=? #\0 following #\9)))
+                  (loop (cons (parse-seeded reader env (anchor.temporary) [#\.]) lst)))
                  ((not allow-improper?)
                   (raise-parse-error parse-list "unexpected character; improper list not allowed" char: next anchor: anchor))
                  ((null? lst)

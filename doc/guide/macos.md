@@ -175,6 +175,21 @@ sudo make install
 ```
 
 
+## Linking application phases into gxtest
+
+After building Gerbil and the packages required by your tests, rebuild the AOT
+tools from the Gerbil checkout with the test source files as arguments:
+
+```sh
+GERBIL_PATH=/path/to/built/package-root GERBIL_BUILD_AOT_TOOLS=yes \
+  ./build.sh tools /path/to/first-test.ss /path/to/second-test.ss
+```
+
+Leave `GERBIL_BUILD_OPTIMIZED` unset. The build resolves imports from each
+source file independently. At run time, gxtest uses a linked phase when the
+selected object in the Gerbil toolchain or `GERBIL_PATH/lib` matches its build-time
+digest. Other modules still use Gerbil's ordinary loader.
+
 ## Location and usage.
 
 We now have the lastest gerbil setup in the default manner. The symlinks and paths are for our usage. Gerbil will, by default, look in the directory where it is installed always.

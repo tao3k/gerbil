@@ -29,9 +29,6 @@ install_src() {
     install_src_files src/std "${prefix}" || die
     install_src_files src/tools "${prefix}" || die
     install_src_files src/lang/gerbil "${prefix}" || die
-    install_src_files src/lang/scheme "${prefix}" || die
-    install_src_files src/r7rs-large/scheme "${prefix}" || die
-    install_src_files src/srfi "${prefix}" || die
     install_src_files src/tutorial "${prefix}" || die
 }
 

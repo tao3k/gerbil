@@ -34,6 +34,16 @@
           (check (OSError-errno error) => ECONNREFUSED)
           (check (car (Error-irritants error)) => 'connect)
           (check (Error-where error) ? string?))))
+    (test-case "nonblocking accept pending survives until a client connects"
+      (let* ((listener (tcp-listen (InetAddress localhost4 0)))
+             (address (ServerSocket-address listener))
+             (server (spawn (lambda () (ServerSocket-accept listener))))
+             (_ (thread-sleep! 0.01))
+             (client (tcp-connect address (IOTimeout 2)))
+             (peer (thread-join! server)))
+        (Socket-close peer)
+        (Socket-close client)
+        (Socket-close listener)))
     (test-case "custom syscall raiser preserves EINTR and pending handling"
       (for-each
        (lambda (pending)

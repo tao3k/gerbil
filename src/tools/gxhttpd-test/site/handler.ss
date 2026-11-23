@@ -1,12 +1,13 @@
-(import :std/net/httpd
-        :std/format)
-(export handler-init! handle-request)
+(import :std/net/http/server)
+(export handler-init! request-handler)
 
 (def state "not initialized")
 
 (def (handler-init! cfg)
-  (set! state 'initialized))
+  (set! state "initialized"))
 
-(def (handle-request req res)
-  (http-response-write res 200 '(("Content-Type" . "text/plain"))
-                       (format "hello! I am a dynamic handler and my state is ~a~n" state)))
+(def (request-handler)
+  (new-closure-handler
+   (lambda (req (res :- ResponseHandler))
+     (res.write! OK '(("Content-Type" . "text/plain"))
+                 (string->utf8 (string-append "hello! I am a dynamic handler and my state is " state "\n"))))))

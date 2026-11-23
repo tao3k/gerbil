@@ -2,68 +2,92 @@ name: CI
 on: [push, pull_request]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    env:
+      GERBIL_CI_PREFIX: /opt/gerbil
     strategy:
       fail-fast: false  # if one fails, do not cancel the other
       matrix:
+        runner: [ubuntu-latest]
         gambit-version: ['', '--with-gambit=master']
         shared-mode: ['', '--enable-shared']
+        include:
+          - runner: macos-26
+            gambit-version: ''
+            shared-mode: '--enable-shared'
     steps:
       - uses: actions/checkout@v3
-      - name: Install dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get -y install openssl libssl-dev sqlite3 libsqlite3-dev
+      - name: Install Darwin dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          set -euo pipefail
+          brew install coreutils gcc openssl@3 pkg-config sqlite zlib
+          {
+            echo "CC=$(command -v gcc-16)"
+            echo "CXX=$(command -v g++-16)"
+            echo "GERBIL_GCC=$(command -v gcc-16)"
+            echo "CFLAGS=-pipe"
+            echo "GERBIL_CI_PREFIX=$RUNNER_TEMP/gerbil"
+            echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
+          } >> "$GITHUB_ENV"
       - name: Configure Gerbil
-        run: ./configure --prefix=/opt/gerbil ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
+        shell: bash
+        run: |
+          native_args=()
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            native_args=(--enable-march= --enable-smp --enable-c-opt=-O1
+                         --enable-c-opt-rts=yes --enable-gcc-opts --enable-inline-jumps
+                         --enable-dynamic-clib --enable-trust-c-tco --enable-single-host=0)
+          fi
+          ./configure --prefix="$GERBIL_CI_PREFIX" "${native_args[@]}" ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
       - name: Create Gerbil version file
         run: |
               echo "(def (gerbil-version-string) \"git-$(git rev-parse --short=8 HEAD)\")" > src/gerbil/runtime/version.ss
       - name: Prepare Build
-        run: |
-           . ./build-env.sh
-           GERBIL_BUILD_CORES=$(nproc) ./src/build.sh prepare
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh prepare
       - name: Build Gambit
-        run: |
-           . ./build-env.sh
-           GERBIL_BUILD_CORES=$(nproc) ./src/build.sh gambit
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh gambit
       - name: Build Gerbil boot gxi
-        run: |
-           . ./build-env.sh
-           GERBIL_BUILD_CORES=$(nproc) ./src/build.sh boot-gxi
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh boot-gxi
       - name: Build Gerbil stage0
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh stage0
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh stage0
       - name: Build Gerbil stage1
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh stage1
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh stage1
       - name: Build Gerbil stdlib
+        env:
+          STDLIB_DIAGNOSTICS: ${{ matrix.gambit-version == '--with-gambit=master' }}
         run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh stdlib
+          export GERBIL_BUILD_CORES="$(nproc)"
+          if [[ "$STDLIB_DIAGNOSTICS" == true ]]; then
+            bash .github/scripts/stdlib-diagnostics.sh
+          else
+            ./build.sh stdlib
+          fi
       - name: Build Gerbil libgerbil
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh libgerbil
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh libgerbil
       - name: Build Gerbil lang
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh lang
-      - name: Build Gerbil r7rs-large
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh r7rs-large
-      - name: Build Gerbil srfi shims
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh srfi
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh lang
       - name: Build Gerbil tools
-        run: |
-          . ./build-env.sh
-          GERBIL_BUILD_CORES=$(nproc) ./src/build.sh tools
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh tools
       - name: Install Gerbil
         run: ./install.sh
       - name: Run Gerbil tests
         run: |
-          export PATH=/opt/gerbil/bin:$PATH
+          export PATH="$GERBIL_CI_PREFIX/bin:$PATH"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            test ! -L "$GERBIL_CI_PREFIX/bin/gxtest"
+            # Leave room for the test socket filenames within sun_path.
+            export TMPDIR="$(mktemp -d /tmp/gerbil-tests.XXXXXXXX)"
+            # The multicast echo fixture runs entirely on this runner.
+            multicast_group=224.100.100.100
+            sudo /sbin/route -n add -host "$multicast_group" -interface lo0
+            trap 'sudo /sbin/route -n delete -host "$multicast_group" -interface lo0; rm -rf -- "$TMPDIR"' EXIT
+          fi
           gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...

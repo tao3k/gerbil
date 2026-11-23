@@ -9,11 +9,13 @@
         barrier-error!
         with-barrier-error)
 
+;; Scheme can raise #f; failure presence must not depend on payload truth.
 (defstruct Barrier ((mx    :- :mutex)
                     (cv    :- :condvar)
                     (count :- :fixnum)
                     (limit :- :fixnum)
-                    exn)
+                    exn
+                    (failed? :- :boolean))
   constructor: :init! final: #t )
 
 (defmethod {:init! Barrier}
@@ -21,7 +23,8 @@
     (set! self.mx (make-mutex 'barrier))
     (set! self.cv (make-condition-variable 'barrier))
     (set! self.count 0)
-    (set! self.limit limit)))
+    (set! self.limit limit)
+    (set! self.failed? #f)))
 
 (def (barrier-wait! (b : Barrier))
   => :void
@@ -29,7 +32,7 @@
     => :void
     (mutex-lock! b.mx)
     (cond
-     (b.exn
+     (b.failed?
       (mutex-unlock! b.mx)
       (abort! (raise b.exn)))
      ((fx< b.count b.limit)
@@ -50,10 +53,12 @@
     (mutex-unlock! b.mx)
     (void)))
 
+;; Preserve the first failure even when its value is #f.
 (def (barrier-error! (b : Barrier) exn)
   => :void
   (mutex-lock! b.mx)
-  (unless b.exn
+  (unless b.failed?
+    (set! b.failed? #t)
     (set! b.exn exn))
   (condition-variable-broadcast! b.cv)
   (mutex-unlock! b.mx)

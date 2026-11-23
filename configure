@@ -57,11 +57,13 @@ ${gambit_config_help}
 Options understood and processed by Gerbil:
   --prefix=PREFIX       where to install Gerbil; default prefix is /opt/gerbil
   --with-gambit=TAG     integrated gambit git tag to check out for the build;
-                        defaults to ${default_gambit_tag}
+                        defaults to the pinned submodule revision
   --enable-march=ARCH   specify the machine architecture; it can be empty.
                         defaults to native
   --enable-shared[=no]  do (not) use shared libraries for libgerbil and libgambit
   --disable-shared      default is to enable shared libraries
+  --enable-aot-tools    build native Gerbil tools (enabled by default on Darwin)
+  --disable-aot-tools   use the tools dispatched by gerbil
 
 Gerbil Standard Library features:
   --enable-deprecated   Enable building of deprecated packages; disabled by default
@@ -94,7 +96,7 @@ package_out_of_tree() {
 }
 
 readonly gerbil_targets=""
-readonly default_gambit_tag=0d67c5fbee88d26c32addaed8aea8c154695941e
+readonly default_gambit_tag=HEAD
 readonly default_gambit_config="--enable-targets=${gerbil_targets} --enable-single-host --enable-dynamic-clib --enable-default-runtime-options=tE8,f8,-8 --enable-trust-c-tco"
 prefix="/opt/gerbil"
 readonly cflags_opt="-foptimize-sibling-calls"
@@ -117,6 +119,7 @@ case $(uname) in
 esac
 
 gerbil_shared=f
+aot_tools_flag=
 gambit_tag="${default_gambit_tag}"
 gambit_config="${default_gambit_config}"
 gambit_shared="--disable-shared"
@@ -157,6 +160,11 @@ while [ $# -gt 0 ]; do
         --disable-shared|--enable-shared=no)
             gerbil_shared=f
             gambit_shared="--disable-shared"
+            shift
+            ;;
+
+        --enable-aot-tools|--disable-aot-tools)
+            aot_tools_flag=$1
             shift
             ;;
 
@@ -257,7 +265,13 @@ fi
 if [ ! -f MANIFEST -o ! -f src/gambit/configure ] ; then
   git submodule init || die
   git submodule update --force || die
-  (cd src/gambit && git fetch origin && git checkout "${gambit_tag}" && touch configure config.status) || die
+  (
+    cd src/gambit || exit 1
+    if [ "${gambit_tag}" != "${default_gambit_tag}" ]; then
+      git fetch origin && git checkout "${gambit_tag}" || exit 1
+    fi
+    touch configure config.status
+  ) || die
   unset gambit_stamp_version
 fi
 
@@ -286,6 +300,7 @@ rm -f build-env.sh
 cat > build-env.sh <<EOF
 GERBIL_PREFIX=${gerbil_prefix}
 GERBIL_VERSION=${gerbil_version}
+gerbil_aot_tools_flag=${aot_tools_flag}
 export GERBIL_PREFIX GERBIL_VERSION
 EOF
 

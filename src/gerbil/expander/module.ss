@@ -208,6 +208,36 @@ namespace: gx
        ((and (not reload?) (hash-get __module-registry npath)))
        (else (import-source npath)))))))
 
+;; Read default package identities cheaply. Explicit native headers use the
+;; canonical unexpanded reader; only opaque readers need the cached importer.
+(def (core-read-module-id rpath)
+  (let* ((path (core-resolve-module-path rpath))
+         (head (call-with-input-source-file path
+                 (lambda (port)
+                   (if (eqv? (peek-char port) #\#)
+                     #f
+                     (read-syntax port))))))
+    (cond
+     ((not head) (expander-context-id (core-import-module path)))
+     ((memq (stx-e head) '(prelude: namespace: package:))
+      (let-values (((pre id ns body) (core-read-module path))) id))
+     (else
+      (let-values (((pre ns pkg) (core-read-module-package path #f #f)))
+        (core-module-package-id path pkg))))))
+
+(def (core-module-package-id path pkg)
+  (let* ((path-id (core-module-path->namespace path))
+         (pkg-id (if pkg (string-append pkg "/" path-id) path-id)))
+    (string->symbol pkg-id)))
+
+;; Advisory source declarations only: never run an opaque/custom reader twice.
+;; Expansion remains the authority for actual dependency eligibility.
+(def (core-read-module-declaration rpath)
+  (let (path (core-resolve-module-path rpath))
+    (and (not (call-with-input-source-file path
+                (lambda (port) (eqv? (peek-char port) #\#))))
+         (let-values (((pre id ns body) (core-read-module path))) body))))
+
 (def (core-read-module path)
   (with-catch
    (lambda (exn)
@@ -268,7 +298,7 @@ namespace: gx
                  (stx-e pre))))
               (path-id   (core-module-path->namespace path))
               (pkg-id (if pkg (string-append pkg "/" path-id) path-id))
-              (module-id (string->symbol pkg-id))
+              (module-id (core-module-package-id path pkg))
               (module-ns (if (void? ns) #f (or ns pkg-id))))
          (values prelude module-id module-ns body))))))
 
@@ -304,7 +334,7 @@ namespace: gx
              (else default-read-module-body)))
            (path-id (core-module-path->namespace path))
            (pkg-id (if pkg (string-append pkg "/" path-id) path-id))
-           (module-id (string->symbol pkg-id))
+           (module-id (core-module-package-id path pkg))
            (module-ns (or ns pkg-id))
            (body
             (parameterize ((current-module-reader-path path)

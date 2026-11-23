@@ -1,17 +1,27 @@
 #!/usr/bin/env gxi
 ;; -*- Gerbil -*-
 
-(def srcdir (path-normalize (path-directory (this-source-file))))
-(def libdir (path-expand "lib" (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
-(add-load-path! srcdir)
+(import :gerbil/compiler)
 
-(let (gambit-sharp
-      (path-expand "lib/_gambit#.scm"
-                   (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
-  (eval `(begin-foreign (include ,gambit-sharp))))
+(def (build-stdlib)
+  (def srcdir (path-normalize (path-directory (this-source-file))))
+  (def libdir (path-expand "lib" (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
+  (add-load-path! srcdir)
 
-;; The indirection below allows the build-std to do its imports in a module context, transitively
-(gx#import-module "build-std.ss" #t #t)
-((eval 'std/build-std#build)
- srcdir: srcdir libdir: libdir debug: #t
- target: (string->symbol (getenv "GERBIL_BUILD_TARGET" "C")))
+  (let (gambit-sharp
+        (path-expand "lib/_gambit#.scm"
+                     (getenv "GERBIL_BUILD_PREFIX" (gerbil-home))))
+    (eval `(begin-foreign (include ,gambit-sharp))))
+
+  ;; The indirection below allows the build-std to do its imports in a module context, transitively
+  (gx#import-module "build-std.ss" #t #t)
+  ((eval 'std/build-std#build)
+   srcdir: srcdir libdir: libdir debug: #t
+   target: (string->symbol (getenv "GERBIL_BUILD_TARGET" "C"))))
+
+(match (cddr (command-line))
+  (["--emit-native" path]
+   (call-with-compilation-output path build-stdlib))
+  (["--compile-native" path]
+   (execute-compilation-output path))
+  (else (build-stdlib)))

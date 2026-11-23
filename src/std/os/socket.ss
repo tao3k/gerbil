@@ -99,9 +99,13 @@
               (else
                (let (fd (do-syscall (__accept sock.fd sa)
                                     EAGAIN EWOULDBLOCK))
-                 (with-error (__close-fd fd)
-                   (fcntl-setfl! fd O_NONBLOCK)
-                   (fcntl-setfd! fd FD_CLOEXEC))
+                 ;; A nonblocking accept may report EAGAIN as a negative
+                 ;; pending result.  Do not pass that sentinel through the
+                 ;; accepted-fd setup/cleanup path.
+                 (unless (fx< fd 0)
+                   (with-error (__close-fd fd)
+                     (fcntl-setfl! fd O_NONBLOCK)
+                     (fcntl-setfd! fd FD_CLOEXEC)))
                  fd)))))
       (if (fx< fd 0)
         fd
@@ -205,13 +209,26 @@
                            (how :- :fixnum))
   "shutdown(___arg1, ___arg2)")
 
-(def-C-syscall (__bind (fd   :- :fixnum)
-                       (addr :- sockaddr))
-  "bind(___arg1, ___arg2, (socklen_t)___U8VECTORSIZE(___ARG2))")
+(cond-expand
+ (darwin
+  ;; Darwin rejects an outbound sockaddr when socklen_t disagrees with the
+  ;; structure's leading sa_len byte.  The FFI value is a max-sized union, so
+  ;; its backing u8vector length is not the native endpoint length.
+  (def-C-syscall (__bind (fd   :- :fixnum)
+                         (addr :- sockaddr))
+    "bind(___arg1, ___arg2, (socklen_t)___arg2->sa_len)")
 
-(def-C-syscall (__connect (fd   :- :fixnum)
-                          (addr :- sockaddr))
-  "connect(___arg1, ___arg2, (socklen_t)___U8VECTORSIZE(___ARG2))")
+  (def-C-syscall (__connect (fd   :- :fixnum)
+                            (addr :- sockaddr))
+    "connect(___arg1, ___arg2, (socklen_t)___arg2->sa_len)"))
+ (else
+  (def-C-syscall (__bind (fd   :- :fixnum)
+                         (addr :- sockaddr))
+    "bind(___arg1, ___arg2, (socklen_t)___U8VECTORSIZE(___ARG2))")
+
+  (def-C-syscall (__connect (fd   :- :fixnum)
+                            (addr :- sockaddr))
+    "connect(___arg1, ___arg2, (socklen_t)___U8VECTORSIZE(___ARG2))")))
 
 (def-C-syscall (__listen (fd      :- :fixnum)
                          (backlog :- :fixnum))
@@ -242,13 +259,23 @@
                        (flags   :- :fixnum))
   "recv(___arg1, (void*)(___arg2 + ___arg3), ___arg4, ___arg5)")
 
-(def-C-syscall (__sendto (fd      :- :fixnum)
-                         (input   :- :u8vector)
-                         (start   :- :fixnum)
-                         (count   :- :fixnum)
-                         (flags   :- :fixnum)
-                         (dest    :- sockaddr))
-  "sendto(___arg1, (void*)(___arg2 + ___arg3), ___arg4, ___arg5, ___arg6, (socklen_t)___U8VECTORSIZE(___ARG6))")
+(cond-expand
+ (darwin
+  (def-C-syscall (__sendto (fd      :- :fixnum)
+                           (input   :- :u8vector)
+                           (start   :- :fixnum)
+                           (count   :- :fixnum)
+                           (flags   :- :fixnum)
+                           (dest    :- sockaddr))
+    "sendto(___arg1, (void*)(___arg2 + ___arg3), ___arg4, ___arg5, ___arg6, (socklen_t)___arg6->sa_len)"))
+ (else
+  (def-C-syscall (__sendto (fd      :- :fixnum)
+                           (input   :- :u8vector)
+                           (start   :- :fixnum)
+                           (count   :- :fixnum)
+                           (flags   :- :fixnum)
+                           (dest    :- sockaddr))
+    "sendto(___arg1, (void*)(___arg2 + ___arg3), ___arg4, ___arg5, ___arg6, (socklen_t)___U8VECTORSIZE(___ARG6))")))
 
 (def-C-syscall (__recvfrom (fd      :- :fixnum)
                            (input   :- :u8vector)

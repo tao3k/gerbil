@@ -3,7 +3,7 @@
 ;;; json utilities
 (import :std/error
         :std/format/ioutil
-        :std/io
+        (only-in :std/io/util with-buffered-reader with-buffered-writer)
         :std/io/bio/api
         :std/iter
         :std/list/alist

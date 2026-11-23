@@ -1,4 +1,4 @@
 [submodule "src/gambit"]
 	path = src/gambit
-	url = https://git.cons.io/mighty-gerbils/gambit.git
-	branch = gerbil-patches
+	url = https://github.com/tao3k/gambit.git
+	branch = darwin-patches
