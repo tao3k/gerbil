@@ -973,13 +973,16 @@ namespace: gxc
           (standard-bindings)
           (extended-bindings)
           ,@(if phi? '((inlining-limit 200)) '())))
-      ;; Keep small compilation-support units in their configured host mode.
-      ;; Larger units use Gambit's procedure hosts to avoid one huge C function.
-      (cond-expand
-        ((or darwin linux)
-         (when (and phi? (eq? (current-compilation-target) 'C))
-           (pretty-print '(##meta-info cc-options "-D___SINGLE_HOST_LIMIT=8192"))))
-        (else (void)))
+      ;; Gambit keeps the configured host mode below the label limit.
+      ;; Apply the same fallback to Linux package runtimes, whose C objects can
+      ;; be as large as compilation-support objects.
+      (when (and (eq? (current-compilation-target) 'C)
+                 (cond-expand
+                  (linux (or phi?
+                             (and static-path (not (gerbil-toolchain-static-path? static-path)))))
+                  (darwin phi?)
+                  (else #f)))
+        (pretty-print '(##meta-info cc-options "-D___SINGLE_HOST_LIMIT=8192")))
       (pretty-print code)))
   (cond
    ((current-compilation-output)
