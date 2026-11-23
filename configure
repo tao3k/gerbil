@@ -62,6 +62,8 @@ Options understood and processed by Gerbil:
                         defaults to native
   --enable-shared[=no]  do (not) use shared libraries for libgerbil and libgambit
   --disable-shared      default is to enable shared libraries
+  --enable-aot-tools    build native Gerbil tools (enabled by default on Darwin)
+  --disable-aot-tools   use the tools dispatched by gerbil
 
 Gerbil Standard Library features:
   --enable-deprecated   Enable building of deprecated packages; disabled by default
@@ -117,6 +119,7 @@ case $(uname) in
 esac
 
 gerbil_shared=f
+aot_tools_flag=
 gambit_tag="${default_gambit_tag}"
 gambit_config="${default_gambit_config}"
 gambit_shared="--disable-shared"
@@ -157,6 +160,11 @@ while [ $# -gt 0 ]; do
         --disable-shared|--enable-shared=no)
             gerbil_shared=f
             gambit_shared="--disable-shared"
+            shift
+            ;;
+
+        --enable-aot-tools|--disable-aot-tools)
+            aot_tools_flag=$1
             shift
             ;;
 
@@ -292,6 +300,7 @@ rm -f build-env.sh
 cat > build-env.sh <<EOF
 GERBIL_PREFIX=${gerbil_prefix}
 GERBIL_VERSION=${gerbil_version}
+gerbil_aot_tools_flag=${aot_tools_flag}
 export GERBIL_PREFIX GERBIL_VERSION
 EOF
 
