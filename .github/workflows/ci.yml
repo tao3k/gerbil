@@ -2,18 +2,51 @@ name: CI
 on: [push, pull_request]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    env:
+      GERBIL_CI_PREFIX: /opt/gerbil
     strategy:
       fail-fast: false  # if one fails, do not cancel the other
       matrix:
+        runner: [ubuntu-latest]
         gambit-version: ['', '--with-gambit=master']
         shared-mode: ['', '--enable-shared']
+        include:
+          - runner: macos-26
+            gambit-version: ''
+            shared-mode: ''
     steps:
       - uses: actions/checkout@v3
-      - name: Install dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get -y install openssl libssl-dev sqlite3 libsqlite3-dev
+      - name: Install Darwin dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          set -euo pipefail
+          brew install coreutils gcc openssl@3 pkg-config sqlite zlib
+          {
+            echo "CC=$(command -v gcc-16)"
+            echo "CXX=$(command -v g++-16)"
+            echo "GERBIL_GCC=$(command -v gcc-16)"
+            echo "CFLAGS=-pipe"
+            echo "GERBIL_CI_PREFIX=$RUNNER_TEMP/gerbil"
+            echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
+          } >> "$GITHUB_ENV"
       - name: Configure Gerbil
-        run: ./configure --prefix=/opt/gerbil ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
+        shell: bash
+        run: |
+          native_args=()
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            native_args=(--enable-march= --enable-smp --enable-c-opt=-O1
+                         --enable-c-opt-rts=yes --enable-gcc-opts --enable-inline-jumps
+                         --enable-dynamic-clib --enable-trust-c-tco --enable-single-host=0)
+          fi
+          ./configure --prefix="$GERBIL_CI_PREFIX" "${native_args[@]}" ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
       - name: Create Gerbil version file
         run: |
               echo "(def (gerbil-version-string) \"git-$(git rev-parse --short=8 HEAD)\")" > src/gerbil/runtime/version.ss
@@ -47,5 +80,8 @@ jobs:
         run: ./install.sh
       - name: Run Gerbil tests
         run: |
-          export PATH=/opt/gerbil/bin:$PATH
+          export PATH="$GERBIL_CI_PREFIX/bin:$PATH"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            test ! -L "$GERBIL_CI_PREFIX/bin/gxtest"
+          fi
           gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...
