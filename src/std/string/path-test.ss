@@ -164,7 +164,7 @@
       (check (ensure-absolute-path "foo" #f) => (subpath (current-directory) "foo"))
       (check-exception (ensure-absolute-path "foo" "bar") true))
     (test-case "path-maybe-normalize"
-      (check (path-maybe-normalize "/etc/.") => "/etc/")
+      (check (path-maybe-normalize "/etc/.") => (path-normalize "/etc/"))
       (check (path-maybe-normalize "/../../../does////../not/../exist/../etc") => "/etc"))
     (test-case "path-enough"
       (check (path-enough "/home/user/.gerbil/lib" "/home/user") => ".gerbil/lib")

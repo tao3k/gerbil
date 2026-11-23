@@ -14,7 +14,7 @@ jobs:
         include:
           - runner: macos-26
             gambit-version: ''
-            shared-mode: ''
+            shared-mode: '--enable-shared'
     steps:
       - uses: actions/checkout@v3
       - name: Install Linux dependencies
@@ -83,5 +83,8 @@ jobs:
           export PATH="$GERBIL_CI_PREFIX/bin:$PATH"
           if [[ "$RUNNER_OS" == macOS ]]; then
             test ! -L "$GERBIL_CI_PREFIX/bin/gxtest"
+            # Leave room for the test socket filenames within sun_path.
+            export TMPDIR="$(mktemp -d /tmp/gerbil-tests.XXXXXXXX)"
+            trap 'rm -rf -- "$TMPDIR"' EXIT
           fi
           gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...
