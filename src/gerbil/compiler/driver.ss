@@ -461,7 +461,7 @@ namespace: gxc
             (link-executable))
           (if (current-compile-parallel)
             (cond-expand
-              (darwin
+              ((or darwin linux)
                ;; A closure never regenerates shared C. Matching graph products
                ;; have one registered writer; other recipes get private outputs.
                (let* ((private (create-temporary-directory
