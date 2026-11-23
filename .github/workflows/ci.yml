@@ -85,6 +85,9 @@ jobs:
             test ! -L "$GERBIL_CI_PREFIX/bin/gxtest"
             # Leave room for the test socket filenames within sun_path.
             export TMPDIR="$(mktemp -d /tmp/gerbil-tests.XXXXXXXX)"
-            trap 'rm -rf -- "$TMPDIR"' EXIT
+            # The multicast echo fixture runs entirely on this runner.
+            multicast_group=224.100.100.100
+            sudo /sbin/route -n add -host "$multicast_group" -interface lo0
+            trap 'sudo /sbin/route -n delete -host "$multicast_group" -interface lo0; rm -rf -- "$TMPDIR"' EXIT
           fi
           gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...
