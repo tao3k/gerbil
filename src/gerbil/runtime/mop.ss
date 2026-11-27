@@ -1269,6 +1269,18 @@ namespace: #f
     (make-symbol (##type-name type) "::t"))
   (def (shadow-type-name type)
     (##type-name type))
+  (def (lookup-shadow-class type)
+    (__do-inline-lock! __shadow-classes-lock
+      (symbolic-table-ref __shadow-classes (##type-id type) #f)))
+  (def (intern-shadow-class! type klass)
+    (__do-inline-lock! __shadow-classes-lock
+      (or (symbolic-table-ref __shadow-classes (##type-id type) #f)
+          (begin
+            (symbolic-table-set! __shadow-classes (##type-id type) klass)
+            klass))))
+  ;; Construct shadow classes outside __shadow-classes-lock so exceptions or
+  ;; asynchronous thread-terminate! cannot poison the global lock; single-winner
+  ;; insert-if-absent guarantees one canonical class per type across SMP cores.
   (def (make-shadow-class type precedence-list)
     (let* ((super
             (if (pair? precedence-list)
@@ -1290,35 +1302,23 @@ namespace: #f
               properties ...]           ; properties
              #f                         ; constructor
              )))
-      (symbolic-table-set! __shadow-classes (##type-id type) klass)
-      klass))
+      (intern-shadow-class! type klass)))
 
-  (__lock-inline! __shadow-classes-lock)
-  (cond
-   ((symbolic-table-ref __shadow-classes (##type-id type) #f)
-    => (lambda (klass)
-         (__unlock-inline! __shadow-classes-lock)
-         klass))
-   (else
-    (let loop ((super (##type-super type)) (hierarchy []))
-      (cond
-       ((not super)
-        (let loop ((rest hierarchy) (precedence-list []))
-          (match rest
-            ([type . rest]
-             (cond
-              ((symbolic-table-ref __shadow-classes (##type-id type) #f)
-               => (lambda (klass)
-                    (loop rest (cons klass precedence-list))))
+  (or (lookup-shadow-class type)
+      (let loop ((super (##type-super type)) (hierarchy []))
+        (cond
+         ((not super)
+          (let loop ((rest hierarchy) (precedence-list []))
+            (match rest
+              ([t . rest]
+               (let (klass (or (lookup-shadow-class t)
+                               (make-shadow-class t precedence-list)))
+                 (loop rest (cons klass precedence-list))))
               (else
-               (let (klass (make-shadow-class type precedence-list))
-                 (loop rest (cons klass precedence-list))))))
-            (else
-             (let (klass (make-shadow-class type precedence-list))
-               (__unlock-inline! __shadow-classes-lock)
-               klass)))))
-       (else
-        (loop (##type-super super) (cons super hierarchy))))))))
+               (or (lookup-shadow-class type)
+                   (make-shadow-class type precedence-list))))))
+         (else
+          (loop (##type-super super) (cons super hierarchy)))))))
 
 ;; support for the type-of/class-of operators
 (cond-expand

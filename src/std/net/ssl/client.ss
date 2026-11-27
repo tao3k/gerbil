@@ -78,9 +78,11 @@
   (force __insecure-client-ssl-context))
 
 (def __default-client-ssl-context
-  (delay
-    (check-pointer default-client-ssl-context (make-client-ssl-context))))
+  (make-atomic-promise
+   (lambda ()
+     (check-pointer default-client-ssl-context (make-client-ssl-context)))))
 
 (def __insecure-client-ssl-context
-  (delay
-    (check-pointer insecure-client-ssl-context (make-insecure-client-ssl-context))))
+  (make-atomic-promise
+   (lambda ()
+     (check-pointer insecure-client-ssl-context (make-insecure-client-ssl-context)))))

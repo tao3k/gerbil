@@ -66,7 +66,18 @@
      ((or (fx> rw.readers 0) rw.writer)
       (unless waiting?
         (set! rw.writers-waiting (fx+ rw.writers-waiting 1)))
-      (mutex-unlock! rw.mx rw.wcv)
+      (let (woke? #f)
+        (unwind-protect
+          (begin
+            (mutex-unlock! rw.mx rw.wcv)
+            (set! woke? #t))
+          (unless woke?
+            (mutex-lock! rw.mx)
+            (set! rw.writers-waiting (fx- rw.writers-waiting 1))
+            (when (and (fx= rw.writers-waiting 0)
+                       (not rw.writer))
+              (condition-variable-broadcast! rw.rcv))
+            (mutex-unlock! rw.mx))))
       (loop #t))
      (else
       (when waiting?

@@ -11,10 +11,16 @@ jobs:
         runner: [ubuntu-latest]
         gambit-version: ['', '--with-gambit=master']
         shared-mode: ['', '--enable-shared']
+        smp-mode: ['']
         include:
+          - runner: ubuntu-latest
+            gambit-version: ''
+            shared-mode: '--enable-shared'
+            smp-mode: '--enable-smp --enable-multiple-vms --enable-multiple-threaded-vms'
           - runner: macos-26
             gambit-version: ''
             shared-mode: '--enable-shared'
+            smp-mode: '--enable-smp --enable-multiple-vms --enable-multiple-threaded-vms'
     steps:
       - uses: actions/checkout@v3
       - name: Install Linux dependencies
@@ -37,16 +43,21 @@ jobs:
             echo "GERBIL_CI_PREFIX=$RUNNER_TEMP/gerbil"
             echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
           } >> "$GITHUB_ENV"
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
       - name: Configure Gerbil
         shell: bash
         run: |
           native_args=()
           if [[ "$RUNNER_OS" == macOS ]]; then
-            native_args=(--enable-march= --enable-smp --enable-c-opt=-O1
+            native_args=(--enable-march= --enable-c-opt=-O1
+                         --enable-c-opt-rts=yes --enable-gcc-opts --enable-inline-jumps
+                         --enable-dynamic-clib --enable-trust-c-tco --enable-single-host=0)
+          elif [[ "${{ matrix.smp-mode }}" == *"--enable-smp"* ]]; then
+            native_args=(--enable-march= --enable-c-opt=-O1
                          --enable-c-opt-rts=yes --enable-gcc-opts --enable-inline-jumps
                          --enable-dynamic-clib --enable-trust-c-tco --enable-single-host=0)
           fi
-          ./configure --prefix="$GERBIL_CI_PREFIX" "${native_args[@]}" ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
+          ./configure --prefix="$GERBIL_CI_PREFIX" "${native_args[@]}" ${{ matrix.smp-mode }} ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
       - name: Create Gerbil version file
         run: |
               echo "(def (gerbil-version-string) \"git-$(git rev-parse --short=8 HEAD)\")" > src/gerbil/runtime/version.ss
@@ -89,5 +100,11 @@ jobs:
             multicast_group=224.100.100.100
             sudo /sbin/route -n add -host "$multicast_group" -interface lo0
             trap 'sudo /sbin/route -n delete -host "$multicast_group" -interface lo0; rm -rf -- "$TMPDIR"' EXIT
+          fi
+          if [[ "${{ matrix.smp-mode }}" == *"--enable-smp"* ]]; then
+            procs="$(GAMBOPT=p4 gxi -e '(display (##current-vm-processor-count))')"
+            echo "SMP gxi processor count under GAMBOPT=p4: $procs"
+            test "$procs" -ge 2
+            GAMBOPT=p4 gxtest -q src/gerbil/test/smp-runtime-test.ss src/std/actor/... src/std/sync/... src/std/net/ssl/socket-test.ss src/std/net/repl-test.ss
           fi
           gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...

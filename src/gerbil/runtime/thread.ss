@@ -109,17 +109,14 @@ namespace: #f
      ((eq? thr ##primordial-thread)
       __primordial-thread-locals)
      (else
-      (mutex-lock! __thread-locals-mutex)
-      (cond
-       ((hash-get __thread-locals thr)
-        => (lambda (tab)
-             (mutex-unlock! __thread-locals-mutex)
-             tab))
-       (else
-        (let (tab (make-hash-table-eq))
-          (hash-put! __thread-locals thr tab)
-          (mutex-unlock! __thread-locals-mutex)
-          tab)))))))
+      (with-lock __thread-locals-mutex
+        (lambda ()
+          (cond
+           ((hash-get __thread-locals thr))
+           (else
+            (let (tab (make-hash-table-eq))
+              (hash-put! __thread-locals thr tab)
+              tab)))))))))
 
 (def __primordial-thread-locals
   (make-hash-table-eq))
@@ -137,6 +134,7 @@ namespace: #f
 
 (def (with-lock (mx : :mutex) (proc : :procedure))
   (let (handler (current-exception-handler))
+    (mutex-lock! mx)
     (with-exception-handler
      (lambda (e)
        (with-catch void
@@ -146,7 +144,6 @@ namespace: #f
        ;; if the handler returns here the state is inconsistent -- we need to bail
        (##thread-end-with-uncaught-exception! e))
      (lambda ()
-       (mutex-lock! mx)
        (let (result (proc))
          (mutex-unlock! mx)
          result)))))

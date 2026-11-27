@@ -85,13 +85,20 @@ namespace: #f
   (alet (super (##type-super klass))
     (eq? (##type-id super) (##type-id interface-instance::t))))
 
+(def __class-type-interface-lock (__make-inline-lock))
+
 (def (class-type-interface-table klass)
   (cond
    ((&class-type-interface klass))
    (else
-    (let (tab (make-prototype-table))
-      (set! (&class-type-interface klass) tab)
-      tab))))
+    ;; Allocate candidate outside lock; single-winner publish prevents concurrent
+    ;; SMP interface casts from clobbering each other's prototype-table.
+    (let (candidate (make-prototype-table))
+      (__do-inline-lock! __class-type-interface-lock
+        (or (&class-type-interface klass)
+            (begin
+              (set! (&class-type-interface klass) candidate)
+              candidate)))))))
 
 (defrules do-create-prototype ()
   ((_ descriptor klass obj-klass continue fail!)

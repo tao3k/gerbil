@@ -24,21 +24,22 @@
     (set! self.mx (make-mutex name))
     (set! self.cv (make-condition-variable name))))
 
-(defrule (completion-reset! c)
-  (begin
-    (set! (Completion-ready? c) #f)
-    (set! (Completion-val c) #f)
-    (set! (Completion-exn c) #f)))
+(def (completion-reset! (c : Completion))
+  (mutex-lock! c.mx)
+  (set! c.ready? #f)
+  (set! c.val #f)
+  (set! c.exn #f)
+  (mutex-unlock! c.mx)
+  (void))
 
 (def (completion-wait! (c : Completion))
   (let lp ()
     (mutex-lock! c.mx)
     (if c.ready?
-      (begin
+      (let ((exn c.exn)
+            (val c.val))
         (mutex-unlock! c.mx)
-        (cond
-         (c.exn => raise)
-         (else c.val)))
+        (if exn (raise exn) val))
       (begin
         (mutex-unlock! c.mx c.cv)
         (lp)))))
@@ -53,8 +54,8 @@
       (begin
         (set-e c val)
         (set! c.ready? #t)
-        (mutex-unlock! c.mx)
         (condition-variable-broadcast! c.cv)
+        (mutex-unlock! c.mx)
         (void)))))
 
 (def (completion-post! (compl : Completion) val)

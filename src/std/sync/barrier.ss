@@ -33,8 +33,9 @@
     (mutex-lock! b.mx)
     (cond
      (b.failed?
-      (mutex-unlock! b.mx)
-      (abort! (raise b.exn)))
+      (let (exn b.exn)
+        (mutex-unlock! b.mx)
+        (abort! (raise exn))))
      ((fx< b.count b.limit)
       (mutex-unlock! b.mx b.cv)
       (loop))

@@ -688,16 +688,57 @@ namespace: #f
 (def __object-eq-hash
   (make-gc-table 1024 __gc-table::t (macro-gc-hash-table-flag-weak-keys)))
 
-(def (__object->eq-hash obj)
+(def (__object->eq-hash/global obj)
   (declare (not interrupts-enabled))
-  (let (val (gc-table-ref __object-eq-hash obj #f))
-    (if val
-      val
-      (__do-inline-lock! __object-eq-hash-lock
-        (let (val (gc-table-ref __object-eq-hash obj #f))
-          (if val
-            val
-            (let (h (fxand __object-eq-hash  (macro-max-fixnum32)))
-              (set! __object-eq-hash-next (or (##fx+? __object-eq-hash-next 1) 0))
-              (gc-table-set! __object-eq-hash obj h)
-              h)))))))
+  ;; Serialize both lookup and insert under __object-eq-hash-lock: gc-table-ref
+  ;; may trigger __gc-table-rehash! after GC, which is unsafe without the lock.
+  (__do-inline-lock! __object-eq-hash-lock
+    (let (val (gc-table-ref __object-eq-hash obj #f))
+      (if val
+        val
+        (let (h (fxand __object-eq-hash-next (macro-max-fixnum32)))
+          (set! __object-eq-hash-next (or (##fx+? __object-eq-hash-next 1) 0))
+          (gc-table-set! __object-eq-hash obj h)
+          h)))))
+
+(cond-expand
+ (gerbil-smp
+  (extern ##current-processor-id)
+  (def __object-eq-hash-shards 64)
+  (def __object-eq-hash-caches
+    (make-vector __object-eq-hash-shards #f))
+  ;; Pad each per-processor inline lock to 128 bytes (16 words on 64-bit) to
+  ;; eliminate false sharing across Apple Silicon / x86 cache lines.
+  (def __object-eq-hash-cache-locks
+    (let (v (make-vector __object-eq-hash-shards #f))
+      (let lp ((i 0))
+        (when (fx< i __object-eq-hash-shards)
+          (vector-set! v i (make-vector 16 #f))
+          (lp (fx+ i 1))))
+      v))
+
+  (def (__object->eq-hash obj)
+    (declare (not interrupts-enabled))
+    (let* ((pid (fxand (##current-processor-id) 63))
+           (lk (vector-ref __object-eq-hash-cache-locks pid))
+           (hit
+            (__do-inline-lock! lk
+              (let (cache (vector-ref __object-eq-hash-caches pid))
+                (if cache
+                  (gc-table-ref cache obj #f)
+                  #f)))))
+      (if hit
+        hit
+        (let (h (__object->eq-hash/global obj))
+          (__do-inline-lock! lk
+            (let (cache
+                  (or (vector-ref __object-eq-hash-caches pid)
+                      (let (c (make-gc-table 256 __gc-table::t
+                                             (macro-gc-hash-table-flag-weak-keys)))
+                        (vector-set! __object-eq-hash-caches pid c)
+                        c)))
+              (gc-table-set! cache obj h)))
+          h)))))
+ (else
+  (def (__object->eq-hash obj)
+    (__object->eq-hash/global obj))))

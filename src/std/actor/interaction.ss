@@ -41,17 +41,20 @@
          (let (dest in-reply.source)
            (cond
             ((LocalActor? dest)
-             (send-message!
-              (Envelope source:   (actor-local-peer)
-                        dest:     dest
-                        message:  msg
-                        protocol: in-reply.protocol
-                        continue: reply.seqno
-                        options:
-                        (if (or continue in-reply.options.expire)
-                          (Options expire: in-reply.options.expire
-                                   continue: continue)
-                          #f))))
+             (let* ((exp in-reply.options.expire)
+                    (env (Envelope source:   (actor-local-peer)
+                                   dest:     dest
+                                   message:  msg
+                                   protocol: in-reply.protocol
+                                   continue: reply.seqno
+                                   options:
+                                   (if (or continue exp)
+                                     (Options expire: exp
+                                              continue: continue)
+                                     #f))))
+               (unless (and exp (<= exp (##current-time-point)))
+                 (using (d dest :- LocalActor)
+                   (thread-send d.thread env)))))
             ((Handle? dest)
              (using (host (actor-local-host) : ActorHost)
                (host.send-reply! msg in-reply continue)))
@@ -100,15 +103,19 @@
             expire:  (expire :? :integer := #f))
   => Envelope
   (let* ((seqno (actor-next-seqno!))
-         (deadline (or expire (+ (##current-time-point) timeo)))
-         (expire (exact (ceiling deadline))))
-    (send-message!
-     (Envelope source: (actor-local-peer)
-               dest: dest
-               message: msg
-               protocol: protocol
-               options: (Options expire: expire
-                                 continue: (ReplyOption seqno: seqno))))
+         (now (##current-time-point))
+         (deadline (or expire (+ now timeo)))
+         (exp (exact (ceiling deadline)))
+         (env (Envelope source: (actor-local-peer)
+                        dest: dest
+                        message: msg
+                        protocol: protocol
+                        options: (Options expire: exp
+                                          continue: (ReplyOption seqno: seqno)))))
+    (if (and (LocalActor? dest) (not (<= exp now)))
+      (using (d dest :- LocalActor)
+        (thread-send d.thread env))
+      (send-message! env))
     (<- continue: seqno
         timeout: (seconds->time deadline)
         protocol: protocol
@@ -216,24 +223,26 @@
                   (receive (genident 'receive)))
       #'(lambda ($envelope)
           (let receive (($envelope $envelope))
-            (if (envelope-expired? $envelope)
-              (let (next (mailbox-extract-and-next))
-                (if (eq? next mailbox-empty)
-                  (loop)
-                  (receive next)))
-              (match $envelope
-                ((Envelope source: $source message: $message protocol: $protocol continue: $continue)
-                 (syntax-parameterize ((@@envelope (quote-syntax $envelope))
-                                       (@@source   (quote-syntax $source))
-                                       (@@message  (quote-syntax $message))
-                                       (@@protocol (quote-syntax $protocol))
-                                       (@@continue (quote-syntax $continue)))
-                   (match* ($protocol $continue $message)
-                     (((equal? proto) (eqv? cont) pat)
-                      (thread-mailbox-extract-and-rewind)
-                      body ...) ...
-                     (else (loop)))))
-                (else (loop))))))))
+            (if (Envelope? $envelope)
+              (if (and (Envelope-options $envelope) (envelope-expired? $envelope))
+                (let (next (mailbox-extract-and-next))
+                  (if (eq? next mailbox-empty)
+                    (loop)
+                    (receive next)))
+                (match $envelope
+                  ((Envelope source: $source message: $message protocol: $protocol continue: $continue)
+                   (syntax-parameterize ((@@envelope (quote-syntax $envelope))
+                                         (@@source   (quote-syntax $source))
+                                         (@@message  (quote-syntax $message))
+                                         (@@protocol (quote-syntax $protocol))
+                                         (@@continue (quote-syntax $continue)))
+                     (match* ($protocol $continue $message)
+                       (((equal? proto) (eqv? cont) pat)
+                        (thread-mailbox-extract-and-rewind)
+                        body ...) ...
+                       (else (loop)))))
+                  (else (loop))))
+              (loop))))))
 
   (def (parse-receive stx body raw?)
     (let lp ((rest body) (proto #f) (continue #f) (clauses []) (timeout #f))
@@ -315,15 +324,19 @@
  (gerbil-smp
   (extern namespace: #f
     macro-mailbox-mutex
-    macro-mutex-lock!
+    macro-mutex-lock-anonymously!
     macro-mutex-unlock!)
+  ;; Synchronize directly with Gambit's SMP mailbox mutex protocol
+  ;; (##check-heap-limit + anonymous lock), avoiding owned-mutex BTQ linking
+  ;; and abandoned-mutex state if an actor terminates concurrently.
   (def (mailbox-next)
     (declare (not interrupts-enabled))
     (let* ((mb
             (##thread-mailbox-get! (macro-current-thread)))
            (mutex
             (macro-mailbox-mutex mb)))
-      (macro-mutex-lock! mutex #f (macro-current-thread))
+      (##check-heap-limit)
+      (macro-mutex-lock-anonymously! mutex #f)
       (let* ((cursor
               (macro-mailbox-cursor mb))
              (next
@@ -347,7 +360,8 @@
             (##thread-mailbox-get! (macro-current-thread)))
            (mutex
             (macro-mailbox-mutex mb)))
-      (macro-mutex-lock! mutex #f (macro-current-thread))
+      (##check-heap-limit)
+      (macro-mutex-lock-anonymously! mutex #f)
       (let* ((cursor
               (macro-mailbox-cursor mb))
              (result

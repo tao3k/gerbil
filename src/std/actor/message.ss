@@ -60,4 +60,4 @@
   => :boolean
   (and e.options
        e.options.expire
-       (<= e.options.expire (or now (current-time-seconds)))))
+       (<= e.options.expire (or now (##current-time-point)))))

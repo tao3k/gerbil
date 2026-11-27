@@ -18,32 +18,44 @@ namespace: #f
    (begin-annotation (@inline proc) 'inline-rules)))
 
 ;;; low level locks
+;; Single-slot atomic owner CAS lock: slot 0 holds #f (unlocked) or the owning
+;; Gambit thread (##current-thread). Eliminates the 2-slot non-atomic SMP
+;; window where a contender could observe owner=#f and pass #f to
+;; macro-thread-end-condvar.
+(def (__inline-lock-owner-dead? mx owner)
+  ;; Re-check mx[0] via atomic RMW strictly AFTER observing owner's termination
+  ;; (macro-thread-end-condvar == #f). A dead thread can never re-acquire mx, so
+  ;; observing mx[0] != owner rules out the SMP TOCTOU race where owner unlocked
+  ;; cleanly and exited before the contender ran this slow-path check.
+  (and (thread? owner)
+       (not (macro-thread-end-condvar owner))
+       (eq? (##vector-cas! mx 0 owner owner) owner)))
+
 (defrules __make-inline-lock ()
-  ((_) (vector 0 #f)))
+  ((_) (vector #f)))
 
 (defrules __lock-inline! ()
   ((_ mx max-spin)
    (let ()
      (declare (not interrupts-enabled))
-     (let again ((spin 0))
-       (cond
-        ((##fx= (##vector-cas! mx 0 1 0) 0)
-         (##vector-set! mx 1 (current-thread)))
-        ((##fx< spin max-spin)
-         (cond-expand
-           ((not gerbil-smp)
-            (##thread-yield!)))
-         (again (##fx+ spin 1)))
-        (else
-         (let (owner (##vector-ref mx 1))
+     (let ((self (##current-thread)))
+       (let again ((spin 0))
+         (let ((owner (##vector-cas! mx 0 self #f)))
            (cond
-            ((eq? owner (macro-current-thread))
+            ((not owner)
+             (void))
+            ((##fx< spin max-spin)
+             (cond-expand
+               ((not gerbil-smp)
+                (##thread-yield!)))
+             (again (##fx+ spin 1)))
+            ((eq? owner self)
              (##thread-deadlock-action!))
-            ((not (macro-thread-end-condvar owner))
+            ((__inline-lock-owner-dead? mx owner)
              (##thread-deadlock-action!))
             (else
              (##thread-yield!)
-             (again 0)))))))))
+             (again 0))))))))
   ((_ mx)
    (__lock-inline! mx 10)))
 
@@ -51,14 +63,19 @@ namespace: #f
   ((_ mx)
    (let ()
      (declare (not interrupts-enabled))
-     (##vector-set! mx 1 #f)
-     (##vector-cas! mx 0 0 1))))
+     (##vector-cas! mx 0 #f (##current-thread)))))
 
 (defrule (__do-inline-lock! lock expr)
-  (begin
-    (__lock-inline! lock)
-    (begin0 expr
-      (__unlock-inline! lock))))
+  (let ((__lock lock))
+    (__lock-inline! __lock)
+    (let ((__eh (##current-exception-handler)))
+      (##with-exception-handler
+       (lambda (__exn)
+         (__unlock-inline! __lock)
+         (__eh __exn))
+       (lambda ()
+         (begin0 expr
+           (__unlock-inline! __lock)))))))
 
 ;;;
 

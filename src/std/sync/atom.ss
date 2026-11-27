@@ -113,13 +113,13 @@
     (struct-instance-init! self (vector initial-value))))
 
 (def (increment-atomic-counter! (counter : AtomicCounter) (increment : :fixnum := 1)) => :fixnum
-  (let retry ()
-    (let* ((v (AtomicCounter-v counter))
-           (oldval (vector-ref v 0))
-           (newval (fx+ oldval increment)))
-      (if (##fx= (##vector-cas! v 0 newval oldval) oldval)
-        oldval
-        (retry)))))
+  (let (v (AtomicCounter-v counter))
+    (let retry ((oldval (vector-ref v 0)))
+      (let* ((newval (fx+ oldval increment))
+             (actual (##vector-cas! v 0 newval oldval)))
+        (if (##fx= actual oldval)
+          oldval
+          (retry actual))))))
 
 (def (increment-atomic-counter-by-1! (counter : AtomicCounter)) => :fixnum
   (__increment-atomic-counter! counter 1))
