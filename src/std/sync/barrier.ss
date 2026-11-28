@@ -11,28 +11,30 @@
         with-barrier-error)
 
 ;; Scheme can raise #f; failure presence must not depend on payload truth.
-;; Atomic tripped state (0=open, 1=passed, 2=failed) gives a zero-mutex acquire fast path.
+;; Inline atomic tripped state (slot 3: 0=open, 1=passed, 2=failed) and atomic
+;; count (slot 4) give zero-allocation creation, zero-mutex barrier-wait! after
+;; trip, and lock-free barrier-post! for the first limit-1 posters.
 (defstruct Barrier ((mx      :- :mutex)
                     (cv      :- :condvar)
-                    (tripped :- :vector)
+                    (tripped :- :fixnum)
                     (count   :- :fixnum)
                     (limit   :- :fixnum)
                     exn
                     (failed? :- :boolean))
-  constructor: :init! final: #t )
+  constructor: :init! final: #t)
 
 (defmethod {:init! Barrier}
   (lambda (self (limit :~ nonnegative-fixnum? :- :fixnum))
     (set! self.mx (make-mutex 'barrier))
     (set! self.cv (make-condition-variable 'barrier))
-    (set! self.tripped (vector (if (fx= limit 0) 1 0)))
+    (set! self.tripped (if (fx= limit 0) 1 0))
     (set! self.count 0)
     (set! self.limit limit)
     (set! self.failed? #f)))
 
 (def (barrier-wait! (b : Barrier))
   => :void
-  (let ((st (:- (__atomic-fx-load b.tripped 0 1) :fixnum)))
+  (let ((st (:- (__atomic-struct-ref b 3 1) :fixnum)))
     (cond
      ((fx= st 1) (void))
      ((fx= st 2) (abort! (raise b.exn)))
@@ -45,7 +47,7 @@
           (let (exn b.exn)
             (mutex-unlock! b.mx)
             (abort! (raise exn))))
-         ((fx< b.count b.limit)
+         ((fx< (:- (__atomic-struct-ref b 4 1) :fixnum) b.limit)
           (mutex-unlock! b.mx b.cv)
           (loop))
          (else
@@ -54,15 +56,19 @@
 
 (def (barrier-post! (b : Barrier))
   => :void
-  (mutex-lock! b.mx)
-  (let* ((count b.count)
-         (count+1 (fx+ count 1)))
-    (set! b.count count+1)
-    (unless (fx< count+1 b.limit)
+  (let ((next
+         (let loop ()
+           (let* ((cur (:- (__atomic-struct-ref b 4 1) :fixnum))
+                  (nxt (fx+ cur 1)))
+             (if (eq? (__atomic-struct-cas! b 4 cur nxt 3) cur)
+               nxt
+               (loop))))))
+    (unless (fx< next b.limit)
+      (mutex-lock! b.mx)
       (unless b.failed?
-        (__atomic-fx-store! b.tripped 0 1 2))
-      (condition-variable-broadcast! b.cv))
-    (mutex-unlock! b.mx)
+        (__atomic-struct-set! b 3 1 2))
+      (condition-variable-broadcast! b.cv)
+      (mutex-unlock! b.mx))
     (void)))
 
 ;; Preserve the first failure even when its value is #f.
@@ -72,7 +78,7 @@
   (unless b.failed?
     (set! b.failed? #t)
     (set! b.exn exn)
-    (__atomic-fx-store! b.tripped 0 2 2))
+    (__atomic-struct-set! b 3 2 2))
   (condition-variable-broadcast! b.cv)
   (mutex-unlock! b.mx)
   (void))

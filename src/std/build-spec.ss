@@ -142,7 +142,7 @@
     (gxc: "time/date" "-cc-options" "-D _GNU_SOURCE")
 
     "sync/atom"
-    "sync/channel"
+    (gxc: "sync/channel" ,@(include-gambit-sharp))
     "sync/completion"
     "sync/barrier"
     "sync/wg"

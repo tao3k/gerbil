@@ -13,11 +13,11 @@
         completion-error!
         with-completion-error)
 
-;; Atomic state protocol (ARM64 acquire/release safe, lock-free fast path):
+;; Inline atomic state protocol (slot 3, ARM64 acquire/release safe, zero extra box):
 ;;   0 = pending, 1 = value posted, 2 = error posted
 (defstruct Completion ((mx    :- :mutex)
                        (cv    :- :condvar)
-                       (state :- :vector)
+                       (state :- :fixnum)
                        ready? val exn)
   final: #t
   constructor: :init!
@@ -27,16 +27,16 @@
   (lambda (self (name 'completion)) ;; name is for debugging
     (set! self.mx (make-mutex name))
     (set! self.cv (make-condition-variable name))
-    (set! self.state (vector 0))
+    (set! self.state 0)
     (set! self.ready? #f)))
 
 (def (completion-ready? (c : Completion))
   => :boolean
-  (fx> (:- (__atomic-fx-load c.state 0 1) :fixnum) 0))
+  (fx> (:- (__atomic-struct-ref c 3 1) :fixnum) 0))
 
 (def (completion-reset! (c : Completion))
   (mutex-lock! c.mx)
-  (__atomic-fx-store! c.state 0 0 2)
+  (__atomic-struct-set! c 3 0 2)
   (set! c.ready? #f)
   (set! c.val #f)
   (set! c.exn #f)
@@ -45,14 +45,14 @@
 
 (def (completion-wait! (c : Completion))
   ;; Lock-free acquire fast path when completion is already published.
-  (let ((st (:- (__atomic-fx-load c.state 0 1) :fixnum)))
+  (let ((st (:- (__atomic-struct-ref c 3 1) :fixnum)))
     (cond
      ((fx= st 1) c.val)
      ((fx= st 2) (raise c.exn))
      (else
       (let lp ()
         (mutex-lock! c.mx)
-        (let ((s (:- (__atomic-fx-load c.state 0 1) :fixnum)))
+        (let ((s (:- (__atomic-struct-ref c 3 1) :fixnum)))
           (cond
            ((fx= s 1)
             (let ((val c.val))
@@ -69,7 +69,7 @@
 (defrule (do-completion-post! compl val set-e state-code)
   (using (c compl :- Completion)
     (mutex-lock! c.mx)
-    (if (fx> (:- (__atomic-fx-load c.state 0 1) :fixnum) 0)
+    (if (fx> (:- (__atomic-struct-ref c 3 1) :fixnum) 0)
       (begin
         (mutex-unlock! c.mx)
         (raise-context-error completion-post! "Completion has already been posted" c))
@@ -77,7 +77,7 @@
         (set-e c val)
         (set! c.ready? #t)
         ;; Release store publishes val/exn before any lock-free reader sees state > 0.
-        (__atomic-fx-store! c.state 0 state-code 2)
+        (__atomic-struct-set! c 3 state-code 2)
         (condition-variable-broadcast! c.cv)
         (mutex-unlock! c.mx)
         (void)))))

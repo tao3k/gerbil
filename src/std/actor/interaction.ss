@@ -11,6 +11,19 @@
         ./state)
 (export #t)
 
+;; Fast flonum-to-fixnum timestamp rounding (1 instruction on 64-bit, exact fallback).
+(defrule (%fl->fixnum-floor x)
+  (let ((fl x))
+    (if (and (##fl> fl -1e15) (##fl< fl 1e15))
+      (##flonum->fixnum (##flfloor fl))
+      (exact (floor fl)))))
+
+(defrule (%fl->fixnum-ceiling x)
+  (let ((fl x))
+    (if (and (##fl> fl -1e15) (##fl< fl 1e15))
+      (##flonum->fixnum (##flceiling fl))
+      (exact (ceiling fl)))))
+
 ;; default reply timeout in seconds
 (def default-reply-timeout 5)
 
@@ -53,7 +66,10 @@
                                      (Options expire: exp
                                               continue: continue)
                                      #f))))
-               (unless (and exp (<= exp (##current-time-point)))
+               (unless (and exp
+                            (if (##fixnum? exp)
+                              (##fl<= (##fixnum->flonum exp) (##current-time-point))
+                              (<= exp (##current-time-point))))
                  (using (d dest :- LocalActor)
                    (thread-send-fast! d.thread env)))))
             ((Handle? dest)
@@ -107,15 +123,27 @@
          (seqno (&ActorState-seqno st))
          (_ (set! (&ActorState-seqno st) (fx+ seqno 1)))
          (now (##current-time-point))
-         (deadline (or expire (+ now timeo)))
-         (exp (exact (ceiling deadline)))
+         (deadline
+          (cond
+           (expire expire)
+           ((##flonum? timeo) (##fl+ now timeo))
+           ((##fixnum? timeo) (##fl+ now (##fixnum->flonum timeo)))
+           (else (+ now timeo))))
+         (exp
+          (cond
+           ((##flonum? deadline) (%fl->fixnum-ceiling deadline))
+           ((##fixnum? deadline) deadline)
+           (else (exact (ceiling deadline)))))
          (env (Envelope source: (&ActorState-peer st)
                         dest: dest
                         message: msg
                         protocol: protocol
                         options: (Options expire: exp
                                           continue: (ReplyOption seqno: seqno)))))
-    (if (and (LocalActor? dest) (not (<= exp now)))
+    (if (and (LocalActor? dest)
+             (if (##fixnum? exp)
+               (##fl< now (##fixnum->flonum exp))
+               (not (<= exp now))))
       (using (d dest :- LocalActor)
         (thread-send-fast! d.thread env))
       (send-message! env))
@@ -630,8 +658,9 @@
                 mailbox-timeout)))))))
 
   ;; Dedicated single-lock SMP reply receiver for `->>>` / `->>`:
-  ;; Passes raw flonum deadline directly to ##mutex-signal-and-condvar-wait!
-  ;; (zero seconds->time allocation, single mutex lock straight into wait!).
+  ;; Keeps the entire scan+wait loop inside (declare (not interrupts-enabled)),
+  ;; passes raw flonum deadline directly to ##mutex-signal-and-condvar-wait!,
+  ;; and skips clock/floor/exact syscalls on condvar wakeup when the reply is ready.
   (def (mailbox-receive-reply! (seqno : :integer)
                                (protocol : :string)
                                (deadline : :real)
@@ -642,62 +671,97 @@
            (cv (macro-mailbox-condvar mb))
            (fifo (macro-mailbox-fifo mb))
            (dl-fl (if (##flonum? deadline) deadline (exact->inexact deadline)))
-           (init-now-fl (if (##flonum? initial-now) initial-now (##current-time-point))))
-      (let loop ((now-fl init-now-fl))
-        (let* ((cur-sec (exact (floor now-fl)))
-               (tm (if (##fl< now-fl dl-fl) dl-fl #f))
-               (found
-                (let ()
-                  (declare (not interrupts-enabled))
-                  (##check-heap-limit)
-                  (macro-mutex-lock-anonymously! mutex #f)
-                  (let scan ((prev fifo) (cur (macro-fifo-next fifo)))
-                    (if (##pair? cur)
-                      (let ((elem (macro-fifo-elem cur))
-                            (nxt (macro-fifo-next cur)))
-                        (if (Envelope? elem)
-                          (let ((opts (&Envelope-options elem)))
-                            (if (and opts
-                                     (&Options-expire opts)
-                                     (let ((exp (&Options-expire opts)))
-                                       (and (##fixnum? exp) (##fixnum? cur-sec)
-                                            (##fx<= exp cur-sec))))
-                              ;; Unlink expired envelope in place
-                              (begin
-                                (macro-fifo-next-set! prev nxt)
-                                (when (##not (##pair? nxt))
-                                  (macro-fifo-tail-set! fifo prev))
-                                (scan prev nxt))
-                              (if (and (##eqv? (&Envelope-continue elem) seqno)
-                                       (let ((ep (&Envelope-protocol elem)))
-                                         (or (##eq? ep protocol) (##string=? ep protocol))))
+           (init-now-fl (if (##flonum? initial-now) initial-now (##current-time-point)))
+           (init-sec (%fl->fixnum-floor init-now-fl))
+           (dl-sec (%fl->fixnum-ceiling dl-fl))
+           (init-tm (if (##fl< init-now-fl dl-fl) dl-fl #f))
+           (found
+            (let ()
+              (declare (not interrupts-enabled))
+              (let loop ((cur-sec init-sec) (tm init-tm) (woke? #f))
+                (##check-heap-limit)
+                (macro-mutex-lock-anonymously! mutex #f)
+                (let scan ((prev fifo)
+                           (cur (macro-fifo-next fifo))
+                           (csec cur-sec)
+                           (refreshed? (##not woke?)))
+                  (if (##pair? cur)
+                    (let ((elem (macro-fifo-elem cur))
+                          (nxt (macro-fifo-next cur)))
+                      (if (Envelope? elem)
+                        (let ((opts (&Envelope-options elem)))
+                          (if (and opts (&Options-expire opts))
+                            (let ((exp (&Options-expire opts)))
+                              (if (and (##fixnum? exp) (##fixnum? csec) (##fx<= exp csec))
+                                ;; Definitely expired: unlink in place
                                 (begin
                                   (macro-fifo-next-set! prev nxt)
                                   (when (##not (##pair? nxt))
                                     (macro-fifo-tail-set! fifo prev))
-                                  (macro-mailbox-cursor-set! mb #f)
-                                  (macro-mutex-unlock! mutex)
-                                  elem)
-                                (scan cur nxt))))
-                          (scan cur nxt)))
-                      ;; Not found in current FIFO snapshot: wait directly in ONE lock!
-                      (begin
-                        (macro-condvar-name-set! cv #t)
-                        (if (##mutex-signal-and-condvar-wait! mutex cv tm)
-                          mailbox-empty
-                          (begin
-                            (##check-heap-limit)
-                            (macro-mutex-lock-anonymously! mutex #f)
-                            (macro-mailbox-cursor-set! mb #f)
-                            (macro-mutex-unlock! mutex)
-                            mailbox-timeout))))))))
-          (cond
-           ((##eq? found mailbox-empty)
-            (loop (##current-time-point)))
-           ((##eq? found mailbox-timeout)
-            (raise-timeout receive "receive timeout" (seconds->time deadline)))
-           (else
-            (:- found Envelope)))))))
+                                  (scan prev nxt csec refreshed?))
+                                ;; Lazily refresh clock only for earlier-deadline envelopes after wakeup
+                                (if (and (##not refreshed?)
+                                         (##fixnum? exp)
+                                         (##fixnum? dl-sec)
+                                         (##fx< exp dl-sec))
+                                  (let ((ns (%fl->fixnum-floor (##current-time-point))))
+                                    (if (and (##fixnum? ns) (##fx<= exp ns))
+                                      (begin
+                                        (macro-fifo-next-set! prev nxt)
+                                        (when (##not (##pair? nxt))
+                                          (macro-fifo-tail-set! fifo prev))
+                                        (scan prev nxt ns #t))
+                                      (if (and (##eqv? (&Envelope-continue elem) seqno)
+                                               (let ((ep (&Envelope-protocol elem)))
+                                                 (or (##eq? ep protocol) (##string=? ep protocol))))
+                                        (begin
+                                          (macro-fifo-next-set! prev nxt)
+                                          (when (##not (##pair? nxt))
+                                            (macro-fifo-tail-set! fifo prev))
+                                          (macro-mailbox-cursor-set! mb #f)
+                                          (macro-mutex-unlock! mutex)
+                                          elem)
+                                        (scan cur nxt ns #t))))
+                                  (if (and (##eqv? (&Envelope-continue elem) seqno)
+                                           (let ((ep (&Envelope-protocol elem)))
+                                             (or (##eq? ep protocol) (##string=? ep protocol))))
+                                    (begin
+                                      (macro-fifo-next-set! prev nxt)
+                                      (when (##not (##pair? nxt))
+                                        (macro-fifo-tail-set! fifo prev))
+                                      (macro-mailbox-cursor-set! mb #f)
+                                      (macro-mutex-unlock! mutex)
+                                      elem)
+                                    (scan cur nxt csec refreshed?)))))
+                            ;; No expire option on this envelope: direct match check
+                            (if (and (##eqv? (&Envelope-continue elem) seqno)
+                                     (let ((ep (&Envelope-protocol elem)))
+                                       (or (##eq? ep protocol) (##string=? ep protocol))))
+                              (begin
+                                (macro-fifo-next-set! prev nxt)
+                                (when (##not (##pair? nxt))
+                                  (macro-fifo-tail-set! fifo prev))
+                                (macro-mailbox-cursor-set! mb #f)
+                                (macro-mutex-unlock! mutex)
+                                elem)
+                              (scan cur nxt csec refreshed?))))
+                        (scan cur nxt csec refreshed?)))
+                    ;; Not found in current FIFO snapshot: only refresh clock before re-sleeping
+                    (let ((wait-tm (if woke?
+                                     (if (##fl< (##current-time-point) dl-fl) dl-fl #f)
+                                     tm)))
+                      (macro-condvar-name-set! cv #t)
+                      (if (##mutex-signal-and-condvar-wait! mutex cv wait-tm)
+                        (loop csec dl-fl #t)
+                        (begin
+                          (##check-heap-limit)
+                          (macro-mutex-lock-anonymously! mutex #f)
+                          (macro-mailbox-cursor-set! mb #f)
+                          (macro-mutex-unlock! mutex)
+                          mailbox-timeout)))))))))
+      (if (##eq? found mailbox-timeout)
+        (raise-timeout receive "receive timeout" (seconds->time deadline))
+        (:- found Envelope))))
 
   ;; Synchronize directly with Gambit's SMP mailbox mutex protocol
   ;; (##check-heap-limit + anonymous lock), avoiding owned-mutex BTQ linking
