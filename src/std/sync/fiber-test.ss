@@ -1081,4 +1081,80 @@
                      (list (atomic-fxbox-ref done (memory-order acquire))
                            (<= (atomic-fxbox-ref max-seen (memory-order acquire)) permits)))))))
            (check res => '(200 #t))))
-       '(1 3)))))
+       '(1 3)))
+
+    (test-case "Per-worker external inbox (ext-qs) multi-thread FiberPromise wake storm & peer stealing"
+      ;; 1. W external threads concurrently resolve 2,400 FiberPromises parked across all W workers
+      (def nprocs (max 2 (##current-vm-processor-count)))
+      (def total 2400)
+      (def ext-sum
+        (run-fibers
+         (lambda ()
+           (let ((promises (make-vector total #f))
+                 (acc (make-atomic-fxbox 0))
+                 (ready (make-atomic-fxbox 0)))
+             (for (i (in-range total))
+               (vector-set! promises i (make-fiber-promise)))
+             ;; External resolver threads spread across all cores
+             (let ((resolvers
+                    (for/collect (tid (in-range nprocs))
+                      (spawn/name (list 'ext-prom-res tid)
+                        (lambda ()
+                          (let wait ()
+                            (when (fx< (atomic-fxbox-ref ready (memory-order acquire)) 1)
+                              (thread-yield!)
+                              (wait)))
+                          (let lp ((i tid))
+                            (when (fx< i total)
+                              (fiber-promise-resolve! (vector-ref promises i) (fx+ i 1))
+                              (lp (fx+ i nprocs)))))))))
+               (with-nursery
+                (lambda (n)
+                  (atomic-fxbox-set! ready 1 (memory-order release))
+                  (for (i (in-range total))
+                    (let ((p (vector-ref promises i)))
+                      (fiber-spawn
+                       (lambda ()
+                         (atomic-fxbox-fetch-add! acc (fiber-promise-await! p) (memory-order relaxed)))
+                       n)))))
+               (for-each thread-join! resolvers))
+             (atomic-fxbox-ref acc (memory-order acquire))))))
+      (check ext-sum => (/ (* total (+ total 1)) 2))
+
+      ;; 2. External inbox stealing when home worker is occupied by a long task:
+      ;;    2 workers: fiber A parks on p1 on worker W, then another fiber hogs worker W
+      ;;    until p1 completes; external thread resolves p1 -> idle sibling worker MUST
+      ;;    steal p1 from W's ext-q so zero deadlock occurs!
+      (def steal-ok
+        (run-fibers
+         (lambda ()
+           (let ((p1 (make-fiber-promise))
+                 (hog-done (make-atomic-fxbox 0))
+                 (p1-done (make-atomic-fxbox 0)))
+             (let ((ext (spawn/name 'ext-steal-waker
+                          (lambda ()
+                            (thread-sleep! 0.02)
+                            (fiber-promise-resolve! p1 'stolen-ext-ok)))))
+               (with-nursery
+                (lambda (n)
+                  (fiber-spawn
+                   (lambda ()
+                     (let ((v (fiber-promise-await! p1)))
+                       (when (eq? v 'stolen-ext-ok)
+                         (atomic-fxbox-set! p1-done 1 (memory-order release)))))
+                   n)
+                  ;; Busy-wait fiber occupying one carrier until p1 finishes on the other carrier
+                  (fiber-spawn
+                   (lambda ()
+                     (let ((t0 (##current-time-point)))
+                       (let spin ()
+                         (when (and (fx= (atomic-fxbox-ref p1-done (memory-order acquire)) 0)
+                                    (< (- (##current-time-point) t0) 1.0))
+                           (spin))))
+                     (atomic-fxbox-set! hog-done 1 (memory-order release)))
+                   n)))
+               (thread-join! ext)
+               (list (atomic-fxbox-ref p1-done (memory-order acquire))
+                     (atomic-fxbox-ref hog-done (memory-order acquire))))))
+         workers: 2))
+      (check steal-ok => '(1 1)))))

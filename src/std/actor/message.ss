@@ -13,6 +13,14 @@
   ((thread : :thread))               ; the peer actor thread
   final: #t)
 
+;; direct fiber reply peer (zero-router-hop local Fiber <-> Actor RPC target)
+(defstruct (FiberReplyPeer Peer)
+  ((callback : :procedure)           ; static (callback target msg) — zero closure alloc
+   (target   : :t)                   ; FiberPromise resolved directly by actor thread
+   (protocol : :string)              ; expected reply protocol for direct send-message!
+   (seqno    : :fixnum))             ; expected reply seqno
+  final: #t)
+
 ;; ensemble-wide actor handles
 (defstruct (Handle Peer)
   ((host  : :string)                 ; the actor host; if empty, implies the local actor host

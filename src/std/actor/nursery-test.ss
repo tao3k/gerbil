@@ -338,4 +338,75 @@
          (check (car total) => (* 3 (+ (/ (* 80 81) 2) 80)))
          (check (cdr total) => 12)
          (for (s (in-range nservers))
-           (check (->> (vector-ref servers s) 'stop proto:/torture-a timeout: 5) => 'stopped))))))))
+           (check (->> (vector-ref servers s) 'stop proto:/torture-a timeout: 5) => 'stopped))))
+
+    (test-case "FiberReplyPeer overflow (>1024 concurrent RPCs), expire: 0, manual send-message! & -->> reply"
+      (with-actor-nursery
+       (lambda (an)
+         ;; 1. >1024 concurrent RPCs on workers: 1 forces 1024-slot flat timer ring overflow
+         ;;    into shard.overflow LFQueue — verify BOTH normal replies AND timeouts!
+         (def burst-srv
+           (nursery-spawn-actor/name an 'burst-ovf-srv
+             (lambda ()
+               (let serve ()
+                 (<- protocol: proto:/torture-a
+                     (['ok x]
+                      (--> (fx+ x 1))
+                      (serve))
+                     (['manual x]
+                      ;; Manual reply using send-message! to @source (FiberReplyPeer!)
+                      (let ((src @source)
+                            (me (actor-local-peer))
+                            (seq (ReplyOption-seqno (Options-continue (Envelope-options @envelope)))))
+                        ;; Wrong protocol must be ignored; matching protocol + seqno must resolve!
+                        (send-message! (Envelope source: me dest: src message: 'wrong-proto
+                                                 protocol: proto:/torture-b continue: seq))
+                        (send-message! (Envelope source: me dest: src message: (fx* x 10)
+                                                 protocol: proto:/torture-a continue: seq)))
+                      (serve))
+                     (['cont x]
+                      ;; Multi-step (-->) with continue option: fiber-actor-call receives first reply like ->>
+                      (send-reply! (fx+ x 100) @envelope continue: (ReplyOption seqno: 999))
+                      (serve))
+                     ('blackhole
+                      (serve))
+                     ('stop
+                      (--> 'stopped)))))))
+         (def ovf-res
+           (run-fibers
+            (lambda ()
+              (let ((ok-sum (make-atomic-fxbox 0))
+                    (to-cnt (make-atomic-fxbox 0)))
+                ;; Immediate expired deadline check
+                (check-exception
+                 (fiber-actor-call burst-srv ['ok 1] proto:/torture-a expire: 0)
+                 Timeout?)
+                ;; Manual send-message! reply + continue: reply semantics
+                (check (fiber-actor-call burst-srv ['manual 7] proto:/torture-a timeout: 5) => 70)
+                (check (fiber-actor-call burst-srv ['cont 23] proto:/torture-a timeout: 5) => 123)
+                ;; 1,200 concurrent RPCs on 1 worker (>1024 ring cap!) + 16 blackhole timeouts
+                (with-nursery
+                 (lambda (fn)
+                   (for (i (in-range 1 1201))
+                     (let ((v i))
+                       (fiber-spawn
+                        (lambda ()
+                          (let ((r (fiber-actor-call burst-srv ['ok v] proto:/torture-a timeout: 10)))
+                            (atomic-fxbox-fetch-add! ok-sum r (memory-order relaxed))))
+                        fn)))
+                   (for (_ (in-range 16))
+                     (fiber-spawn
+                      (lambda ()
+                        (with-catch
+                         (lambda (e)
+                           (when (Timeout? e)
+                             (atomic-fxbox-fetch-add! to-cnt 1 (memory-order relaxed))))
+                         (lambda ()
+                           (fiber-actor-call burst-srv 'blackhole proto:/torture-a timeout: 0.04))))
+                      fn))))
+                (cons (atomic-fxbox-ref ok-sum (memory-order acquire))
+                      (atomic-fxbox-ref to-cnt (memory-order acquire)))))
+            workers: 1))
+         (check (car ovf-res) => (+ (/ (* 1200 1201) 2) 1200))
+         (check (cdr ovf-res) => 16)
+         (check (->> burst-srv 'stop proto:/torture-a timeout: 5) => 'stopped))))))))

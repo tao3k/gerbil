@@ -267,4 +267,101 @@
                   (unless (fx= (vector-atomic-ref seen i (memory-order acquire)) 1)
                     (set! bad (fx+ bad 1)))
                   (verify (fx+ i 1))))
-              (check bad => 0))))))))
+              (check bad => 0)))))
+
+    (test-case "LFQueue 128-slot segment boundaries (127/128/129/256/513) & #f/#!eof payloads"
+      (for-each
+       (lambda (n)
+         (let ((q (make-lf-queue)))
+           (for (i (in-range n))
+             (lf-queue-enqueue! q (cond ((fx= (fxmodulo i 17) 0) #f)
+                                        ((fx= (fxmodulo i 19) 0) #!eof)
+                                        (else i))))
+           (check (lf-queue-empty? q) => #f)
+           (for (i (in-range n))
+             (let-values (((ok v) (lf-queue-try-dequeue! q)))
+               (check ok => #t)
+               (check v => (cond ((fx= (fxmodulo i 17) 0) #f)
+                                 ((fx= (fxmodulo i 19) 0) #!eof)
+                                 (else i)))))
+           (check (lf-queue-empty? q) => #t)
+           (let-values (((ok v) (lf-queue-try-dequeue! q)))
+             (check ok => #f))))
+       '(127 128 129 256 513)))
+
+    (test-case "ConcurrentTable striped-counter exact size under all-core insert/delete/equal? storm"
+      (def nthr (smp-nthreads))
+      (def per 200)
+      ;; 1. eq? fast-path: concurrent insert then concurrent cross-thread delete -> exact size 0
+      (def ct-eq (make-concurrent-table 128 eq? eq?-hash))
+      (let ((ins
+             (for/collect (tid (in-range nthr))
+               (spawn
+                (lambda ()
+                  (for (i (in-range per))
+                    (let ((k (fx+ (fx* tid per) i)))
+                      (concurrent-table-set! ct-eq k (fx* k 2)))))))))
+        (for-each thread-join! ins))
+      (check (concurrent-table-size ct-eq) => (fx* nthr per))
+      (let ((dels
+             (for/collect (tid (in-range nthr))
+               (spawn
+                (lambda ()
+                  ;; Delete a different thread's keys to force cross-core stripe decrements!
+                  (let ((src (fxmodulo (fx+ tid 1) nthr)))
+                    (for (i (in-range per))
+                      (let ((k (fx+ (fx* src per) i)))
+                        (check (concurrent-table-delete! ct-eq k) => #t)))))))))
+        (for-each thread-join! dels))
+      (check (concurrent-table-size ct-eq) => 0)
+
+      ;; 2. equal? string-key path across all cores
+      (def ct-str (make-concurrent-table 64 equal? equal?-hash))
+      (let ((workers
+             (for/collect (tid (in-range nthr))
+               (spawn
+                (lambda ()
+                  (for (i (in-range 50))
+                    (let ((k (string-append "k-" (number->string tid) "-" (number->string i))))
+                      (concurrent-table-set! ct-str k i)
+                      (check (concurrent-table-ref ct-str (string-copy k) #f) => i))))))))
+        (for-each thread-join! workers))
+      (check (concurrent-table-size ct-str) => (fx* nthr 50)))
+
+    (test-case "LFStack simultaneous all-core MPMC push+pop exact-once conservation"
+      (def st (make-lf-stack))
+      (def half (max 2 (quotient (smp-nthreads) 2)))
+      (def per 2000)
+      (def total (fx* half per))
+      (def seen (make-vector total 0))
+      (def popped (make-atomic-fxbox 0))
+      (def prods
+        (for/collect (pid (in-range half))
+          (spawn
+           (lambda ()
+             (for (i (in-range per))
+               (lf-stack-push! st (fx+ (fx* pid per) i)))))))
+      (def cons-ts
+        (for/collect (_ (in-range half))
+          (spawn
+           (lambda ()
+             (let lp ()
+               (when (fx< (atomic-fxbox-ref popped (memory-order acquire)) total)
+                 (let-values (((ok v) (lf-stack-try-pop! st)))
+                   (if ok
+                     (begin
+                       (let inc ()
+                         (let ((old (vector-atomic-ref seen v (memory-order acquire))))
+                           (unless (eq? (vector-atomic-cas! seen v old (fx+ old 1) (memory-order acquire-release)) old)
+                             (inc))))
+                       (atomic-fxbox-fetch-add! popped 1 (memory-order acquire-release))
+                       (lp))
+                     (begin (thread-yield!) (lp))))))))))
+      (for-each thread-join! prods)
+      (for-each thread-join! cons-ts)
+      (check (lf-stack-empty? st) => #t)
+      (let ((bad 0))
+        (for (i (in-range total))
+          (unless (fx= (vector-atomic-ref seen i (memory-order acquire)) 1)
+            (set! bad (fx+ bad 1))))
+        (check bad => 0))))))
