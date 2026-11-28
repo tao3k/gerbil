@@ -11,6 +11,7 @@
 (import :std/error
         :std/sync/atomic
         :gerbil/runtime/gambit
+        :gerbil/runtime/util
         :gerbil/runtime/control)
 (export
   ;; SRFI-226 Prompt Tags & Delimited Prompts
@@ -119,14 +120,18 @@
    barriers      ; slot 3: list of barrier tokens
    handlers      ; slot 4: list of %HandlerFrame
    rewind-escape ; slot 5: escape-k for ##continuation-try-rewind-oneshot!
-   rewind-frame) ; slot 6: %HandlerFrame for non-tail fallback
+   rewind-frame  ; slot 6: %HandlerFrame for non-tail fallback
+   cap-frame     ; slot 7: transient scratch for zero-closure ##continuation-capture
+   cap-proc      ; slot 8: transient scratch handler proc
+   cap-a1        ; slot 9: transient scratch arg 1
+   cap-a2)       ; slot 10: transient scratch arg 2
   final: #t)
 
 (def (%tc-current)
   (let ((st (##thread-control-state)))
     (if (%TCState? st)
       st
-      (let ((fresh (%TCState '() '() '() '() #f #f)))
+      (let ((fresh (%TCState '() '() '() '() #f #f #f #f #f #f)))
         (##thread-control-state-set! fresh)
         fresh))))
 
@@ -720,15 +725,17 @@
 
 (defstruct %HandlerFrame (tag entries) final: #t)
 
+;; IMPORTANT: EffectContinuation slot 8 MUST remain `state` (inline fixnum:
+;; 0=LIVE, 1=CONSUMED, 2=MULTISHOT_COW) for zero-box __atomic-struct-cas!.
 (defstruct EffectContinuation
-  (sub-k    ; native Gambit continuation
-   pframe   ; saved prompt frame for zero-alloc tail-resume
-   prefix   ; metacontinuation prefix frames
-   marks    ; captured continuation marks
-   handlers ; captured inner effect handlers
-   frame    ; deep handler frame to reinstall on resume
-   thread   ; capturing carrier thread (guards C-runtime stack-rewind fast path)
-   state)   ; AtomicFxBox (0=LIVE, 1=CONSUMED, 2=MULTISHOT_COW)
+  (sub-k    ; slot 1: native Gambit continuation
+   pframe   ; slot 2: saved prompt frame for zero-alloc tail-resume
+   prefix   ; slot 3: metacontinuation prefix frames
+   marks    ; slot 4: captured continuation marks
+   handlers ; slot 5: captured inner effect handlers
+   frame    ; slot 6: deep handler frame to reinstall on resume
+   thread   ; slot 7: capturing carrier thread (guards C-runtime stack-rewind fast path)
+   state)   ; slot 8: inline atomic fixnum (0=LIVE, 1=CONSUMED, 2=MULTISHOT_COW)
   final: #t)
 
 (defalias effect-continuation? EffectContinuation?)
@@ -804,6 +811,95 @@
                (%mc-return1 (return-fn res))
                (%mc-return1 res)))))))))
 
+;; Zero-closure 1-arg ##continuation-capture receivers using thread-local
+;; %TCState scratch slots (cleared immediately before graft -> 0 GC retention).
+(def (%perform-cont-0! sub-k)
+  (let* ((st (%tc-current))
+         (frame (&%TCState-cap-frame st))
+         (proc (&%TCState-cap-proc st))
+         (mc (&%TCState-mc st))
+         (pframe (##car mc))
+         (rest (##cdr mc))
+         (cap-marks (%list-prefix-until (&%TCState-marks st)
+                                        (&%MCFrame-marks pframe)))
+         (cap-handlers (%handlers-prefix-before (&%TCState-handlers st) frame))
+         (escape-k (&%MCFrame-escape-k pframe))
+         (ek (EffectContinuation
+              sub-k pframe '() cap-marks cap-handlers frame (current-thread)
+              %CONT-ONE-SHOT-LIVE)))
+    (set! (&%TCState-cap-frame st) #f)
+    (set! (&%TCState-cap-proc st) #f)
+    (set! (&%TCState-mc st) rest)
+    (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
+    (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
+    (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
+    (##continuation-graft escape-k proc ek)))
+
+(def (%perform-cont-1! sub-k)
+  (let* ((st (%tc-current))
+         (frame (&%TCState-cap-frame st))
+         (proc (&%TCState-cap-proc st))
+         (a1 (&%TCState-cap-a1 st))
+         (mc (&%TCState-mc st))
+         (pframe (##car mc))
+         (rest (##cdr mc))
+         (cap-marks (%list-prefix-until (&%TCState-marks st)
+                                        (&%MCFrame-marks pframe)))
+         (cap-handlers (%handlers-prefix-before (&%TCState-handlers st) frame))
+         (escape-k (&%MCFrame-escape-k pframe))
+         (ek (EffectContinuation
+              sub-k pframe '() cap-marks cap-handlers frame (current-thread)
+              %CONT-ONE-SHOT-LIVE)))
+    (set! (&%TCState-cap-frame st) #f)
+    (set! (&%TCState-cap-proc st) #f)
+    (set! (&%TCState-cap-a1 st) #f)
+    (set! (&%TCState-mc st) rest)
+    (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
+    (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
+    (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
+    (##continuation-graft escape-k proc ek a1)))
+
+(def (%perform-cont-2! sub-k)
+  (let* ((st (%tc-current))
+         (frame (&%TCState-cap-frame st))
+         (proc (&%TCState-cap-proc st))
+         (a1 (&%TCState-cap-a1 st))
+         (a2 (&%TCState-cap-a2 st))
+         (mc (&%TCState-mc st))
+         (pframe (##car mc))
+         (rest (##cdr mc))
+         (cap-marks (%list-prefix-until (&%TCState-marks st)
+                                        (&%MCFrame-marks pframe)))
+         (cap-handlers (%handlers-prefix-before (&%TCState-handlers st) frame))
+         (escape-k (&%MCFrame-escape-k pframe))
+         (ek (EffectContinuation
+              sub-k pframe '() cap-marks cap-handlers frame (current-thread)
+              %CONT-ONE-SHOT-LIVE)))
+    (set! (&%TCState-cap-frame st) #f)
+    (set! (&%TCState-cap-proc st) #f)
+    (set! (&%TCState-cap-a1 st) #f)
+    (set! (&%TCState-cap-a2 st) #f)
+    (set! (&%TCState-mc st) rest)
+    (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
+    (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
+    (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
+    (##continuation-graft escape-k proc ek a1 a2)))
+
+(def (%perform-capture-fast! st frame proc a1 a2)
+  (declare (not interrupts-enabled))
+  (set! (&%TCState-cap-frame st) frame)
+  (set! (&%TCState-cap-proc st) proc)
+  (cond
+   ((eq? a1 %ABSENT)
+    (##continuation-capture %perform-cont-0!))
+   ((eq? a2 %ABSENT)
+    (set! (&%TCState-cap-a1 st) a1)
+    (##continuation-capture %perform-cont-1!))
+   (else
+    (set! (&%TCState-cap-a1 st) a1)
+    (set! (&%TCState-cap-a2 st) a2)
+    (##continuation-capture %perform-cont-2!))))
+
 (def (perform (eff : Effect) (a1 : :t := %ABSENT) (a2 : :t := %ABSENT) . more)
   (let* ((st (%tc-current))
          (handlers (&%TCState-handlers st)))
@@ -818,7 +914,7 @@
            ((eq? a2 %ABSENT) (proc a1))
            ((null? more)     (proc a1 a2))
            (else             (apply proc a1 a2 more))))
-        ;; Suspending Effect: 1 ##continuation-capture + 1 ##continuation-graft!
+        ;; Suspending Effect: zero-closure ##continuation-capture + ##continuation-graft!
         (let ((tag (&%HandlerFrame-tag frame))
               (proc (&%HandlerEntry-proc entry))
               (mc (&%TCState-mc st)))
@@ -827,37 +923,25 @@
                    (eq? (&%MCFrame-tag (##car mc)) tag)
                    (not (%barrier-between? (&%TCState-barriers st)
                                            (&%MCFrame-barriers (##car mc)))))
-            (let* ((pframe (##car mc))
-                   (rest (##cdr mc))
-                   (cap-marks (%list-prefix-until (&%TCState-marks st)
-                                                  (&%MCFrame-marks pframe)))
-                   (cap-handlers (%handlers-prefix-before handlers frame))
-                   (escape-k (&%MCFrame-escape-k pframe)))
-              (##continuation-capture
-               (lambda (sub-k)
-                 (let ((ek (EffectContinuation
-                            sub-k
-                            pframe
-                            '()
-                            cap-marks
-                            cap-handlers
-                            frame
-                            (current-thread)
-                            (make-atomic-fxbox %CONT-ONE-SHOT-LIVE))))
-                   (set! (&%TCState-mc st) rest)
-                   (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
-                   (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
-                   (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
-                   (cond
-                    ((eq? a1 %ABSENT)
-                     (##continuation-graft escape-k proc ek))
-                    ((eq? a2 %ABSENT)
-                     (##continuation-graft escape-k proc ek a1))
-                    ((null? more)
-                     (##continuation-graft escape-k proc ek a1 a2))
-                    (else
+            (if (null? more)
+              (%perform-capture-fast! st frame proc a1 a2)
+              (let* ((pframe (##car mc))
+                     (rest (##cdr mc))
+                     (cap-marks (%list-prefix-until (&%TCState-marks st)
+                                                    (&%MCFrame-marks pframe)))
+                     (cap-handlers (%handlers-prefix-before handlers frame))
+                     (escape-k (&%MCFrame-escape-k pframe)))
+                (##continuation-capture
+                 (lambda (sub-k)
+                   (let ((ek (EffectContinuation
+                              sub-k pframe '() cap-marks cap-handlers frame (current-thread)
+                              %CONT-ONE-SHOT-LIVE)))
+                     (set! (&%TCState-mc st) rest)
+                     (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
+                     (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
+                     (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
                      (##continuation-graft escape-k ##apply proc
-                                           (cons ek (cons a1 (cons a2 more))))))))))
+                                           (cons ek (cons a1 (cons a2 more)))))))))
             (let-values (((prefix pframe rest) (%mc-split-at-tag mc tag)))
               (unless pframe
                 (raise-context-error perform "handler prompt not active" (effect-name eff)))
@@ -872,14 +956,8 @@
                 (##continuation-capture
                  (lambda (sub-k)
                    (let ((ek (EffectContinuation
-                              sub-k
-                              pframe
-                              prefix
-                              cap-marks
-                              cap-handlers
-                              frame
-                              (current-thread)
-                              (make-atomic-fxbox %CONT-ONE-SHOT-LIVE))))
+                              sub-k pframe prefix cap-marks cap-handlers frame (current-thread)
+                              %CONT-ONE-SHOT-LIVE)))
                      (set! (&%TCState-mc st) rest)
                      (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
                      (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
@@ -961,11 +1039,7 @@
           (else             (##apply ##continuation-return sub-k v1 v2 more))))))))
 
 (def (resume (ek : EffectContinuation) (v1 : :t := %ABSENT) (v2 : :t := %ABSENT) . more)
-  (let* ((state-box (&EffectContinuation-state ek))
-         (prev (atomic-fxbox-compare-and-swap! state-box
-                                               %CONT-ONE-SHOT-LIVE
-                                               %CONT-ONE-SHOT-CONSUMED
-                                               (memory-order acquire-release))))
+  (let ((prev (:- (__atomic-struct-cas! ek 8 %CONT-ONE-SHOT-LIVE %CONT-ONE-SHOT-CONSUMED 3) :fixnum)))
     (unless (or (fx= prev %CONT-ONE-SHOT-LIVE)
                 (fx= prev %CONT-MULTISHOT-COW))
       (raise-context-error resume "effect continuation already consumed" ek))
@@ -997,11 +1071,7 @@
       (%resume-checked ek v1 v2 more))))
 
 (def (resume-multishot (ek : EffectContinuation) (v1 : :t := %ABSENT) (v2 : :t := %ABSENT) . more)
-  (let* ((state-box (&EffectContinuation-state ek))
-         (prev (atomic-fxbox-compare-and-swap! state-box
-                                               %CONT-ONE-SHOT-LIVE
-                                               %CONT-MULTISHOT-COW
-                                               (memory-order acquire-release))))
+  (let ((prev (:- (__atomic-struct-cas! ek 8 %CONT-ONE-SHOT-LIVE %CONT-MULTISHOT-COW 3) :fixnum)))
     (unless (or (fx= prev %CONT-ONE-SHOT-LIVE)
                 (fx= prev %CONT-MULTISHOT-COW))
       (raise-context-error resume-multishot "cannot promote consumed one-shot continuation" ek))
@@ -1059,27 +1129,25 @@
                (eq? (&%MCFrame-tag (##car mc)) tag)
                (not (%barrier-between? (&%TCState-barriers st)
                                        (&%MCFrame-barriers (##car mc)))))
-        (let* ((pframe (##car mc))
-               (rest (##cdr mc))
-               (cap-marks (%list-prefix-until (&%TCState-marks st)
-                                              (&%MCFrame-marks pframe)))
-               (cap-handlers (%handlers-prefix-before handlers frame))
-               (escape-k (&%MCFrame-escape-k pframe)))
-          (##continuation-capture
-           (lambda (sub-k)
-             (let ((ek (EffectContinuation
-                        sub-k pframe '() cap-marks cap-handlers frame (current-thread)
-                        (make-atomic-fxbox %CONT-ONE-SHOT-LIVE))))
-               (set! (&%TCState-mc st) rest)
-               (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
-               (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
-               (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
-               (cond
-                ((eq? a1 %ABSENT) (##continuation-graft escape-k proc ek))
-                ((eq? a2 %ABSENT) (##continuation-graft escape-k proc ek a1))
-                ((null? more)     (##continuation-graft escape-k proc ek a1 a2))
-                (else             (##continuation-graft escape-k ##apply proc
-                                                        (cons ek (cons a1 (cons a2 more))))))))))
+        (if (null? more)
+          (%perform-capture-fast! st frame proc a1 a2)
+          (let* ((pframe (##car mc))
+                 (rest (##cdr mc))
+                 (cap-marks (%list-prefix-until (&%TCState-marks st)
+                                                (&%MCFrame-marks pframe)))
+                 (cap-handlers (%handlers-prefix-before handlers frame))
+                 (escape-k (&%MCFrame-escape-k pframe)))
+            (##continuation-capture
+             (lambda (sub-k)
+               (let ((ek (EffectContinuation
+                          sub-k pframe '() cap-marks cap-handlers frame (current-thread)
+                          %CONT-ONE-SHOT-LIVE)))
+                 (set! (&%TCState-mc st) rest)
+                 (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
+                 (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))
+                 (set! (&%TCState-handlers st) (&%MCFrame-handlers pframe))
+                 (##continuation-graft escape-k ##apply proc
+                                       (cons ek (cons a1 (cons a2 more)))))))))
         (let-values (((prefix pframe rest) (%mc-split-at-tag mc tag)))
           (unless pframe
             (raise-context-error perform-cap "capability prompt not active"))
@@ -1092,7 +1160,7 @@
              (lambda (sub-k)
                (let ((ek (EffectContinuation
                           sub-k pframe prefix cap-marks cap-handlers frame (current-thread)
-                          (make-atomic-fxbox %CONT-ONE-SHOT-LIVE))))
+                          %CONT-ONE-SHOT-LIVE)))
                  (set! (&%TCState-mc st) rest)
                  (set! (&%TCState-marks st) (&%MCFrame-marks pframe))
                  (set! (&%TCState-barriers st) (&%MCFrame-barriers pframe))

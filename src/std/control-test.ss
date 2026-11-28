@@ -281,4 +281,67 @@
        ContextError?)
       ;; RWLock must remain completely unlocked and usable after both barrier exceptions!
       (check (with-write-lock rw (lambda () 'rw-healthy)) => 'rw-healthy)
-      (check (with-read-lock rw (lambda () 'rw-readable)) => 'rw-readable))))
+      (check (with-read-lock rw (lambda () 'rw-readable)) => 'rw-readable))
+
+    (test-case "SMP inline atomic EffectContinuation: 8-thread racing one-shot resume exact-1-winner + 0/1/2/3-arg perform"
+      ;; 1. Verify 0-arg, 1-arg, 2-arg, and 3-arg suspending perform + perform-cap fast paths
+      (def e0 (make-effect 'e0))
+      (def e1 (make-effect 'e1))
+      (def e2 (make-effect 'e2))
+      (def e3 (make-effect 'e3))
+      (def res
+        (with-handler
+          (((e0 k) (resume k 'zero))
+           ((e1 k a) (resume k (+ a 1)))
+           ((e2 k a b) (resume k (+ a b)))
+           ((e3 k a b c) (resume k (+ a b c))))
+          (list (perform e0)
+                (perform e1 10)
+                (perform e2 20 30)
+                (perform e3 1 2 3))))
+      (check res => '(zero 11 50 6))
+
+      ;; 2. 8 concurrent threads race to resume the SAME one-shot EffectContinuation:
+      ;;    EXACTLY 1 thread wins via inline __atomic-struct-cas!, all 7 losers get ContextError!
+      (def race-eff (make-effect 'race-oneshot))
+      (def rounds 20)
+      (def total-wins (make-atomic-fxbox 0))
+      (def total-losses (make-atomic-fxbox 0))
+      (let rloop ((r 0))
+        (when (fx< r rounds)
+          (let ((k-ch (make-channel 1))
+                (done-ch (make-channel 4)))
+            ;; Capture on a clean thread outside gxtest's unwind-protect frame!
+            (let ((cap-thr
+                   (spawn/name 'ek-cap
+                     (lambda ()
+                       (with-handler
+                         (((race-eff k) (channel-put k-ch k) 'captured))
+                         (let ((v (perform race-eff)))
+                           (channel-put done-ch v)))))))
+              (let ((captured-k (channel-get k-ch 5)))
+                (thread-join! cap-thr 5)
+                (let ((racers
+                       (let loop ((i 0) (acc '()))
+                         (if (fx= i 8)
+                           acc
+                           (let ((id i))
+                             (loop (fx+ i 1)
+                                   (cons
+                                    (spawn/name 'ek-race
+                                      (lambda ()
+                                        (with-catch
+                                         (lambda (e)
+                                           (if (ContextError? e)
+                                             (atomic-fxbox-fetch-add! total-losses 1 (memory-order relaxed))
+                                             (raise e)))
+                                         (lambda ()
+                                           (resume captured-k id)
+                                           (atomic-fxbox-fetch-add! total-wins 1 (memory-order relaxed))))))
+                                    acc)))))))
+                  (for-each thread-join! racers)
+                  (let ((winner (channel-get done-ch 5)))
+                    (check (and (fixnum? winner) (fx>= winner 0) (fx< winner 8)) => #t))))))
+          (rloop (fx+ r 1))))
+      (check (atomic-fxbox-ref total-wins (memory-order acquire)) => rounds)
+      (check (atomic-fxbox-ref total-losses (memory-order acquire)) => (* rounds 7)))))

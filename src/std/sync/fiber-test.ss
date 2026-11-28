@@ -989,4 +989,96 @@
                     (wait)))
                 (* x x))
               (iota expected-workers))))))
-      (check pmap-res => (map (lambda (x) (* x x)) (iota expected-workers))))))
+      (check pmap-res => (map (lambda (x) (* x x)) (iota expected-workers))))
+
+    (test-case "Vyukov lock-free FiberChannel non-pow2 cap=3 & cap=16 exact-once MPMC + lock-free FiberMutex/Semaphore torture"
+      ;; 1. Exact-once MPMC conservation on BOTH non-pow2 (cap=3) and pow2 (cap=16) Vyukov rings
+      (for-each
+       (lambda (cap)
+         (let* ((nprod 6)
+                (ncons 6)
+                (per 400)
+                (total (fx* nprod per))
+                (seen (make-vector total 0)))
+           (run-fibers
+            (lambda ()
+              (let ((ch (make-fiber-channel cap)))
+                (with-nursery
+                 (lambda (n)
+                   (for (p (in-range nprod))
+                     (let ((pid p))
+                       (fiber-spawn
+                        (lambda ()
+                          (for (i (in-range per))
+                            (fiber-send! ch (fx+ (fx* pid per) i))))
+                        n)))
+                   (for (_ (in-range ncons))
+                     (fiber-spawn
+                      (lambda ()
+                        (for (_ (in-range per))
+                          (let ((v (fiber-recv! ch)))
+                            (__atomic-fx-fetch-add! seen v 1 3))))
+                      n)))))))
+           (let ((bad 0))
+             (let lp ((i 0))
+               (when (fx< i total)
+                 (unless (fx= (:- (__atomic-fx-load seen i 1) :fixnum) 1)
+                   (set! bad (fx+ bad 1)))
+                 (lp (fx+ i 1))))
+             (check bad => 0))))
+       '(3 16))
+
+      ;; 2. 3-state lock-free FiberMutex: unbalanced unlock check + 128-fiber contended handoff
+      (let ((fm (make-fiber-mutex)))
+        (check-exception (fiber-mutex-unlock! fm) ContextError?))
+      (def mtx-tot
+        (run-fibers
+         (lambda ()
+           (let ((fm (make-fiber-mutex))
+                 (cnt 0))
+             (with-nursery
+              (lambda (n)
+                (for (_ (in-range 128))
+                  (fiber-spawn
+                   (lambda ()
+                     (for (k (in-range 25))
+                       (with-fiber-lock fm
+                         (lambda ()
+                           (let ((c cnt))
+                             (when (fx= (fxand k 7) 0) (fiber-yield))
+                             (set! cnt (fx+ c 1)))))))
+                   n))))
+             cnt))))
+      (check mtx-tot => (* 128 25))
+
+      ;; 3. Lock-free FiberSemaphore: Dekker release/park race with permits=1 & permits=3 across 200 fibers
+      (for-each
+       (lambda (permits)
+         (let ((res
+                (run-fibers
+                 (lambda ()
+                   (let ((sem (make-fiber-semaphore permits))
+                         (active (make-atomic-fxbox 0))
+                         (max-seen (make-atomic-fxbox 0))
+                         (done (make-atomic-fxbox 0)))
+                     (with-nursery
+                      (lambda (n)
+                        (for (_ (in-range 200))
+                          (fiber-spawn
+                           (lambda ()
+                             (with-fiber-semaphore sem
+                               (lambda ()
+                                 (let ((cur (fx+ (atomic-fxbox-fetch-add! active 1 (memory-order acquire-release)) 1)))
+                                   (let upd ()
+                                     (let ((m (atomic-fxbox-ref max-seen (memory-order acquire))))
+                                       (when (and (fx> cur m)
+                                                  (not (fx= (atomic-fxbox-compare-and-swap! max-seen m cur (memory-order acquire-release)) m)))
+                                         (upd))))
+                                   (fiber-yield)
+                                   (atomic-fxbox-fetch-sub! active 1 (memory-order acquire-release))
+                                   (atomic-fxbox-fetch-add! done 1 (memory-order relaxed))))))
+                           n))))
+                     (list (atomic-fxbox-ref done (memory-order acquire))
+                           (<= (atomic-fxbox-ref max-seen (memory-order acquire)) permits)))))))
+           (check res => '(200 #t))))
+       '(1 3)))))

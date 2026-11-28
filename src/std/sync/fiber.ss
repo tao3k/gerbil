@@ -750,16 +750,16 @@ END-C
     (void)))
 
 ;;;----------------------------------------------------------------------------
-;;; Wait-Free Single-Shot FiberPromise (Zero Spinlock / Zero Channel Overhead)
+;;; Wait-Free Single-Shot FiberPromise (Inline Atomic Slot, Zero Vector Alloc)
 ;;;
-;;; 4-state atomic protocol in state[0]:
+;;; 4-state atomic protocol inline in FiberPromise struct slot 1 (`state`):
 ;;;   0 = empty (no waiter, no value)
 ;;;   1 = waiter parked (waiter-k and sched published)
 ;;;   2 = claimed by single winning resolver (writing val)
 ;;;   3 = resolved (val published via release store)
 
 (defstruct FiberPromise
-  ((state :- :vector)
+  ((state :- :fixnum)
    val
    waiter-k
    sched)
@@ -767,82 +767,168 @@ END-C
 
 (def (make-fiber-promise)
   => FiberPromise
-  (FiberPromise (vector 0) #f #f #f))
+  (FiberPromise 0 #f #f #f))
 
 (defalias fiber-promise? FiberPromise?)
 
 (def (fiber-promise-resolved? (p : FiberPromise))
   => :boolean
-  (fx= (:- (__atomic-fx-load p.state 0 1) :fixnum) 3))
+  (fx= (:- (__atomic-struct-ref p 1 1) :fixnum) 3))
 
 ;; Atomically resolves p at most once; returns #t for the winning resolver, #f for losers.
 (def (fiber-promise-resolve! (p : FiberPromise) val)
   => :boolean
-  (let ((st p.state))
-    (let loop ()
-      (let ((cur (:- (__atomic-fx-load st 0 1) :fixnum)))
-        (cond
-         ((fx>= cur 2) #f)
-         ((fx= cur 0)
-          (if (fx= (:- (__atomic-fx-cas! st 0 0 2 3) :fixnum) 0)
-            (begin
-              (set! p.val val)
-              (__atomic-fx-store! st 0 3 2)
-              #t)
-            (loop)))
-         (else
-          (if (fx= (:- (__atomic-fx-cas! st 0 1 2 3) :fixnum) 1)
-            (let ((wk p.waiter-k)
-                  (sc p.sched))
-              (set! p.val val)
-              (__atomic-fx-store! st 0 3 2)
-              (%sched-wake! sc (cons wk val))
-              #t)
-            (loop))))))))
+  (let loop ()
+    (let ((cur (:- (__atomic-struct-ref p 1 1) :fixnum)))
+      (cond
+       ((fx>= cur 2) #f)
+       ((fx= cur 0)
+        (if (fx= (:- (__atomic-struct-cas! p 1 0 2 3) :fixnum) 0)
+          (begin
+            (set! p.val val)
+            (__atomic-struct-set! p 1 3 2)
+            #t)
+          (loop)))
+       (else
+        (if (fx= (:- (__atomic-struct-cas! p 1 1 2 3) :fixnum) 1)
+          (let ((wk p.waiter-k)
+                (sc p.sched))
+            (set! p.val val)
+            (__atomic-struct-set! p 1 3 2)
+            (%sched-wake! sc (cons wk val))
+            #t)
+          (loop)))))))
 
 (def (fiber-promise-await! (p : FiberPromise))
-  (let ((st p.state))
-    (let ((cur (:- (__atomic-fx-load st 0 1) :fixnum)))
-      (cond
-       ((fx= cur 3) p.val)
-       ((fx= cur 2)
-        (let spin ()
-          (if (fx= (:- (__atomic-fx-load st 0 1) :fixnum) 3)
-            p.val
-            (begin (__cpu-relax!) (spin)))))
-       ((in-fiber?)
-        (perform %eff-park-promise p))
-       (else
-        (let wait ()
-          (if (fx= (:- (__atomic-fx-load st 0 1) :fixnum) 3)
-            p.val
-            (begin (thread-yield!) (wait)))))))))
+  (let ((cur (:- (__atomic-struct-ref p 1 1) :fixnum)))
+    (cond
+     ((fx= cur 3) p.val)
+     ((fx= cur 2)
+      (let spin ()
+        (if (fx= (:- (__atomic-struct-ref p 1 1) :fixnum) 3)
+          p.val
+          (begin (__cpu-relax!) (spin)))))
+     ((in-fiber?)
+      (perform %eff-park-promise p))
+     (else
+      (let wait ()
+        (if (fx= (:- (__atomic-struct-ref p 1 1) :fixnum) 3)
+          p.val
+          (begin (thread-yield!) (wait))))))))
 
 (def (%park-promise-waiter! sched k (p :- FiberPromise))
-  (let ((st p.state))
-    (set! p.waiter-k k)
-    (set! p.sched sched)
-    (let ((prev (:- (__atomic-fx-cas! st 0 0 1 3) :fixnum)))
-      (unless (fx= prev 0)
-        ;; Explicit acquire load guarantees release->acquire ordering for p.val on ARM64.
-        (let spin ((s (:- (__atomic-fx-load st 0 1) :fixnum)))
-          (if (fx= s 3)
-            (%sched-wake! sched (cons k p.val))
-            (begin
-              (__cpu-relax!)
-              (spin (:- (__atomic-fx-load st 0 1) :fixnum)))))))))
+  (set! p.waiter-k k)
+  (set! p.sched sched)
+  (let ((prev (:- (__atomic-struct-cas! p 1 0 1 3) :fixnum)))
+    (unless (fx= prev 0)
+      ;; Explicit acquire load guarantees release->acquire ordering for p.val on ARM64.
+      (let spin ((s (:- (__atomic-struct-ref p 1 1) :fixnum)))
+        (if (fx= s 3)
+          (%sched-wake! sched (cons k p.val))
+          (begin
+            (__cpu-relax!)
+            (spin (:- (__atomic-struct-ref p 1 1) :fixnum))))))))
 
 ;;;----------------------------------------------------------------------------
-;;; Direct-Style Bounded & Unbuffered Fiber Channel (Zero Lost Wakeup + Close)
+;;; Lock-Free Vyukov Bounded MPMC & Unbuffered Rendezvous FiberChannel
+;;;
+;;; Buffered channels (cap > 0) use a 128B cache-line-padded Vyukov lock-free
+;;; bounded MPMC ring with zero-lock fast paths on send/recv and Dekker SeqCst
+;;; rx-waiters / tx-waiters counters for zero lost wakeups. Unbuffered channels
+;;; (cap == 0) use direct rendezvous handoff under meta[50].
+;;;
+;;; pack = #[cap mask buf seq meta]
+;;;   meta[0]  = head       (128B isolated consumer cursor)
+;;;   meta[16] = tail       (128B isolated producer cursor)
+;;;   meta[32] = rx-waiters (128B isolated parked receiver count)
+;;;   meta[48] = tx-waiters (128B isolated parked sender count)
+;;;   meta[49] = closed     (0=open, 1=closed)
+;;;   meta[50] = lock       (TTAS spinlock for park/wake/close/unbuffered slow paths)
+
+(def %CH-EMPTY (cons 'ch-empty '()))
+(def %CH-RETRY (cons 'ch-retry '()))
+
+;; Lock-free Vyukov bounded MPMC push (bounded 64-try CAS loop).
+;; Returns fixnum: 0 = pushed, 1 = full, 2 = retry budget hit.
+(def (%vyukov-try-push! (pack :- :vector) val)
+  (declare (not interrupts-enabled))
+  (##c-code
+   "___WORD *___p = ___BODY_AS(___ARG1, ___tVECTOR);
+    ___WORD ___cap  = ___INT(___p[0]);
+    ___WORD ___mask = ___INT(___p[1]);
+    ___SCMOBJ ___buf = ___p[2];
+    ___WORD *___buf_p = ___BODY_AS(___buf, ___tVECTOR);
+    ___VOLATILE ___WORD *___seq_p  = ___CAST(___VOLATILE ___WORD*, ___BODY_AS(___p[3], ___tVECTOR));
+    ___WORD *___meta = ___BODY_AS(___p[4], ___tVECTOR);
+    ___VOLATILE ___WORD *___tail_p = ___CAST(___VOLATILE ___WORD*, ___meta + 16);
+    ___WORD ___res = 2;
+    int ___tries;
+    for (___tries = 0; ___tries < 64; ___tries++) {
+      ___WORD ___pos = ___INT(___atomic_word_load(___tail_p, 0));
+      ___WORD ___idx = (___mask >= 0) ? (___pos & ___mask) : (___pos % ___cap);
+      ___WORD ___s   = ___INT(___atomic_word_load(___seq_p + ___idx, 1));
+      ___WORD ___exp = ___pos << 1;
+      ___WORD ___dif = ___s - ___exp;
+      if (___dif == 0) {
+        if (___atomic_word_cas(___tail_p, ___FIX(___pos), ___FIX(___pos + 1), 0) == ___FIX(___pos)) {
+          ___WORD *___slot = ___buf_p + ___idx;
+          ___GC_WRITE_BARRIER(___ps, ___buf, ___slot, ___ARG2);
+          ___WORD_STORE_RELAXED(___slot, ___ARG2);
+          ___atomic_word_store(___seq_p + ___idx, ___FIX(___exp + 1), 4);
+          ___res = 0;
+          break;
+        }
+      } else if (___dif < 0) {
+        ___res = 1;
+        break;
+      }
+    }
+    ___RESULT = ___FIX(___res);"
+   pack val))
+
+;; Lock-free Vyukov bounded MPMC pop (bounded 64-try CAS loop).
+;; Returns item directly, or empty-tag if empty, or retry-tag if contention budget hit.
+(def (%vyukov-try-pop! (pack :- :vector) empty-tag retry-tag)
+  (declare (not interrupts-enabled))
+  (##c-code
+   "___WORD *___p = ___BODY_AS(___ARG1, ___tVECTOR);
+    ___WORD ___cap  = ___INT(___p[0]);
+    ___WORD ___mask = ___INT(___p[1]);
+    ___SCMOBJ ___buf = ___p[2];
+    ___WORD *___buf_p = ___BODY_AS(___buf, ___tVECTOR);
+    ___VOLATILE ___WORD *___seq_p  = ___CAST(___VOLATILE ___WORD*, ___BODY_AS(___p[3], ___tVECTOR));
+    ___WORD *___meta = ___BODY_AS(___p[4], ___tVECTOR);
+    ___VOLATILE ___WORD *___head_p = ___CAST(___VOLATILE ___WORD*, ___meta + 0);
+    ___SCMOBJ ___res = ___ARG3;
+    int ___tries;
+    for (___tries = 0; ___tries < 64; ___tries++) {
+      ___WORD ___pos = ___INT(___atomic_word_load(___head_p, 0));
+      ___WORD ___idx = (___mask >= 0) ? (___pos & ___mask) : (___pos % ___cap);
+      ___WORD ___s   = ___INT(___atomic_word_load(___seq_p + ___idx, 1));
+      ___WORD ___exp = (___pos << 1) + 1;
+      ___WORD ___dif = ___s - ___exp;
+      if (___dif == 0) {
+        if (___atomic_word_cas(___head_p, ___FIX(___pos), ___FIX(___pos + 1), 0) == ___FIX(___pos)) {
+          ___WORD *___slot = ___buf_p + ___idx;
+          ___SCMOBJ ___item = ___WORD_LOAD_RELAXED(___slot);
+          ___GC_WRITE_BARRIER(___ps, ___buf, ___slot, ___FAL);
+          ___WORD_STORE_RELAXED(___slot, ___FAL);
+          ___atomic_word_store(___seq_p + ___idx, ___FIX((___pos + ___cap) << 1), 4);
+          ___res = ___item;
+          break;
+        }
+      } else if (___dif < 0) {
+        ___res = ___ARG2;
+        break;
+      }
+    }
+    ___RESULT = ___res;"
+   pack empty-tag retry-tag))
 
 (defstruct FiberChannel
-  ((lock         :- AtomicFxBox)
-   (cap          :- :fixnum)
-   (buf          :- :vector)
-   (head         :- :fixnum)
-   (tail         :- :fixnum)
-   (count        :- :fixnum)
-   (closed?      :- :boolean)
+  ((cap          :- :fixnum)
+   (pack         :- :vector)     ;; #[cap mask buf seq meta]
+   (meta         :- :vector)     ;; 64-word 128B-padded control vector
    (recv-waiters :- %WaitQ)
    (send-waiters :- %WaitQ)
    sched)
@@ -852,32 +938,97 @@ END-C
   => FiberChannel
   (when (fx< capacity 0)
     (raise-bad-argument make-fiber-channel "non-negative fixnum capacity" capacity))
-  (FiberChannel
-   (make-atomic-fxbox 0)
-   capacity
-   (if (fx> capacity 0) (make-vector capacity #f) '#())
-   0 0 0 #f
-   (%WaitQ '() '())
-   (%WaitQ '() '())
-   #f))
+  (let* ((meta (make-vector 64 0))
+         (mask (if (and (fx> capacity 0) (fx= (fxand capacity (fx- capacity 1)) 0))
+                 (fx- capacity 1)
+                 -1))
+         (buf (if (fx> capacity 0) (make-vector capacity #f) '#()))
+         (seq (if (fx> capacity 0)
+                (let ((v (make-vector capacity 0)))
+                  (let init ((i 0))
+                    (when (fx< i capacity)
+                      (##vector-set! v i (fxarithmetic-shift-left i 1))
+                      (init (fx+ i 1))))
+                  v)
+                '#()))
+         (pack (vector capacity mask buf seq meta)))
+    (FiberChannel capacity pack meta (%WaitQ '() '()) (%WaitQ '() '()) #f)))
 
 (defalias fiber-channel? FiberChannel?)
 
 (def (fiber-channel-closed? (ch : FiberChannel))
   => :boolean
-  (%fspin-lock! ch.lock)
-  (let ((c ch.closed?))
-    (%fspin-unlock! ch.lock)
-    (:- c :boolean)))
+  (fx> (:- (__atomic-fx-load ch.meta 49 1) :fixnum) 0))
+
+(def (%vyukov-pop-loop (pack :- :vector))
+  (let loop ()
+    (let ((item (%vyukov-try-pop! pack %CH-EMPTY %CH-RETRY)))
+      (if (eq? item %CH-RETRY)
+        (begin (__cpu-relax!) (loop))
+        item))))
+
+(def (%vyukov-push-loop (pack :- :vector) val)
+  (let loop ()
+    (let ((st (:- (%vyukov-try-push! pack val) :fixnum)))
+      (if (fx= st 2)
+        (begin (__cpu-relax!) (loop))
+        st))))
+
+(def (%ch-wake-one-sender! (ch :- FiberChannel))
+  (let ((meta ch.meta)
+        (swq ch.send-waiters)
+        (sk #f)
+        (target #f)
+        (pushed? #f))
+    (%vspin-lock! meta 50)
+    (when (and (fx= (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+               (not (%wq-empty? swq)))
+      (let* ((sw (##car (&%WaitQ-head swq)))
+             (sval (##cdr sw))
+             (st (%vyukov-push-loop ch.pack sval)))
+        (when (fx= st 0)
+          (%wq-pop! swq)
+          (__atomic-fx-fetch-sub! meta 48 1 4)
+          (set! sk (##car sw))
+          (set! target ch.sched)
+          (set! pushed? #t))))
+    (%vspin-unlock! meta 50)
+    (when pushed?
+      (when (fx> (:- (__atomic-fx-load meta 32 4) :fixnum) 0)
+        (%ch-wake-one-receiver! ch))
+      (%sched-wake! target (cons sk #t)))))
+
+(def (%ch-wake-one-receiver! (ch :- FiberChannel))
+  (let ((meta ch.meta)
+        (rwq ch.recv-waiters)
+        (rk #f)
+        (item #f)
+        (target #f)
+        (woke? #f))
+    (%vspin-lock! meta 50)
+    (when (not (%wq-empty? rwq))
+      (let ((got (%vyukov-pop-loop ch.pack)))
+        (unless (eq? got %CH-EMPTY)
+          (set! rk (%wq-pop! rwq))
+          (__atomic-fx-fetch-sub! meta 32 1 4)
+          (set! item got)
+          (set! target ch.sched)
+          (set! woke? #t))))
+    (%vspin-unlock! meta 50)
+    (when woke?
+      (when (fx> (:- (__atomic-fx-load meta 48 4) :fixnum) 0)
+        (%ch-wake-one-sender! ch))
+      (%sched-wake! target (cons rk item)))))
 
 (def (fiber-channel-close! (ch : FiberChannel))
   => :void
-  (let ((rks '())
+  (let ((meta ch.meta)
+        (rks '())
         (sks '())
         (sched #f))
-    (%fspin-lock! ch.lock)
-    (unless ch.closed?
-      (set! ch.closed? #t)
+    (%vspin-lock! meta 50)
+    (when (fx= (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+      (__atomic-fx-store! meta 49 1 4)
       (set! sched ch.sched)
       (let loop ()
         (unless (%wq-empty? ch.recv-waiters)
@@ -886,312 +1037,357 @@ END-C
       (let loop ()
         (unless (%wq-empty? ch.send-waiters)
           (set! sks (cons (##car (%wq-pop! ch.send-waiters)) sks))
-          (loop))))
-    (%fspin-unlock! ch.lock)
+          (loop)))
+      (__atomic-fx-store! meta 32 0 4)
+      (__atomic-fx-store! meta 48 0 4))
+    (%vspin-unlock! meta 50)
     (when sched
       (for-each (lambda (rk) (%sched-wake! sched (cons rk #!eof))) (reverse rks))
       (for-each (lambda (sk) (%sched-wake! sched (cons sk 'closed))) (reverse sks)))
     (void)))
 
+;; Direct FIFO-safe handoff to a parked receiver only when buffered ring is empty.
+(def (%ch-try-direct-handoff! (ch :- FiberChannel) val)
+  (let ((meta ch.meta)
+        (rwq ch.recv-waiters)
+        (rk #f)
+        (target #f)
+        (closed? #f))
+    (%vspin-lock! meta 50)
+    (cond
+     ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+      (set! closed? #t))
+     ((and (not (%wq-empty? rwq))
+           (fx= (:- (__atomic-fx-load meta 0 1) :fixnum)
+                (:- (__atomic-fx-load meta 16 1) :fixnum)))
+      (set! rk (%wq-pop! rwq))
+      (__atomic-fx-fetch-sub! meta 32 1 4)
+      (set! target ch.sched)))
+    (%vspin-unlock! meta 50)
+    (cond
+     (closed? 'closed)
+     (rk (%sched-wake! target (cons rk val)) #t)
+     (else #f))))
+
 (def (fiber-try-send! (ch : FiberChannel) val)
   => :boolean
-  (let* ((ctx (thread-specific (current-thread)))
-         (in-f? (%WorkerCtx? ctx))
-         (sched (if in-f? (&%WorkerCtx-sched ctx) ch.sched))
-         (lock ch.lock)
-         (cap ch.cap)
-         (rwq ch.recv-waiters))
-    (%fspin-lock! lock)
-    (when (and in-f? (not ch.sched))
-      (set! ch.sched sched))
-    (cond
-     (ch.closed?
-      (%fspin-unlock! lock)
-      (raise-io-closed fiber-try-send! "fiber channel is closed" ch))
-     ((not (%wq-empty? rwq))
-      (let ((rk (%wq-pop! rwq))
-            (target-sched (or sched ch.sched)))
-        (%fspin-unlock! lock)
-        (%sched-wake! target-sched (cons rk val))
-        #t))
-     ((fx< ch.count cap)
-      (let ((t ch.tail))
-        (vector-set! ch.buf t val)
-        (set! ch.tail (let ((nt (fx+ t 1))) (if (fx= nt cap) 0 nt)))
-        (set! ch.count (fx+ ch.count 1))
-        (%fspin-unlock! lock)
-        #t))
-     (else
-      (%fspin-unlock! lock)
-      #f))))
+  (let ((meta ch.meta))
+    (if (fx> ch.cap 0)
+      (let loop ()
+        (when (fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+          (raise-io-closed fiber-try-send! "fiber channel is closed" ch))
+        (let ((ho (if (fx> (:- (__atomic-fx-load meta 32 0) :fixnum) 0)
+                    (%ch-try-direct-handoff! ch val)
+                    #f)))
+          (cond
+           ((eq? ho 'closed)
+            (raise-io-closed fiber-try-send! "fiber channel is closed" ch))
+           (ho #t)
+           (else
+            (let ((st (:- (%vyukov-try-push! ch.pack val) :fixnum)))
+              (cond
+               ((fx= st 0)
+                (when (fx> (:- (__atomic-fx-load meta 32 4) :fixnum) 0)
+                  (%ch-wake-one-receiver! ch))
+                #t)
+               ((fx= st 1) #f)
+               (else (__cpu-relax!) (loop))))))))
+      ;; Unbuffered rendezvous (cap == 0)
+      (let ((rwq ch.recv-waiters))
+        (%vspin-lock! meta 50)
+        (cond
+         ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+          (%vspin-unlock! meta 50)
+          (raise-io-closed fiber-try-send! "fiber channel is closed" ch))
+         ((not (%wq-empty? rwq))
+          (let ((rk (%wq-pop! rwq))
+                (target ch.sched))
+            (__atomic-fx-fetch-sub! meta 32 1 4)
+            (%vspin-unlock! meta 50)
+            (%sched-wake! target (cons rk val))
+            #t))
+         (else
+          (%vspin-unlock! meta 50)
+          #f))))))
 
 (def (fiber-send! (ch : FiberChannel) val)
-  (let* ((ctx (thread-specific (current-thread)))
-         (in-f? (%WorkerCtx? ctx))
-         (sched (if in-f? (&%WorkerCtx-sched ctx) ch.sched))
-         (lock ch.lock)
-         (cap ch.cap)
-         (rwq ch.recv-waiters))
-    (%fspin-lock! lock)
-    (when (and in-f? (not ch.sched))
-      (set! ch.sched sched))
-    (cond
-     (ch.closed?
-      (%fspin-unlock! lock)
-      (raise-io-closed fiber-send! "fiber channel is closed" ch))
-     ((not (%wq-empty? rwq))
-      (let ((rk (%wq-pop! rwq))
-            (target-sched (or sched ch.sched)))
-        (%fspin-unlock! lock)
-        (%sched-wake! target-sched (cons rk val))
-        #t))
-     ((fx< ch.count cap)
-      (let ((t ch.tail))
-        (vector-set! ch.buf t val)
-        (set! ch.tail (let ((nt (fx+ t 1))) (if (fx= nt cap) 0 nt)))
-        (set! ch.count (fx+ ch.count 1))
-        (%fspin-unlock! lock)
-        #t))
-     (in-f?
-      (%fspin-unlock! lock)
-      (let ((res (perform %eff-park-send ch val)))
-        (when (eq? res 'closed)
+  (let ((meta ch.meta))
+    (if (fx> ch.cap 0)
+      (let loop ()
+        (when (fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
           (raise-io-closed fiber-send! "fiber channel is closed" ch))
-        #t))
-     (else
-      ;; External green-thread/actor sender into a full FiberChannel: cooperative yield retry.
-      (%fspin-unlock! lock)
-      (thread-yield!)
-      (fiber-send! ch val)))))
+        (let ((ho (if (fx> (:- (__atomic-fx-load meta 32 0) :fixnum) 0)
+                    (%ch-try-direct-handoff! ch val)
+                    #f)))
+          (cond
+           ((eq? ho 'closed)
+            (raise-io-closed fiber-send! "fiber channel is closed" ch))
+           (ho #t)
+           (else
+            (let ((st (:- (%vyukov-try-push! ch.pack val) :fixnum)))
+              (cond
+               ((fx= st 0)
+                (when (fx> (:- (__atomic-fx-load meta 32 4) :fixnum) 0)
+                  (%ch-wake-one-receiver! ch))
+                #t)
+               ((fx= st 1)
+                (if (in-fiber?)
+                  (let ((res (perform %eff-park-send ch val)))
+                    (when (eq? res 'closed)
+                      (raise-io-closed fiber-send! "fiber channel is closed" ch))
+                    #t)
+                  (begin
+                    (thread-yield!)
+                    (loop))))
+               (else (__cpu-relax!) (loop))))))))
+      ;; Unbuffered rendezvous (cap == 0)
+      (let ((rwq ch.recv-waiters))
+        (%vspin-lock! meta 50)
+        (cond
+         ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+          (%vspin-unlock! meta 50)
+          (raise-io-closed fiber-send! "fiber channel is closed" ch))
+         ((not (%wq-empty? rwq))
+          (let ((rk (%wq-pop! rwq))
+                (target ch.sched))
+            (__atomic-fx-fetch-sub! meta 32 1 4)
+            (%vspin-unlock! meta 50)
+            (%sched-wake! target (cons rk val))
+            #t))
+         ((in-fiber?)
+          (%vspin-unlock! meta 50)
+          (let ((res (perform %eff-park-send ch val)))
+            (when (eq? res 'closed)
+              (raise-io-closed fiber-send! "fiber channel is closed" ch))
+            #t))
+         (else
+          (%vspin-unlock! meta 50)
+          (thread-yield!)
+          (fiber-send! ch val)))))))
 
 (def (%park-send-waiter! sched k (ch :- FiberChannel) val)
-  (let ((lock ch.lock)
-        (cap ch.cap)
+  (let ((meta ch.meta)
         (rwq ch.recv-waiters)
         (swq ch.send-waiters))
-    (%fspin-lock! lock)
+    (%vspin-lock! meta 50)
     (unless ch.sched (set! ch.sched sched))
     (cond
-     (ch.closed?
-      (%fspin-unlock! lock)
+     ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+      (%vspin-unlock! meta 50)
       (%sched-wake! sched (cons k 'closed)))
-     ((not (%wq-empty? rwq))
+     ((and (not (%wq-empty? rwq))
+           (or (fx= ch.cap 0)
+               (fx= (:- (__atomic-fx-load meta 0 1) :fixnum)
+                    (:- (__atomic-fx-load meta 16 1) :fixnum))))
       (let ((rk (%wq-pop! rwq)))
-        (%fspin-unlock! lock)
+        (__atomic-fx-fetch-sub! meta 32 1 4)
+        (%vspin-unlock! meta 50)
         (%sched-wake! sched (cons rk val))
         (%sched-wake! sched (cons k #t))))
-     ((fx< ch.count cap)
-      (let ((t ch.tail))
-        (vector-set! ch.buf t val)
-        (set! ch.tail (let ((nt (fx+ t 1))) (if (fx= nt cap) 0 nt)))
-        (set! ch.count (fx+ ch.count 1))
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons k #t))))
+     ((fx> ch.cap 0)
+      ;; Publish tx-waiters += 1 with SeqCst BEFORE final ring re-check (Dekker!)
+      (__atomic-fx-fetch-add! meta 48 1 4)
+      (let ((st (%vyukov-push-loop ch.pack val)))
+        (if (fx= st 0)
+          (begin
+            (__atomic-fx-fetch-sub! meta 48 1 4)
+            (%vspin-unlock! meta 50)
+            (when (fx> (:- (__atomic-fx-load meta 32 4) :fixnum) 0)
+              (%ch-wake-one-receiver! ch))
+            (%sched-wake! sched (cons k #t)))
+          (begin
+            (%wq-push! swq (cons k val))
+            (%vspin-unlock! meta 50)))))
      (else
+      (__atomic-fx-fetch-add! meta 48 1 4)
       (%wq-push! swq (cons k val))
-      (%fspin-unlock! lock)))))
+      (%vspin-unlock! meta 50)))))
 
 (def (fiber-try-recv! (ch : FiberChannel) (default : :t := #f))
-  (let* ((ctx (thread-specific (current-thread)))
-         (in-f? (%WorkerCtx? ctx))
-         (sched (if in-f? (&%WorkerCtx-sched ctx) ch.sched))
-         (lock ch.lock)
-         (cap ch.cap)
-         (swq ch.send-waiters))
-    (%fspin-lock! lock)
-    (when (and in-f? (not ch.sched))
-      (set! ch.sched sched))
-    (cond
-     ((fx> ch.count 0)
-      (let* ((h ch.head)
-             (buf ch.buf)
-             (item (vector-ref buf h))
-             (nh (let ((x (fx+ h 1))) (if (fx= x cap) 0 x))))
-        (vector-set! buf h #f)
-        (set! ch.head nh)
-        (if (not (%wq-empty? swq))
+  (let ((meta ch.meta))
+    (if (fx> ch.cap 0)
+      (let ((item (%vyukov-pop-loop ch.pack)))
+        (if (not (eq? item %CH-EMPTY))
+          (begin
+            (when (fx> (:- (__atomic-fx-load meta 48 4) :fixnum) 0)
+              (%ch-wake-one-sender! ch))
+            item)
+          (if (fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+            (let ((item2 (%vyukov-pop-loop ch.pack)))
+              (if (eq? item2 %CH-EMPTY) #!eof item2))
+            default)))
+      ;; Unbuffered rendezvous (cap == 0)
+      (let ((swq ch.send-waiters))
+        (%vspin-lock! meta 50)
+        (cond
+         ((not (%wq-empty? swq))
           (let* ((sw (%wq-pop! swq))
                  (sk (##car sw))
                  (sval (##cdr sw))
-                 (t ch.tail)
-                 (target-sched (or sched ch.sched)))
-            (vector-set! buf t sval)
-            (set! ch.tail (let ((nt (fx+ t 1))) (if (fx= nt cap) 0 nt)))
-            (%fspin-unlock! lock)
-            (%sched-wake! target-sched (cons sk #t))
-            item)
-          (begin
-            (set! ch.count (fx- ch.count 1))
-            (%fspin-unlock! lock)
-            item))))
-     ((not (%wq-empty? swq))
-      (let* ((sw (%wq-pop! swq))
-             (sk (##car sw))
-             (sval (##cdr sw))
-             (target-sched (or sched ch.sched)))
-        (%fspin-unlock! lock)
-        (%sched-wake! target-sched (cons sk #t))
-        sval))
-     (ch.closed?
-      (%fspin-unlock! lock)
-      #!eof)
-     (else
-      (%fspin-unlock! lock)
-      default))))
+                 (target ch.sched))
+            (__atomic-fx-fetch-sub! meta 48 1 4)
+            (%vspin-unlock! meta 50)
+            (%sched-wake! target (cons sk #t))
+            sval))
+         ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+          (%vspin-unlock! meta 50)
+          #!eof)
+         (else
+          (%vspin-unlock! meta 50)
+          default))))))
 
 (def (fiber-recv! (ch : FiberChannel))
-  (let* ((ctx (%current-wctx))
-         (sched (&%WorkerCtx-sched ctx))
-         (lock ch.lock)
-         (cap ch.cap)
-         (swq ch.send-waiters))
-    (%fspin-lock! lock)
-    (unless ch.sched (set! ch.sched sched))
-    (cond
-     ((fx> ch.count 0)
-      (let* ((h ch.head)
-             (buf ch.buf)
-             (item (vector-ref buf h))
-             (nh (let ((x (fx+ h 1))) (if (fx= x cap) 0 x))))
-        (vector-set! buf h #f)
-        (set! ch.head nh)
-        (if (not (%wq-empty? swq))
+  (let ((meta ch.meta))
+    (if (fx> ch.cap 0)
+      (let ((item (%vyukov-pop-loop ch.pack)))
+        (if (not (eq? item %CH-EMPTY))
+          (begin
+            (when (fx> (:- (__atomic-fx-load meta 48 4) :fixnum) 0)
+              (%ch-wake-one-sender! ch))
+            item)
+          (if (fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+            (let ((item2 (%vyukov-pop-loop ch.pack)))
+              (if (eq? item2 %CH-EMPTY) #!eof item2))
+            (begin
+              (%current-wctx)
+              (perform %eff-park-recv ch)))))
+      ;; Unbuffered rendezvous (cap == 0)
+      (let* ((ctx (%current-wctx))
+             (sched (&%WorkerCtx-sched ctx))
+             (swq ch.send-waiters))
+        (%vspin-lock! meta 50)
+        (unless ch.sched (set! ch.sched sched))
+        (cond
+         ((not (%wq-empty? swq))
           (let* ((sw (%wq-pop! swq))
                  (sk (##car sw))
-                 (sval (##cdr sw))
-                 (t ch.tail))
-            (vector-set! buf t sval)
-            (set! ch.tail (let ((nt (fx+ t 1))) (if (fx= nt cap) 0 nt)))
-            (%fspin-unlock! lock)
+                 (sval (##cdr sw)))
+            (__atomic-fx-fetch-sub! meta 48 1 4)
+            (%vspin-unlock! meta 50)
             (%sched-wake! sched (cons sk #t))
-            item)
-          (begin
-            (set! ch.count (fx- ch.count 1))
-            (%fspin-unlock! lock)
-            item))))
-     ((not (%wq-empty? swq))
-      (let* ((sw (%wq-pop! swq))
-             (sk (##car sw))
-             (sval (##cdr sw)))
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons sk #t))
-        sval))
-     (ch.closed?
-      (%fspin-unlock! lock)
-      #!eof)
-     (else
-      (%fspin-unlock! lock)
-      (perform %eff-park-recv ch)))))
+            sval))
+         ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+          (%vspin-unlock! meta 50)
+          #!eof)
+         (else
+          (%vspin-unlock! meta 50)
+          (perform %eff-park-recv ch)))))))
 
 (def (%park-recv-waiter! sched k (ch :- FiberChannel))
-  (let ((lock ch.lock)
-        (cap ch.cap)
+  (let ((meta ch.meta)
         (rwq ch.recv-waiters)
         (swq ch.send-waiters))
-    (%fspin-lock! lock)
+    (%vspin-lock! meta 50)
     (unless ch.sched (set! ch.sched sched))
-    (cond
-     ((fx> ch.count 0)
-      (let* ((h ch.head)
-             (buf ch.buf)
-             (item (vector-ref buf h))
-             (nh (let ((x (fx+ h 1))) (if (fx= x cap) 0 x))))
-        (vector-set! buf h #f)
-        (set! ch.head nh)
-        (if (not (%wq-empty? swq))
-          (let* ((sw (%wq-pop! swq))
-                 (sk (##car sw))
-                 (sval (##cdr sw))
-                 (t ch.tail))
-            (vector-set! buf t sval)
-            (set! ch.tail (let ((nt (fx+ t 1))) (if (fx= nt cap) 0 nt)))
-            (%fspin-unlock! lock)
-            (%sched-wake! sched (cons sk #t))
+    (if (fx> ch.cap 0)
+      (begin
+        ;; Publish rx-waiters += 1 with SeqCst BEFORE final ring re-check (Dekker!)
+        (__atomic-fx-fetch-add! meta 32 1 4)
+        (let ((item (%vyukov-pop-loop ch.pack)))
+          (cond
+           ((not (eq? item %CH-EMPTY))
+            (__atomic-fx-fetch-sub! meta 32 1 4)
+            (%vspin-unlock! meta 50)
+            (when (fx> (:- (__atomic-fx-load meta 48 4) :fixnum) 0)
+              (%ch-wake-one-sender! ch))
             (%sched-wake! sched (cons k item)))
-          (begin
-            (set! ch.count (fx- ch.count 1))
-            (%fspin-unlock! lock)
-            (%sched-wake! sched (cons k item))))))
-     ((not (%wq-empty? swq))
-      (let* ((sw (%wq-pop! swq))
-             (sk (##car sw))
-             (sval (##cdr sw)))
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons sk #t))
-        (%sched-wake! sched (cons k sval))))
-     (ch.closed?
-      (%fspin-unlock! lock)
-      (%sched-wake! sched (cons k #!eof)))
-     (else
-      (%wq-push! rwq k)
-      (%fspin-unlock! lock)))))
+           ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+            (__atomic-fx-fetch-sub! meta 32 1 4)
+            (%vspin-unlock! meta 50)
+            (%sched-wake! sched (cons k #!eof)))
+           (else
+            (%wq-push! rwq k)
+            (%vspin-unlock! meta 50)))))
+      ;; Unbuffered rendezvous (cap == 0)
+      (cond
+       ((not (%wq-empty? swq))
+        (let* ((sw (%wq-pop! swq))
+               (sk (##car sw))
+               (sval (##cdr sw)))
+          (__atomic-fx-fetch-sub! meta 48 1 4)
+          (%vspin-unlock! meta 50)
+          (%sched-wake! sched (cons sk #t))
+          (%sched-wake! sched (cons k sval))))
+       ((fx> (:- (__atomic-fx-load meta 49 1) :fixnum) 0)
+        (%vspin-unlock! meta 50)
+        (%sched-wake! sched (cons k #!eof)))
+       (else
+        (__atomic-fx-fetch-add! meta 32 1 4)
+        (%wq-push! rwq k)
+        (%vspin-unlock! meta 50))))))
 
 ;;;----------------------------------------------------------------------------
-;;; Cooperative Non-Blocking FiberMutex (Yield- & Migration-Safe)
+;;; 3-State Lock-Free Cooperative FiberMutex (Zero-Spinlock Fast Path)
+;;;
+;;; cells[0]  = state (0=unlocked, 1=locked uncontended, 2=locked with waiters)
+;;; cells[16] = TTAS spinlock (contended park / handoff slow path only)
 
 (defstruct FiberMutex
-  ((lock    :- AtomicFxBox)
-   (held?   :- :boolean)
+  ((cells   :- :vector)
    (waiters :- %WaitQ)
    sched)
   final: #t)
 
 (def (make-fiber-mutex)
   => FiberMutex
-  (FiberMutex (make-atomic-fxbox 0) #f (%WaitQ '() '()) #f))
+  (FiberMutex (make-vector 32 0) (%WaitQ '() '()) #f))
 
 (defalias fiber-mutex? FiberMutex?)
 
 (def (fiber-mutex-lock! (fm : FiberMutex))
   => :void
-  (let* ((ctx (%current-wctx))
-         (sched (&%WorkerCtx-sched ctx))
-         (lock fm.lock))
-    (%fspin-lock! lock)
-    (unless fm.sched (set! fm.sched sched))
-    (if (not fm.held?)
-      (begin
-        (set! fm.held? #t)
-        (%fspin-unlock! lock)
-        (void))
-      (begin
-        (%fspin-unlock! lock)
-        (perform %eff-park-mutex fm)
-        (void)))))
+  (let ((cells fm.cells))
+    (unless (fx= (:- (__atomic-fx-cas! cells 0 0 1 1) :fixnum) 0)
+      (%current-wctx)
+      (perform %eff-park-mutex fm))
+    (void)))
 
 (def (%park-mutex-waiter! sched k (fm :- FiberMutex))
-  (let ((lock fm.lock))
-    (%fspin-lock! lock)
+  (let ((cells fm.cells)
+        (acquired? #f))
+    (%vspin-lock! cells 16)
     (unless fm.sched (set! fm.sched sched))
-    (if (not fm.held?)
-      (begin
-        (set! fm.held? #t)
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons k #t)))
-      (begin
-        (%wq-push! fm.waiters k)
-        (%fspin-unlock! lock)))))
+    (let loop ()
+      (let ((cur (:- (__atomic-fx-load cells 0 1) :fixnum)))
+        (cond
+         ((fx= cur 0)
+          (if (fx= (:- (__atomic-fx-cas! cells 0 0 1 1) :fixnum) 0)
+            (set! acquired? #t)
+            (loop)))
+         ((fx= cur 1)
+          (if (fx= (:- (__atomic-fx-cas! cells 0 1 2 3) :fixnum) 1)
+            (%wq-push! fm.waiters k)
+            (loop)))
+         (else
+          (%wq-push! fm.waiters k)))))
+    (%vspin-unlock! cells 16)
+    (when acquired?
+      (%sched-wake! sched (cons k #t)))))
 
 (def (fiber-mutex-unlock! (fm : FiberMutex))
   => :void
-  (let ((lock fm.lock)
-        (next-k #f)
-        (sched #f))
-    (%fspin-lock! lock)
-    (unless fm.held?
-      (%fspin-unlock! lock)
+  (let* ((cells fm.cells)
+         (prev (:- (__atomic-fx-cas! cells 0 1 0 2) :fixnum)))
+    (cond
+     ((fx= prev 1) (void))
+     ((fx= prev 0)
       (raise-context-error fiber-mutex-unlock! "fiber mutex is not locked" fm))
-    (if (not (%wq-empty? fm.waiters))
-      (begin
-        ;; Direct ownership handoff to next queued fiber (fm.held? stays #t)
-        (set! next-k (%wq-pop! fm.waiters))
-        (set! sched fm.sched)
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons next-k #t)))
-      (begin
-        (set! fm.held? #f)
-        (%fspin-unlock! lock)))
-    (void)))
+     (else
+      (let ((next-k #f)
+            (sched #f))
+        (%vspin-lock! cells 16)
+        (if (not (%wq-empty? fm.waiters))
+          (begin
+            (set! next-k (%wq-pop! fm.waiters))
+            (set! sched fm.sched)
+            ;; Direct ownership handoff: drop to state=1 if queue is now empty, else stay 2
+            (when (%wq-empty? fm.waiters)
+              (__atomic-fx-store! cells 0 1 2)))
+          (__atomic-fx-store! cells 0 0 2))
+        (%vspin-unlock! cells 16)
+        (when next-k
+          (%sched-wake! sched (cons next-k #t)))
+        (void))))))
 
 ;; Exception-safe fiber lock (intentionally no continuation barrier so fibers
 ;; may cooperatively yield, sleep, or await FiberChannel while holding fm).
@@ -1208,11 +1404,14 @@ END-C
          res)))))
 
 ;;;----------------------------------------------------------------------------
-;;; Cooperative Non-Blocking FiberSemaphore (Bounded Concurrency Limiter)
+;;; Lock-Free Cooperative FiberSemaphore (Zero-Spinlock Fast Path + Dekker)
+;;;
+;;; cells[0]  = permits (128B isolated atomic counter)
+;;; cells[16] = waiters-count (Dekker SeqCst against permits fetch-add)
+;;; cells[17] = TTAS spinlock (contended park / handoff slow path only)
 
 (defstruct FiberSemaphore
-  ((lock    :- AtomicFxBox)
-   (permits :- :fixnum)
+  ((cells   :- :vector)
    (waiters :- %WaitQ)
    sched)
   final: #t)
@@ -1221,55 +1420,78 @@ END-C
   => FiberSemaphore
   (when (fx< permits 0)
     (raise-bad-argument make-fiber-semaphore "non-negative fixnum permits" permits))
-  (FiberSemaphore (make-atomic-fxbox 0) permits (%WaitQ '() '()) #f))
+  (let ((cells (make-vector 32 0)))
+    (##vector-set! cells 0 permits)
+    (FiberSemaphore cells (%WaitQ '() '()) #f)))
 
 (defalias fiber-semaphore? FiberSemaphore?)
 
+(def (%sem-try-acquire-fast! (cells :- :vector))
+  => :boolean
+  (let loop ()
+    (let ((c (:- (__atomic-fx-load cells 0 1) :fixnum)))
+      (if (fx> c 0)
+        (if (fx= (:- (__atomic-fx-cas! cells 0 c (fx- c 1) 1) :fixnum) c)
+          #t
+          (loop))
+        #f))))
+
 (def (fiber-semaphore-acquire! (sem : FiberSemaphore))
   => :void
-  (let* ((ctx (%current-wctx))
-         (sched (&%WorkerCtx-sched ctx))
-         (lock sem.lock))
-    (%fspin-lock! lock)
-    (unless sem.sched (set! sem.sched sched))
-    (if (fx> sem.permits 0)
-      (begin
-        (set! sem.permits (fx- sem.permits 1))
-        (%fspin-unlock! lock)
-        (void))
-      (begin
-        (%fspin-unlock! lock)
-        (perform %eff-park-sem sem)
-        (void)))))
+  (unless (%sem-try-acquire-fast! sem.cells)
+    (%current-wctx)
+    (perform %eff-park-sem sem))
+  (void))
 
 (def (%park-sem-waiter! sched k (sem :- FiberSemaphore))
-  (let ((lock sem.lock))
-    (%fspin-lock! lock)
+  (let ((cells sem.cells)
+        (acquired? #f))
+    (%vspin-lock! cells 17)
     (unless sem.sched (set! sem.sched sched))
-    (if (fx> sem.permits 0)
+    ;; Publish waiters-count += 1 with SeqCst BEFORE re-checking permits (Dekker!)
+    (__atomic-fx-fetch-add! cells 16 1 4)
+    (if (%sem-try-acquire-fast! cells)
       (begin
-        (set! sem.permits (fx- sem.permits 1))
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons k #t)))
-      (begin
-        (%wq-push! sem.waiters k)
-        (%fspin-unlock! lock)))))
+        (__atomic-fx-fetch-sub! cells 16 1 4)
+        (set! acquired? #t))
+      (%wq-push! sem.waiters k))
+    (%vspin-unlock! cells 17)
+    (when acquired?
+      (%sched-wake! sched (cons k #t)))))
 
 (def (fiber-semaphore-release! (sem : FiberSemaphore))
   => :void
-  (let ((lock sem.lock)
-        (next-k #f)
-        (sched #f))
-    (%fspin-lock! lock)
-    (if (not (%wq-empty? sem.waiters))
+  (let ((cells sem.cells))
+    (if (fx= (:- (__atomic-fx-load cells 16 1) :fixnum) 0)
       (begin
-        (set! next-k (%wq-pop! sem.waiters))
-        (set! sched sem.sched)
-        (%fspin-unlock! lock)
-        (%sched-wake! sched (cons next-k #t)))
-      (begin
-        (set! sem.permits (fx+ sem.permits 1))
-        (%fspin-unlock! lock)))
+        (__atomic-fx-fetch-add! cells 0 1 4)
+        (when (fx> (:- (__atomic-fx-load cells 16 4) :fixnum) 0)
+          ;; Raced with a concurrently parking waiter: reclaim permit and wake it!
+          (let ((woke '())
+                (sched #f))
+            (%vspin-lock! cells 17)
+            (set! sched sem.sched)
+            (let drain ()
+              (when (and (not (%wq-empty? sem.waiters))
+                         (%sem-try-acquire-fast! cells))
+                (__atomic-fx-fetch-sub! cells 16 1 4)
+                (set! woke (cons (%wq-pop! sem.waiters) woke))
+                (drain)))
+            (%vspin-unlock! cells 17)
+            (when sched
+              (for-each (lambda (k) (%sched-wake! sched (cons k #t))) (reverse woke))))))
+      (let ((next-k #f)
+            (sched #f))
+        (%vspin-lock! cells 17)
+        (if (not (%wq-empty? sem.waiters))
+          (begin
+            (set! next-k (%wq-pop! sem.waiters))
+            (__atomic-fx-fetch-sub! cells 16 1 4)
+            (set! sched sem.sched))
+          (__atomic-fx-fetch-add! cells 0 1 4))
+        (%vspin-unlock! cells 17)
+        (when next-k
+          (%sched-wake! sched (cons next-k #t)))))
     (void)))
 
 (def (with-fiber-semaphore (sem : FiberSemaphore) (proc : :procedure))
