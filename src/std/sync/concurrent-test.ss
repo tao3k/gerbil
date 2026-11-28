@@ -164,4 +164,107 @@
       (check (concurrent-table-delete! ct 42) => #t)
       (check (concurrent-table-delete! ct 42) => #f)
       (check (concurrent-table-ref ct 42 'missing) => 'missing)
-      (check (concurrent-table-size ct) => (fx- nkeys 1)))))
+      (check (concurrent-table-size ct) => (fx- nkeys 1)))
+
+    (test-case "WSDeque full-ring wraparound (cap=64) exact-once conservation under all-core stealing"
+      (def dq (make-ws-deque 64))
+      (def n 5000)
+      (def nthieves (max 2 (- (smp-nthreads) 1)))
+      (def seen (make-vector n 0))
+      (def done-push (make-atomic-fxbox 0))
+      (def thieves
+        (for/collect (_ (in-range nthieves))
+          (spawn
+           (lambda ()
+             (let loop ()
+               (let-values (((ok v) (ws-deque-try-steal! dq)))
+                 (if ok
+                   (begin
+                     (let inc ()
+                       (let ((old (vector-atomic-ref seen v (memory-order acquire))))
+                         (unless (eq? (vector-atomic-cas! seen v old (fx+ old 1) (memory-order acquire-release)) old)
+                           (inc))))
+                     (loop))
+                   (if (and (fx= (atomic-fxbox-ref done-push (memory-order acquire)) 1)
+                            (fx= (ws-deque-size dq) 0))
+                     (void)
+                     (begin
+                       (thread-yield!)
+                       (loop))))))))))
+      (let loop ((i 0))
+        (when (fx< i n)
+          (if (ws-deque-push! dq i)
+            (loop (fx+ i 1))
+            ;; Full ring: owner pops one locally to make room and retries i
+            (begin
+              (let-values (((ok v) (ws-deque-try-pop! dq)))
+                (when ok
+                  (let inc ()
+                    (let ((old (vector-atomic-ref seen v (memory-order acquire))))
+                      (unless (eq? (vector-atomic-cas! seen v old (fx+ old 1) (memory-order acquire-release)) old)
+                        (inc))))))
+              (loop i)))))
+      (let drain ()
+        (let-values (((ok v) (ws-deque-try-pop! dq)))
+          (when ok
+            (let inc ()
+              (let ((old (vector-atomic-ref seen v (memory-order acquire))))
+                (unless (eq? (vector-atomic-cas! seen v old (fx+ old 1) (memory-order acquire-release)) old)
+                  (inc))))
+            (drain))))
+      (atomic-fxbox-set! done-push 1 (memory-order release))
+      (for-each thread-join! thieves)
+      ;; Every single item 0..4999 must be claimed EXACTLY ONCE (no drops, no duplicates!)
+      (let ((bad 0))
+        (let verify ((i 0))
+          (when (fx< i n)
+            (unless (fx= (vector-atomic-ref seen i (memory-order acquire)) 1)
+              (set! bad (fx+ bad 1)))
+            (verify (fx+ i 1))))
+        (check bad => 0)))
+
+    (test-case "LFQueue alternating empty/non-empty MPMC burst waves exact-once conservation"
+      (def q (make-lf-queue))
+      (def nwaves 15)
+      (def half (max 2 (quotient (smp-nthreads) 2)))
+      (def per-prod 200)
+      (def total (* half per-prod))
+      (for (_ (in-range nwaves))
+        (let ((seen (make-vector total 0))
+              (popped (make-atomic-fxbox 0)))
+          (let ((prods
+                 (for/collect (pid (in-range half))
+                   (spawn
+                    (lambda ()
+                      (let lp ((i 0))
+                        (when (fx< i per-prod)
+                          (lf-queue-enqueue! q (fx+ (fx* pid per-prod) i))
+                          (lp (fx+ i 1))))))))
+                (cons-t
+                 (for/collect (_ (in-range half))
+                   (spawn
+                    (lambda ()
+                      (let lp ()
+                        (when (fx< (atomic-fxbox-ref popped (memory-order acquire)) total)
+                          (let-values (((ok v) (lf-queue-try-dequeue! q)))
+                            (if ok
+                              (begin
+                                (let inc ()
+                                  (let ((old (vector-atomic-ref seen v (memory-order acquire))))
+                                    (unless (eq? (vector-atomic-cas! seen v old (fx+ old 1) (memory-order acquire-release)) old)
+                                      (inc))))
+                                (atomic-fxbox-fetch-add! popped 1 (memory-order acquire-release))
+                                (lp))
+                              (begin
+                                (thread-yield!)
+                                (lp)))))))))))
+            (for-each thread-join! prods)
+            (for-each thread-join! cons-t)
+            (check (lf-queue-empty? q) => #t)
+            (let ((bad 0))
+              (let verify ((i 0))
+                (when (fx< i total)
+                  (unless (fx= (vector-atomic-ref seen i (memory-order acquire)) 1)
+                    (set! bad (fx+ bad 1)))
+                  (verify (fx+ i 1))))
+              (check bad => 0))))))))

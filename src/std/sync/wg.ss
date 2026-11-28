@@ -1,6 +1,6 @@
 ;;; -*- Gerbil -*-
 ;;; © vyzo
-;;; transient parallel workgroups (SMP lock-free MPMC queue + lazy condvar park)
+;;; transient parallel workgroups (SMP lock-free MPMC queue + single-word packed parker)
 (import :std/error
         :std/iter
         :gerbil/runtime/util
@@ -8,52 +8,55 @@
         ./concurrent)
 (export WG? make-wg wg-add! wg-wait!)
 
-(defstruct WG ((q        :- LFQueue)
-               (closed   :- AtomicFxBox)
-               (spinning :- AtomicFxBox)
-               (sleepers :- AtomicFxBox)
-               (waking   :- AtomicFxBox)
-               (mx       :- :mutex)
-               (cv       :- :condvar)
+;; Packed fixnum park-state word (lives at state[16], 128B isolated from closed at state[0]):
+;;   bits  0..11 : spinning worker count (+1, up to 4095 workers)
+;;   bits 12..23 : sleeping worker count (+4096 = #x1000)
+;;   bit  24     : waking latch (#x1000000)
+;; Portable across 32-bit and 64-bit fixnums. Single atomic load in wg-wake-one!
+;; replaces 3 separate cache-line loads.
+(def %WG-SPIN-MASK    #xfff)
+(def %WG-SLEEP-UNIT   #x1000)
+(def %WG-SLEEP-MASK   #xfff000)
+(def %WG-WAKING-BIT   #x1000000)
+(def %WG-ACTIVE-MASK  (fxior %WG-SPIN-MASK %WG-WAKING-BIT))
+
+(defstruct WG ((q     :- LFQueue)
+               (state :- :vector)
+               (mx    :- :mutex)
+               (cv    :- :condvar)
                workers)
   final: #t)
 
 (def (make-wg cores)
   (let* ((q (make-lf-queue))
-         (closed (make-atomic-fxbox 0))
-         (spinning (make-atomic-fxbox 0))
-         (sleepers (make-atomic-fxbox 0))
-         (waking (make-atomic-fxbox 0))
+         ;; state[0] = closed flag, state[16] = packed park-state (128B apart)
+         (state (make-vector 32 0))
          (mx (make-mutex 'wg))
          (cv (make-condition-variable 'wg))
-         (wg (WG q closed spinning sleepers waking mx cv #f))
+         (wg (WG q state mx cv #f))
          (threads (map (lambda (x) (spawn/name [worker x] worker wg)) (iota cores))))
     (set! (&WG-workers wg) threads)
     wg))
 
 (def (wg-wake-one! (wg :- WG))
-  ;; SeqCst fence orders prior enqueue before observing spinning/waking/sleepers.
-  (atomic-fence (memory-order sequentially-consistent))
-  (when (and (fx= (atomic-fxbox-ref wg.spinning (memory-order acquire)) 0)
-             (fx= (atomic-fxbox-ref wg.waking (memory-order acquire)) 0)
-             (fx> (atomic-fxbox-ref wg.sleepers (memory-order acquire)) 0))
-    (mutex-lock! wg.mx)
-    (when (and (fx= (atomic-fxbox-ref wg.closed (memory-order acquire)) 0)
-               (fx= (atomic-fxbox-ref wg.spinning (memory-order acquire)) 0)
-               (fx= (atomic-fxbox-ref wg.waking (memory-order acquire)) 0)
-               (fx> (atomic-fxbox-ref wg.sleepers (memory-order acquire)) 0))
-      ;; Inside mx with waking=0 and closed=0, sleepers>0 guarantees a worker is
-      ;; parked on cv and will wake, increment spinning, decrement sleepers, and clear waking.
-      (atomic-fxbox-set! wg.waking 1 (memory-order release))
-      (condition-variable-signal! wg.cv))
-    (mutex-unlock! wg.mx)))
+  ;; SeqCst fence orders prior enqueue before observing packed park-state.
+  (__atomic-fence! 4)
+  (let* ((state wg.state)
+         (ps (:- (__atomic-fx-load state 16 1) :fixnum)))
+    (when (and (fx> (fxand ps %WG-SLEEP-MASK) 0)
+               (fx= (fxand ps %WG-ACTIVE-MASK) 0))
+      (mutex-lock! wg.mx)
+      (when (fx= (:- (__atomic-fx-load state 0 1) :fixnum) 0)
+        (let ((ps2 (:- (__atomic-fx-load state 16 1) :fixnum)))
+          (when (and (fx> (fxand ps2 %WG-SLEEP-MASK) 0)
+                     (fx= (fxand ps2 %WG-ACTIVE-MASK) 0))
+            (__atomic-fx-fetch-ior! state 16 %WG-WAKING-BIT 2)
+            (condition-variable-signal! wg.cv))))
+      (mutex-unlock! wg.mx))))
 
 (def (worker (wg :- WG))
   (let ((q wg.q)
-        (closed wg.closed)
-        (spinning wg.spinning)
-        (sleepers wg.sleepers)
-        (waking wg.waking)
+        (state wg.state)
         (mx wg.mx)
         (cv wg.cv))
     (let loop ((spins 0) (is-spinning? #f))
@@ -61,17 +64,19 @@
         (if ok
           (begin
             (when is-spinning?
-              (let ((prev (atomic-fxbox-fetch-sub! spinning 1 (memory-order acquire-release))))
+              (let ((prev (:- (__atomic-fx-fetch-sub! state 16 1 4) :fixnum)))
                 ;; If we were the last searching worker and more work is already queued,
                 ;; cascade-wake one sleeper for immediate multicore ramp-up.
-                (when (and (fx= prev 1) (not (lf-queue-empty? q)))
+                (when (and (fx= (fxand prev %WG-SPIN-MASK) 1)
+                           (fx> (fxand prev %WG-SLEEP-MASK) 0)
+                           (not (lf-queue-empty? q)))
                   (wg-wake-one! wg))))
             (thunk)
             (loop 0 #f))
           (cond
-           ((fx> (atomic-fxbox-ref closed (memory-order acquire)) 0)
+           ((fx> (:- (__atomic-fx-load state 0 1) :fixnum) 0)
             (when is-spinning?
-              (atomic-fxbox-fetch-sub! spinning 1 (memory-order acquire-release)))
+              (__atomic-fx-fetch-sub! state 16 1 3))
             ;; Drain any final item enqueued concurrently before close
             (let-values (((ok2 thunk2) (lf-queue-try-dequeue! q)))
               (when ok2
@@ -79,7 +84,7 @@
                 (loop 0 #f))))
            ((fx< spins 64)
             (unless is-spinning?
-              (atomic-fxbox-fetch-add! spinning 1 (memory-order acquire-release)))
+              (__atomic-fx-fetch-add! state 16 1 3))
             (__cpu-relax!)
             (loop (fx+ spins 1) #t))
            ((fx< spins 80)
@@ -87,45 +92,43 @@
             (loop (fx+ spins 1) #t))
            (else
             (when is-spinning?
-              (atomic-fxbox-fetch-sub! spinning 1 (memory-order sequentially-consistent)))
+              (__atomic-fx-fetch-sub! state 16 1 4))
             (mutex-lock! mx)
-            (atomic-fxbox-fetch-add! sleepers 1 (memory-order sequentially-consistent))
+            (__atomic-fx-fetch-add! state 16 %WG-SLEEP-UNIT 4)
             (let-values (((ok2 thunk2) (lf-queue-try-dequeue! q)))
               (cond
                (ok2
-                (atomic-fxbox-fetch-sub! sleepers 1 (memory-order release))
+                (__atomic-fx-fetch-sub! state 16 %WG-SLEEP-UNIT 2)
                 (mutex-unlock! mx)
                 (when (not (lf-queue-empty? q))
                   (wg-wake-one! wg))
                 (thunk2)
                 (loop 0 #f))
-               ((fx> (atomic-fxbox-ref closed (memory-order acquire)) 0)
-                (atomic-fxbox-fetch-sub! sleepers 1 (memory-order release))
+               ((fx> (:- (__atomic-fx-load state 0 1) :fixnum) 0)
+                (__atomic-fx-fetch-sub! state 16 %WG-SLEEP-UNIT 2)
                 (mutex-unlock! mx)
                 (void))
                (else
                 (mutex-unlock! mx cv)
-                ;; Transition woken sleeper directly into searching state before
-                ;; clearing waking so producers observe spinning>=1 or waking=1.
-                (atomic-fxbox-fetch-add! spinning 1 (memory-order sequentially-consistent))
-                (atomic-fxbox-fetch-sub! sleepers 1 (memory-order sequentially-consistent))
-                (atomic-fxbox-swap! waking 0 (memory-order sequentially-consistent))
+                ;; Atomically transition sleeper -> spinning (+1 - sleep_unit)
+                ;; and clear waking bit in one CAS loop (or fetch-add + fetch-and).
+                (__atomic-fx-fetch-add! state 16 (fx- 1 %WG-SLEEP-UNIT) 4)
+                (__atomic-fx-fetch-and! state 16 (fxnot %WG-WAKING-BIT) 4)
                 (loop 0 #t)))))))))))
 
 (def (wg-add! wg thunk)
   (if (WG? wg)
     (using (wg :- WG)
-      (when (fx> (atomic-fxbox-ref wg.closed (memory-order acquire)) 0)
+      (when (fx> (:- (__atomic-fx-load wg.state 0 1) :fixnum) 0)
         (raise-io-closed wg-add! "workgroup is closed" wg))
       (lf-queue-enqueue! wg.q thunk)
-      ;; Zero-mutex fast path whenever any worker is searching or already waking!
       (wg-wake-one! wg))
     (thunk)))
 
 (def (wg-wait! wg)
   (if (WG? wg)
     (using (wg :- WG)
-      (atomic-fxbox-set! wg.closed 1 (memory-order release))
+      (__atomic-fx-store! wg.state 0 1 2)
       (mutex-lock! wg.mx)
       (condition-variable-broadcast! wg.cv)
       (mutex-unlock! wg.mx)

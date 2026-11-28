@@ -165,21 +165,22 @@
 ;;;
 ;;; Inside `run-fibers`, calling `->>` directly would block the OS carrier
 ;;; thread waiting on `thread-mailbox-next`. Instead of spawning a bridge thread
-;;; per call, local actor RPCs multiplex over 8 persistent lazily-started shard
-;;; reply-router actors backed by wait-free-read ConcurrentTable + exact timer
-;;; wakeups. Calling fibers park solely on a 1-slot FiberChannel while carrier
-;;; OS threads continue work-stealing other fibers at full SMP speed.
+;;; per call, local actor RPCs multiplex over 16 processor-indexed lazily-started
+;;; shard reply-router actors backed by wait-free-read ConcurrentTable + exact
+;;; timer wakeups (with 50ms hot-idle grace to eliminate redundant timer-wake
+;;; messages on busy shards while keeping 0% idle CPU). Calling fibers park
+;;; solely on a wait-free single-shot FiberPromise while carrier OS threads
+;;; continue work-stealing other fibers at full SMP speed.
 
-(def %FIBER-ROUTER-SHARDS 8)
+(def %FIBER-ROUTER-SHARDS 16)
+(def %FIBER-ROUTER-MASK 15)
 (def %fiber-router-epoch (##current-time-point))
-(def %fiber-router-rr (make-atomic-fxbox 0))
 (def %fiber-router-init-mx (make-mutex 'fiber-router-init))
 (def %fiber-router-shards (make-vector %FIBER-ROUTER-SHARDS #f))
-(def %fiber-router-timeout '#(fiber-router-timeout))
 
 (defstruct %FiberRPCEntry
-  ((ch       :- FiberChannel)
-   (done     :- AtomicFxBox)
+  ((seqno    :- :fixnum)
+   (promise  :- FiberPromise)
    (protocol :- :string)
    (deadline :- :real)
    (dl-ms    :- :fixnum))
@@ -198,61 +199,109 @@
   (let ((ms (inexact->exact (floor (* (- t %fiber-router-epoch) 1000.0)))))
     (if (fx> ms 0) ms 1)))
 
-(def (%fiber-rpc-complete! (entry :- %FiberRPCEntry) tag payload)
-  (when (fx= (atomic-fxbox-compare-and-swap! entry.done 0 1 (memory-order acquire-release)) 0)
-    (fiber-send! entry.ch (cons tag payload))))
+(definline (%fiber-rpc-complete! (entry :- %FiberRPCEntry) tag payload)
+  (fiber-promise-resolve! entry.promise (cons tag payload)))
+
+(definline (%fiber-rpc-done? (entry :- %FiberRPCEntry))
+  (fiber-promise-resolved? entry.promise))
+
+(definline (%fiber-router-dispatch-msg! (pending :- ConcurrentTable) msg)
+  (when (Envelope? msg)
+    (let ((seqno (&Envelope-continue msg)))
+      (when seqno
+        (let ((entry (concurrent-table-ref pending seqno #f)))
+          (when (and entry
+                     (##string=? (&Envelope-protocol msg)
+                                 (&%FiberRPCEntry-protocol entry)))
+            (concurrent-table-delete! pending seqno)
+            (%fiber-rpc-complete! entry 'ok (&Envelope-message msg))))))))
 
 (def (%fiber-router-loop (shard :- %FiberReplyShard))
   (let ((pending shard.pending)
         (timers shard.timers)
         (min-dl shard.min-deadline))
-    (let loop ((active-timers '()))
-      ;; 1. Drain newly registered timeout entries from lock-free queue
-      (let drain ((ts active-timers))
-        (let-values (((ok item) (lf-queue-try-dequeue! timers)))
-          (if ok
-            (let ((entry (##cdr item)))
-              (if (fx= (atomic-fxbox-ref (&%FiberRPCEntry-done entry) (memory-order acquire)) 0)
-                (drain (cons item ts))
-                (drain ts)))
-            ;; 2. Sweep expired timers and locate earliest remaining deadline
-            (let* ((now (##current-time-point))
-                   (now-ms (%now-rel-ms now)))
-              (let sweep ((xs ts) (kept '()) (earliest-ms 0) (earliest-abs #f))
-                (if (pair? xs)
-                  (let* ((item (##car xs))
-                         (seqno (##car item))
-                         (entry (##cdr item)))
-                    (cond
-                     ((fx> (atomic-fxbox-ref (&%FiberRPCEntry-done entry) (memory-order acquire)) 0)
-                      (sweep (##cdr xs) kept earliest-ms earliest-abs))
-                     ((fx<= (&%FiberRPCEntry-dl-ms entry) now-ms)
-                      (concurrent-table-delete! pending seqno)
-                      (%fiber-rpc-complete! entry 'timeout (&%FiberRPCEntry-deadline entry))
-                      (sweep (##cdr xs) kept earliest-ms earliest-abs))
-                     (else
-                      (let ((dms (&%FiberRPCEntry-dl-ms entry)))
-                        (if (or (fx= earliest-ms 0) (fx< dms earliest-ms))
-                          (sweep (##cdr xs) (cons item kept) dms (&%FiberRPCEntry-deadline entry))
-                          (sweep (##cdr xs) (cons item kept) earliest-ms earliest-abs))))))
-                  ;; 3. Publish earliest deadline with SeqCst before checking timers queue (Dekker)
-                  (begin
-                    (atomic-fxbox-set! min-dl earliest-ms (memory-order sequentially-consistent))
-                    (if (not (lf-queue-empty? timers))
-                      (loop kept)
-                      (let ((msg (if earliest-abs
-                                   (thread-receive (seconds->time earliest-abs) %fiber-router-timeout)
-                                   (thread-receive))))
-                        (when (Envelope? msg)
-                          (let ((seqno (&Envelope-continue msg)))
-                            (when seqno
-                              (let ((entry (concurrent-table-ref pending seqno #f)))
-                                (when (and entry
-                                           (##string=? (&Envelope-protocol msg)
-                                                       (&%FiberRPCEntry-protocol entry)))
-                                  (concurrent-table-delete! pending seqno)
-                                  (%fiber-rpc-complete! entry 'ok (&Envelope-message msg)))))))
-                        (loop kept)))))))))))))
+    (let loop ((active-timers '()) (grace-ms 0) (grace-time #f) (hot? #f) (win-active? #f))
+      ;; 0. Fast batch-drain ALL immediately ready replies in single-lock pops
+      ;;    BEFORE sweeping timers or calling clock/seconds->time!
+      (let ((got-any? #f))
+        (let fast-drain ()
+          (let ((msg (mailbox-take-nonblocking!)))
+            (unless (##eq? msg mailbox-empty)
+              (set! got-any? #t)
+              (%fiber-router-dispatch-msg! pending msg)
+              (fast-drain))))
+        (let ((is-hot? (or hot? got-any?))
+              (is-win-active? (or win-active? got-any?)))
+          ;; 1. Drain newly registered timeout entries from lock-free queue
+          (let drain ((ts active-timers))
+            (let-values (((ok entry) (lf-queue-try-dequeue! timers)))
+              (if ok
+                (if (%fiber-rpc-done? entry)
+                  (drain ts)
+                  (drain (cons entry ts)))
+                ;; 2. Sweep expired timers and locate earliest remaining deadline
+                (if (null? ts)
+                  (if is-hot?
+                    ;; Hot-idle 50ms grace: keeps min-dl published at now+50ms so
+                    ;; subsequent normal-timeout RPCs skip CAS + 'timer-wake messages
+                    ;; completely, while short-timeout (<50ms) RPCs still wake early.
+                    (let-values (((gms gtm wa?)
+                                  (if grace-time
+                                    (values grace-ms grace-time is-win-active?)
+                                    (let ((gabs (+ (##current-time-point) 0.05)))
+                                      (values (%now-rel-ms gabs) (seconds->time gabs) #f)))))
+                      (atomic-fxbox-set! min-dl gms (memory-order sequentially-consistent))
+                      (if (not (lf-queue-empty? timers))
+                        (loop '() gms gtm #t #t)
+                        (let ((msg (mailbox-take-timeout! gtm)))
+                          (cond
+                           ((##eq? msg mailbox-timeout)
+                            ;; Refresh once if any message arrived during this 50ms window;
+                            ;; otherwise transition to cold-idle (0% CPU infinite wait).
+                            (if wa?
+                              (loop '() 0 #f #t #f)
+                              (loop '() 0 #f #f #f)))
+                           ((##eq? msg mailbox-empty)
+                            (loop '() gms gtm #t wa?))
+                           (else
+                            (%fiber-router-dispatch-msg! pending msg)
+                            (loop '() gms gtm #t #t))))))
+                    ;; Cold-idle: 0% CPU infinite sleep until next RPC wakes shard
+                    (begin
+                      (atomic-fxbox-set! min-dl 0 (memory-order sequentially-consistent))
+                      (if (not (lf-queue-empty? timers))
+                        (loop '() 0 #f #t #t)
+                        (let ((msg (mailbox-take-timeout! #f)))
+                          (unless (or (##eq? msg mailbox-timeout) (##eq? msg mailbox-empty))
+                            (%fiber-router-dispatch-msg! pending msg))
+                          (loop '() 0 #f #t #t)))))
+                  (let* ((now (##current-time-point))
+                         (now-ms (%now-rel-ms now)))
+                    (let sweep ((xs ts) (kept '()) (earliest-ms 0) (earliest-abs #f))
+                      (if (pair? xs)
+                        (let ((entry (##car xs)))
+                          (cond
+                           ((%fiber-rpc-done? entry)
+                            (sweep (##cdr xs) kept earliest-ms earliest-abs))
+                           ((fx<= (&%FiberRPCEntry-dl-ms entry) now-ms)
+                            (concurrent-table-delete! pending (&%FiberRPCEntry-seqno entry))
+                            (%fiber-rpc-complete! entry 'timeout (&%FiberRPCEntry-deadline entry))
+                            (sweep (##cdr xs) kept earliest-ms earliest-abs))
+                           (else
+                            (let ((dms (&%FiberRPCEntry-dl-ms entry)))
+                              (if (or (fx= earliest-ms 0) (fx< dms earliest-ms))
+                                (sweep (##cdr xs) (cons entry kept) dms (&%FiberRPCEntry-deadline entry))
+                                (sweep (##cdr xs) (cons entry kept) earliest-ms earliest-abs))))))
+                        ;; 3. Publish earliest deadline with SeqCst before checking timers queue (Dekker)
+                        (begin
+                          (atomic-fxbox-set! min-dl earliest-ms (memory-order sequentially-consistent))
+                          (if (not (lf-queue-empty? timers))
+                            (loop kept 0 #f #t #t)
+                            (let ((msg (mailbox-take-timeout!
+                                        (if earliest-abs (seconds->time earliest-abs) #f))))
+                              (unless (or (##eq? msg mailbox-timeout) (##eq? msg mailbox-empty))
+                                (%fiber-router-dispatch-msg! pending msg))
+                              (loop kept 0 #f #t #t))))))))))))))))
 
 (def (%get-fiber-router-shard (idx : :fixnum))
   => %FiberReplyShard
@@ -294,16 +343,15 @@
    ((not (in-fiber?))
     (->> dest msg protocol timeout: timeo expire: expire))
    ((LocalActor? dest)
-    ;; Fast zero-bridge-thread sharded multiplexed RPC path!
-    (let* ((rr (atomic-fxbox-fetch-add! %fiber-router-rr 1 (memory-order relaxed)))
-           (shard (%get-fiber-router-shard (fxand rr (fx- %FIBER-ROUTER-SHARDS 1))))
+    ;; Fast zero-bridge-thread, processor-indexed 16-shard wait-free FiberPromise RPC path!
+    (let* ((shard (%get-fiber-router-shard (fxand (##current-processor-id) %FIBER-ROUTER-MASK)))
            (seqno (atomic-fxbox-fetch-add! (&%FiberReplyShard-seqno shard) 1 (memory-order relaxed)))
            (now (##current-time-point))
            (deadline (or expire (+ now timeo)))
            (exp (exact (ceiling deadline)))
            (dl-ms (%now-rel-ms deadline))
-           (reply-ch (make-fiber-channel 1))
-           (entry (%FiberRPCEntry reply-ch (make-atomic-fxbox 0) protocol deadline dl-ms))
+           (promise (make-fiber-promise))
+           (entry (%FiberRPCEntry seqno promise protocol deadline dl-ms))
            (router-peer (&%FiberReplyShard-actor shard))
            (router-thr (&LocalActor-thread router-peer))
            (env (Envelope source: router-peer
@@ -315,7 +363,7 @@
       (when (<= exp now)
         (raise-timeout fiber-actor-call "fiber actor call already expired" dest protocol deadline))
       (concurrent-table-set! (&%FiberReplyShard-pending shard) seqno entry)
-      (lf-queue-enqueue! (&%FiberReplyShard-timers shard) (cons seqno entry))
+      (lf-queue-enqueue! (&%FiberReplyShard-timers shard) entry)
       ;; Wake shard router if our deadline is earlier than its current sleep target
       (let ((min-dl (&%FiberReplyShard-min-deadline shard)))
         (atomic-fence (memory-order sequentially-consistent))
@@ -327,13 +375,13 @@
                 (wake-loop))))))
       (using (d dest :- LocalActor)
         (thread-send-fast! d.thread env))
-      (let ((outcome (fiber-recv! reply-ch)))
+      (let ((outcome (fiber-promise-await! promise)))
         (if (eq? (##car outcome) 'ok)
           (##cdr outcome)
           (raise-timeout fiber-actor-call "fiber actor call timeout" dest protocol (##cdr outcome))))))
    (else
     ;; Remote ensemble Handle / ActorGroup: bridge preserving host & SRFI-226 actor-context
-    (let ((reply-ch (make-fiber-channel 1))
+    (let ((promise (make-fiber-promise))
           (host (current-actor-host))
           (ctx (current-actor-context)))
       (spawn/name 'fiber-actor-bridge
@@ -341,14 +389,14 @@
           (parameterize ((current-actor-host host))
             (let ((run (lambda ()
                          (with-catch
-                          (lambda (e) (fiber-send! reply-ch (cons 'err e)))
+                          (lambda (e) (fiber-promise-resolve! promise (cons 'err e)))
                           (lambda ()
                             (let ((res (->> dest msg protocol timeout: timeo expire: expire)))
-                              (fiber-send! reply-ch (cons 'ok res))))))))
+                              (fiber-promise-resolve! promise (cons 'ok res))))))))
               (if ctx
                 (call-with-continuation-mark actor-context-key ctx run)
                 (run))))))
-      (let ((outcome (fiber-recv! reply-ch)))
+      (let ((outcome (fiber-promise-await! promise)))
         (if (eq? (##car outcome) 'ok)
           (##cdr outcome)
           (raise (##cdr outcome))))))))

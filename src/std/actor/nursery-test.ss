@@ -279,4 +279,63 @@
                 (iota 12)))
          (for-each (lambda (p) (thread-join! (&LocalActor-thread p) 15)) senders)
          (check (atomic-fxbox-ref ok-cnt (memory-order acquire)) => 240)
-         (check (->> hub 'summary proto:/torture-a timeout: 5) => '(120 . 120)))))))
+         (check (->> hub 'summary proto:/torture-a timeout: 5) => '(120 . 120))))
+
+    (test-case "Post-idle cold-wake (>50ms hot-idle expiry) sharded fiber-actor-call router & W/W activation"
+      (def expected-workers (max 1 (##current-vm-processor-count)))
+      (with-actor-nursery
+       (lambda (an)
+         (def nservers (max 4 expected-workers))
+         (def servers
+           (list->vector
+            (map (lambda (sid)
+                   (nursery-spawn-actor/name an (list 'cold-router-srv sid)
+                     (lambda ()
+                       (let serve ()
+                         (<- protocol: proto:/torture-a
+                             (['echo v]
+                              (--> (fx+ v 1))
+                              (serve))
+                             ('blackhole
+                              (serve))
+                             ('stop
+                              (--> 'stopped)))))))
+                 (iota nservers))))
+         (def total
+           (run-fibers
+            (lambda ()
+              (let ((sum (make-atomic-fxbox 0))
+                    (timeouts (make-atomic-fxbox 0)))
+                ;; 3 cycles: warm RPC wave -> 85ms idle (exceeds 50ms router hot-idle
+                ;; grace window AND parks all W-1 fiber workers!) -> concurrent burst + timeout
+                (for (cycle (in-range 3))
+                  (when (fx> cycle 0)
+                    (fiber-sleep! 0.085))
+                  (with-nursery
+                   (lambda (fn)
+                     (for (i (in-range 1 81))
+                       (let ((v i)
+                             (srv (vector-ref servers (fxmodulo (fx+ i cycle) nservers))))
+                         (fiber-spawn
+                          (lambda ()
+                            (let ((r (fiber-actor-call srv ['echo v] proto:/torture-a timeout: 5)))
+                              (atomic-fxbox-fetch-add! sum r (memory-order relaxed))))
+                          fn)))
+                     ;; Mix 4 timeout RPCs per cold-wake wave to verify timer sweep recovery
+                     (for (j (in-range 4))
+                       (let ((srv (vector-ref servers (fxmodulo j nservers))))
+                         (fiber-spawn
+                          (lambda ()
+                            (with-catch
+                             (lambda (e)
+                               (when (Timeout? e)
+                                 (atomic-fxbox-fetch-add! timeouts 1 (memory-order relaxed))))
+                             (lambda ()
+                               (fiber-actor-call srv 'blackhole proto:/torture-a timeout: 0.03))))
+                          fn))))))
+                (cons (atomic-fxbox-ref sum (memory-order acquire))
+                      (atomic-fxbox-ref timeouts (memory-order acquire)))))))
+         (check (car total) => (* 3 (+ (/ (* 80 81) 2) 80)))
+         (check (cdr total) => 12)
+         (for (s (in-range nservers))
+           (check (->> (vector-ref servers s) 'stop proto:/torture-a timeout: 5) => 'stopped))))))))

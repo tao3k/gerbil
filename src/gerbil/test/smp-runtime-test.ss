@@ -2,6 +2,7 @@
 ;;; © Gerbil Contributors
 ;;; SMP runtime, sync, and actor concurrency regression tests.
 (import :std/test
+        :std/error
         :std/actor
         :std/sync/spinlock
         :std/sync/completion
@@ -539,4 +540,92 @@
                     (lambda () (thread-interrupt! r1 (lambda () (raise cancel-exn)))))
         (check (thread-join! r1 5) => #t)
         (channel-put ch 'delivered-to-r2)
-        (check (thread-join! r2 5) => 'delivered-to-r2)))))
+        (check (thread-join! r2 5) => 'delivered-to-r2)))
+
+    (test-case "Striped RWLock cross-processor migration, unbalanced-unlock detection & 16-thread write exclusivity"
+      ;; 1. Unbalanced read-unlock when idle AND when write-locked must raise ContextError
+      ;;    without corrupting per-processor stripes.
+      (let ((rw (make-rwlock 'smp-striped-err)))
+        (check-exception (rwlock-read-unlock! rw) ContextError?)
+        (check (rwlock-readers rw) => 0)
+        ;; Also verify unbalanced read-unlock while a writer holds the lock (ws == 1)
+        (rwlock-write-lock! rw)
+        (let ((unbal
+               (spawn/name 'unbal-during-write
+                 (lambda ()
+                   (with-catch
+                    (lambda (e) (ContextError? e))
+                    (lambda ()
+                      (rwlock-read-unlock! rw)
+                      #f))))))
+          (check (thread-join! unbal 5) => #t))
+        (rwlock-write-unlock! rw)
+        (check (rwlock-readers rw) => 0))
+
+      ;; 2. Cross-processor green-thread migration between rwlock-read-lock! and
+      ;;    rwlock-read-unlock! across ALL VM processors interleaved with concurrent writers.
+      (let* ((rw (make-rwlock 'smp-striped-mig))
+             (nprocs (max 1 (##current-vm-processor-count)))
+             (nreaders (max 4 nprocs))
+             (nwriters 4)
+             (bar (make-barrier (+ nreaders nwriters)))
+             (active-writers (make-atomic-fxbox 0))
+             (write-overlap (make-atomic-fxbox 0))
+             (read-corrupt (make-atomic-fxbox 0))
+             (val-a 0)
+             (val-b 0)
+             (readers
+              (let loop ((i 0) (acc []))
+                (if (< i nreaders)
+                  (let ((rid i))
+                    (loop (+ i 1)
+                          (cons
+                           (spawn/name 'striped-mig-reader
+                             (lambda ()
+                               (barrier-post! bar)
+                               (barrier-wait! bar)
+                               (let iter ((k 0))
+                                 (when (< k 200)
+                                   (let ((p1 (fxmodulo (+ rid k) nprocs))
+                                         (p2 (fxmodulo (+ rid k 1) nprocs)))
+                                     (when (> nprocs 1)
+                                       (##thread-migrate-to! p1))
+                                     (rwlock-read-lock! rw)
+                                     (unless (= val-a val-b)
+                                       (atomic-fxbox-fetch-add! read-corrupt 1 (memory-order relaxed)))
+                                     (when (> nprocs 1)
+                                       (##thread-migrate-to! p2))
+                                     (rwlock-read-unlock! rw))
+                                   (iter (+ k 1))))))
+                           acc)))
+                  acc)))
+             (writers
+              (let loop ((i 0) (acc []))
+                (if (< i nwriters)
+                  (loop (+ i 1)
+                        (cons
+                         (spawn/name 'striped-mig-writer
+                           (lambda ()
+                             (barrier-post! bar)
+                             (barrier-wait! bar)
+                             (let iter ((k 0))
+                               (when (< k 100)
+                                 (with-write-lock rw
+                                   (lambda ()
+                                     (let ((prev (atomic-fxbox-fetch-add! active-writers 1 (memory-order acquire-release))))
+                                       (when (> prev 0)
+                                         (atomic-fxbox-fetch-add! write-overlap 1 (memory-order relaxed))))
+                                     (set! val-a (+ val-a 1))
+                                     (thread-yield!)
+                                     (set! val-b (+ val-b 1))
+                                     (atomic-fxbox-fetch-sub! active-writers 1 (memory-order acquire-release))))
+                                 (iter (+ k 1))))))
+                         acc))
+                  acc))))
+        (for-each thread-join! readers)
+        (for-each thread-join! writers)
+        (check (atomic-fxbox-ref write-overlap (memory-order acquire)) => 0)
+        (check (atomic-fxbox-ref read-corrupt (memory-order acquire)) => 0)
+        (check val-a => (* nwriters 100))
+        (check val-b => (* nwriters 100))
+        (check (rwlock-readers rw) => 0)))))

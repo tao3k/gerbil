@@ -2,16 +2,22 @@
 ;;; © Gerbil Contributors
 ;;; Direct-Style Work-Stealing Structured Concurrency Runtime (:std/sync/fiber)
 ;;;
-;;; Maximally aligned with Gambit modern-c (gambit fiber) & SMP runtime:
-;;;   - M:N work-stealing scheduler with 4096-slot per-worker Chase-Lev deques
-;;;     (WSDeque) + randomized xorshift victim stealing + lock-free LFQueue
-;;;   - Zero-busy-spin adaptive Rayon/Tokio spinning+waking condvar parker
+;;; Maximally aligned with Gambit modern-c (gambit fiber) Phase C18-C21 & SMP runtime:
+;;;   - M:N work-stealing scheduler with 4096-slot 128B-padded flat dual-array
+;;;     Tokio/Go runqueues (%LocalRunQ), private 1-slot LIFO (streak cap 8),
+;;;     half-deque batch stealing (up to 16 tasks in one CAS), sticky victim
+;;;     locality, and num_searching <= max(1, W/2) steal-herd throttling
+;;;   - Zero-busy-spin adaptive Rayon/Tokio spinning+waking condvar parker with
+;;;     formally verified unconditional cascade wakeup (fiber_steal_cascade_wakeup_smp.qnt),
+;;;     exponential CPU-relax pause backoff, and OS sched_yield()
+;;;   - Phase C18 unified +32 pre-reserved nursery credits (32x fewer Nursery.active
+;;;     atomics on fan-out) + zero-perform direct fiber-spawn
 ;;;   - One-shot effect continuations from :std/control (SRFI-226 + C-runtime
 ;;;     stack rewind ##continuation-try-rewind-oneshot!)
 ;;;   - Exception-isolated fibers & structured nurseries with cooperative
 ;;;     cancellation (with-nursery, nursery-cancel!, nursery-cancelled?)
-;;;   - Bounded & unbuffered zero-lost-wakeup FiberChannel (+ try-send/try-recv/close)
-;;;   - Non-blocking cooperative fiber-sleep!, FiberMutex, FiberSemaphore
+;;;   - Wait-free single-shot FiberPromise, bounded & unbuffered FiberChannel,
+;;;     non-blocking cooperative fiber-sleep!, FiberMutex, FiberSemaphore
 ;;;   - Structured parallel-map & parallel-for-each combinators
 
 (import :std/error
@@ -40,6 +46,12 @@
   fiber-try-recv!
   fiber-channel-close!
   fiber-channel-closed?
+  FiberPromise
+  make-fiber-promise
+  fiber-promise?
+  fiber-promise-resolved?
+  fiber-promise-resolve!
+  fiber-promise-await!
   FiberMutex
   make-fiber-mutex
   fiber-mutex?
@@ -56,9 +68,228 @@
   parallel-for-each)
 
 ;;;----------------------------------------------------------------------------
+;;; Native C23 Carrier Scheduling, Backoff & Flat Dual-Array Runqueue Helpers
+
+(begin-foreign
+  (c-declare
+   #<<END-C
+#if defined(__APPLE__) || defined(__linux__) || defined(__unix__)
+#include <sched.h>
+#endif
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+END-C
+   ))
+
+;; Request high-priority interactive QoS on Darwin carrier threads so XNU keeps
+;; active fiber workers resident on performance cores.
+(def (%set-carrier-qos!)
+  (##c-code
+   "#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+    ___RESULT = ___VOID;"))
+
+;; Direct OS thread yield avoiding Gambit green-thread scheduler lock contention
+;; during brief idle spin backoff before condvar parking.
+(def (%os-sched-yield!)
+  (##c-code
+   "#if defined(__APPLE__) || defined(__linux__) || defined(__unix__)
+    sched_yield();
+#endif
+    ___RESULT = ___VOID;"))
+
+;; Exponential CPU-relax pause backoff (4 << min(level, 3)) to reduce L2
+;; coherence traffic across idle stealers on high-core-count SMP hosts.
+(def (%idle-pause! (level :- :fixnum))
+  (declare (not interrupts-enabled))
+  (##c-code
+   "___WORD ___s = ___INT(___ARG1);
+    if (___s < 0) ___s = 0;
+    if (___s > 3) ___s = 3;
+    int ___n = 4 << ___s;
+    int ___i;
+    for (___i = 0; ___i < ___n; ___i++) {
+      ___CPU_RELAX();
+    }
+    ___RESULT = ___VOID;"
+   level))
+
+;; 128B cache-line-padded Tokio/Go flat dual-array 4096-slot work-stealing runqueue.
+;; Represented as a 3-element pack vector #[buf nbuf meta]:
+;;   buf      : 4096-slot task vector (thunk / k / (k . val))
+;;   nbuf     : 4096-slot nursery vector (Nursery or #f)
+;;   meta[0]  : head (contested by owner pop & peer thieves via CAS)
+;;   meta[16] : tail (owner-only release store, 128B isolated from head)
+;;   meta[17] : cached-head (owner-private estimate avoiding head reads on push)
+(def (%make-local-runq)
+  (vector (make-vector 4096 #f)
+          (make-vector 4096 #f)
+          (make-vector 32 0)))
+
+;; Owner-only SPSC push of (task, nursery) pair. Returns #t on success, #f if full.
+(def (%fq-push-pair! (pack :- :vector) task n)
+  (declare (not interrupts-enabled))
+  (##c-code
+   "___WORD *___p = ___BODY_AS(___ARG1, ___tVECTOR);
+    ___SCMOBJ ___buf  = ___p[0];
+    ___SCMOBJ ___nbuf = ___p[1];
+    ___WORD *___meta  = ___BODY_AS(___p[2], ___tVECTOR);
+    ___VOLATILE ___WORD *___head_p = ___CAST(___VOLATILE ___WORD*, ___meta + 0);
+    ___VOLATILE ___WORD *___tail_p = ___CAST(___VOLATILE ___WORD*, ___meta + 16);
+    ___WORD ___t  = ___INT(___atomic_word_load(___tail_p, 0));
+    ___WORD ___ch = ___INT(___meta[17]);
+    int ___full = 0;
+    if (___t - ___ch >= 4096) {
+      ___WORD ___h = ___INT(___atomic_word_load(___head_p, 1));
+      ___meta[17] = ___FIX(___h);
+      if (___t - ___h >= 4096) {
+        ___full = 1;
+      }
+    }
+    if (___full) {
+      ___RESULT = ___FAL;
+    } else {
+      ___WORD ___idx = ___t & 4095;
+      ___WORD *___s  = ___BODY_AS(___buf, ___tVECTOR) + ___idx;
+      ___WORD *___ns = ___BODY_AS(___nbuf, ___tVECTOR) + ___idx;
+      ___GC_WRITE_BARRIER(___ps, ___buf, ___s, ___ARG2);
+      ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___s), ___CAST(___WORD, ___ARG2), 0);
+      ___GC_WRITE_BARRIER(___ps, ___nbuf, ___ns, ___ARG3);
+      ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___ns), ___CAST(___WORD, ___ARG3), 0);
+      ___atomic_word_store(___tail_p, ___FIX(___t + 1), 2);
+      ___RESULT = ___TRU;
+    }"
+   pack task n))
+
+;; Owner-only FIFO pop via CAS(head, h -> h+1). Writes (task, n) into out[0..1].
+(def (%fq-pop! (pack :- :vector) (out :- :vector))
+  (declare (not interrupts-enabled))
+  (##c-code
+   "___WORD *___p = ___BODY_AS(___ARG1, ___tVECTOR);
+    ___SCMOBJ ___buf  = ___p[0];
+    ___SCMOBJ ___nbuf = ___p[1];
+    ___WORD *___meta  = ___BODY_AS(___p[2], ___tVECTOR);
+    ___SCMOBJ ___out  = ___ARG2;
+    ___VOLATILE ___WORD *___head_p = ___CAST(___VOLATILE ___WORD*, ___meta + 0);
+    ___VOLATILE ___WORD *___tail_p = ___CAST(___VOLATILE ___WORD*, ___meta + 16);
+    ___WORD *___buf_p  = ___BODY_AS(___buf, ___tVECTOR);
+    ___WORD *___nbuf_p = ___BODY_AS(___nbuf, ___tVECTOR);
+    ___WORD ___t = ___INT(___atomic_word_load(___tail_p, 0));
+    ___SCMOBJ ___ok = ___FAL;
+    for (;;) {
+      ___WORD ___h = ___INT(___atomic_word_load(___head_p, 1));
+      ___meta[17] = ___FIX(___h);
+      if (___h >= ___t) {
+        break;
+      }
+      {
+        ___WORD ___idx = ___h & 4095;
+        ___WORD *___s  = ___buf_p + ___idx;
+        ___WORD *___ns = ___nbuf_p + ___idx;
+        ___SCMOBJ ___item = ___gc_atomic_slot_load(___s, 1);
+        ___SCMOBJ ___n    = ___gc_atomic_slot_load(___ns, 1);
+        if (___atomic_word_cas(___head_p, ___FIX(___h), ___FIX(___h + 1), 3) == ___FIX(___h)) {
+          ___meta[17] = ___FIX(___h + 1);
+          ___GC_WRITE_BARRIER(___ps, ___buf, ___s, ___FAL);
+          ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___s), ___CAST(___WORD, ___FAL), 0);
+          ___GC_WRITE_BARRIER(___ps, ___nbuf, ___ns, ___FAL);
+          ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___ns), ___CAST(___WORD, ___FAL), 0);
+          {
+            ___WORD *___out_p = ___BODY_AS(___out, ___tVECTOR);
+            ___GC_WRITE_BARRIER(___ps, ___out, ___out_p + 0, ___item);
+            ___WORD_STORE_RELAXED(___out_p + 0, ___item);
+            ___GC_WRITE_BARRIER(___ps, ___out, ___out_p + 1, ___n);
+            ___WORD_STORE_RELAXED(___out_p + 1, ___n);
+          }
+          ___ok = ___TRU;
+          break;
+        }
+      }
+    }
+    ___RESULT = ___ok;"
+   pack out))
+
+;; Concurrent thief half-deque batch steal: claims up to min((avail+1)/2, 16)
+;; (task, nursery) pairs from vpack in ONE CAS(vhead, vh -> vh+n), pushes n-1
+;; pairs into thief's own lpack, and writes (batch_t[0], batch_n[0]) into out[0..1].
+;; Returns count stolen (0 on empty/contention, 1..16 on success).
+(def (%fq-steal-batch! (vpack :- :vector) (lpack :- :vector) (out :- :vector))
+  (declare (not interrupts-enabled))
+  (##c-code
+   "___WORD *___vp = ___BODY_AS(___ARG1, ___tVECTOR);
+    ___SCMOBJ ___vbuf  = ___vp[0];
+    ___SCMOBJ ___vnbuf = ___vp[1];
+    ___WORD *___vmeta  = ___BODY_AS(___vp[2], ___tVECTOR);
+    ___VOLATILE ___WORD *___vhead_p = ___CAST(___VOLATILE ___WORD*, ___vmeta + 0);
+    ___VOLATILE ___WORD *___vtail_p = ___CAST(___VOLATILE ___WORD*, ___vmeta + 16);
+    ___WORD ___vh = ___INT(___atomic_word_load(___vhead_p, 1));
+    ___WORD ___vt = ___INT(___atomic_word_load(___vtail_p, 1));
+    ___WORD ___avail = ___vt - ___vh;
+    if (___avail <= 0) {
+      ___RESULT = ___FIX(0);
+    } else {
+      ___WORD *___lp = ___BODY_AS(___ARG2, ___tVECTOR);
+      ___SCMOBJ ___lbuf  = ___lp[0];
+      ___SCMOBJ ___lnbuf = ___lp[1];
+      ___WORD *___lmeta  = ___BODY_AS(___lp[2], ___tVECTOR);
+      ___VOLATILE ___WORD *___lhead_p = ___CAST(___VOLATILE ___WORD*, ___lmeta + 0);
+      ___VOLATILE ___WORD *___ltail_p = ___CAST(___VOLATILE ___WORD*, ___lmeta + 16);
+      ___WORD ___n = (___avail == 1) ? 1 : ((___avail + 1) >> 1);
+      if (___n > 16) ___n = 16;
+      ___WORD ___lt = ___INT(___atomic_word_load(___ltail_p, 0));
+      ___WORD ___lh = ___INT(___atomic_word_load(___lhead_p, 1));
+      ___lmeta[17] = ___FIX(___lh);
+      ___WORD ___lroom = 4096 - (___lt - ___lh);
+      if (___n > ___lroom + 1) ___n = ___lroom + 1;
+      if (___n <= 0) {
+        ___RESULT = ___FIX(0);
+      } else {
+        ___SCMOBJ ___batch_t[16];
+        ___SCMOBJ ___batch_n[16];
+        ___WORD *___vbuf_p  = ___BODY_AS(___vbuf, ___tVECTOR);
+        ___WORD *___vnbuf_p = ___BODY_AS(___vnbuf, ___tVECTOR);
+        ___WORD ___k;
+        for (___k = 0; ___k < ___n; ___k++) {
+          ___WORD ___vi = (___vh + ___k) & 4095;
+          ___batch_t[___k] = ___gc_atomic_slot_load(___vbuf_p + ___vi, 1);
+          ___batch_n[___k] = ___gc_atomic_slot_load(___vnbuf_p + ___vi, 1);
+        }
+        if (___atomic_word_cas(___vhead_p, ___FIX(___vh), ___FIX(___vh + ___n), 3) == ___FIX(___vh)) {
+          if (___n > 1) {
+            ___WORD *___lbuf_p  = ___BODY_AS(___lbuf, ___tVECTOR);
+            ___WORD *___lnbuf_p = ___BODY_AS(___lnbuf, ___tVECTOR);
+            for (___k = 1; ___k < ___n; ___k++) {
+              ___WORD ___li = (___lt + ___k - 1) & 4095;
+              ___WORD *___ls  = ___lbuf_p + ___li;
+              ___WORD *___lns = ___lnbuf_p + ___li;
+              ___GC_WRITE_BARRIER(___ps, ___lbuf, ___ls, ___batch_t[___k]);
+              ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___ls), ___CAST(___WORD, ___batch_t[___k]), 0);
+              ___GC_WRITE_BARRIER(___ps, ___lnbuf, ___lns, ___batch_n[___k]);
+              ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___lns), ___CAST(___WORD, ___batch_n[___k]), 0);
+            }
+            ___atomic_word_store(___ltail_p, ___FIX(___lt + ___n - 1), 2);
+          }
+          {
+            ___SCMOBJ ___out = ___ARG3;
+            ___WORD *___out_p = ___BODY_AS(___out, ___tVECTOR);
+            ___GC_WRITE_BARRIER(___ps, ___out, ___out_p + 0, ___batch_t[0]);
+            ___WORD_STORE_RELAXED(___out_p + 0, ___batch_t[0]);
+            ___GC_WRITE_BARRIER(___ps, ___out, ___out_p + 1, ___batch_n[0]);
+            ___WORD_STORE_RELAXED(___out_p + 1, ___batch_n[0]);
+          }
+          ___RESULT = ___FIX(___n);
+        } else {
+          ___RESULT = ___FIX(0);
+        }
+      }
+    }"
+   vpack lpack out))
+
+;;;----------------------------------------------------------------------------
 ;;; Internal Effects & Scheduler Structures
 
-(def %eff-spawn        (make-effect 'fiber-spawn))
 (def %eff-yield        (make-effect 'fiber-yield))
 (def %eff-park-nursery (make-effect 'fiber-park-nursery))
 (def %eff-park-send    (make-effect 'fiber-park-send))
@@ -66,33 +297,67 @@
 (def %eff-park-sleep   (make-effect 'fiber-park-sleep))
 (def %eff-park-mutex   (make-effect 'fiber-park-mutex))
 (def %eff-park-sem     (make-effect 'fiber-park-sem))
+(def %eff-park-promise (make-effect 'fiber-park-promise))
+
+(def %MAX-LIFO-STREAK   8)
+(def %MAX-NURSERY-BATCH 32)
+(def %NURSERY-ERR-TAG   (list 'nursery-err))
+
+;; Packed fixnum park-state layout (portable 25-bit):
+;;   bits  0..11 : spinning worker count (+1)
+;;   bits 12..23 : sleeping worker count (+#x1000)
+;;   bit  24     : waking latch (#x1000000)
+(def %FS-SPIN-MASK   #xfff)
+(def %FS-SLEEP-UNIT  #x1000)
+(def %FS-SLEEP-MASK  #xfff000)
+(def %FS-WAKING-BIT  #x1000000)
+(def %FS-ACTIVE-MASK (fxior %FS-SPIN-MASK %FS-WAKING-BIT))
+
+;; Cache-line-isolated scheduler state vector (16 words = 128B per hot slot):
+;;   state[0]  : active-fibers (root + detached fibers; nursery children track
+;;               solely Nursery.cells[0] with +32 batched credits!)
+;;   state[16] : packed park-state (spinning | sleepers | waking)
+;;   state[32] : stopped latch
+;;   state[48] : timer-started latch
+;;   state[64] : active steal-searchers (capped at max(1, W/2))
+;;   state[80] : global-pending count (>= global-q length; 1-load fast skip!)
+(def %FS-IDX-ACTIVE  0)
+(def %FS-IDX-PARK    16)
+(def %FS-IDX-STOPPED 32)
+(def %FS-IDX-TIMER   48)
+(def %FS-IDX-SEARCH  64)
+(def %FS-IDX-GPEND   80)
 
 (defstruct %FiberScheduler
-  ((num-workers     :- :fixnum)
-   (deques          :- :vector)
-   (global-q        :- LFQueue)
-   (active-fibers   :- AtomicFxBox)
-   (spinning        :- AtomicFxBox)
-   (sleepers        :- AtomicFxBox)
-   (waking          :- AtomicFxBox)
-   (stopped         :- AtomicFxBox)
-   (park-mx         :- :mutex)
-   (park-cv         :- :condvar)
-   (timer-started   :- AtomicFxBox)
-   (timer-mx        :- :mutex)
-   (timer-cv        :- :condvar)
+  ((num-workers      :- :fixnum)
+   (max-searching    :- :fixnum)
+   (deques           :- :vector)
+   (global-q         :- LFQueue)
+   (state            :- :vector)
+   (park-mx          :- :mutex)
+   (park-cv          :- :condvar)
+   (timer-mx         :- :mutex)
+   (timer-cv         :- :condvar)
    timer-q
    timer-thread
-   (root-done       :- AtomicFxBox)
+   (root-done        :- AtomicFxBox)
    root-box
    handler-entries
-   return-fn)
+   return-fn
+   nursery-return-fn)
   final: #t)
 
 (defstruct %WorkerCtx
-  ((sched :- %FiberScheduler)
-   (wid   :- :fixnum)
-   (dq    :- WSDeque))
+  ((sched          :- %FiberScheduler)
+   (wid            :- :fixnum)
+   (dq             :- :vector)    ;; 3-element pack #[buf nbuf meta]
+   lifo                           ;; private 1-slot LIFO task (0 atomics!)
+   lifo-n                         ;; nursery paired with lifo task
+   (lifo-streak    :- :fixnum)
+   (steal-cursor   :- :fixnum)    ;; sticky productive victim wid
+   nursery-cur                    ;; active nursery for unified +32 credit batch
+   (nursery-credit :- :fixnum)    ;; non-negative pre-reserved credits (0..32)
+   (pick-out       :- :vector))   ;; reusable 2-element scratch #[task nursery]
   final: #t)
 
 (def (in-fiber?)
@@ -105,49 +370,106 @@
       ctx
       (raise-context-error fiber "fiber operation called outside run-fibers"))))
 
-;; Zero-mutex fast path whenever any worker is searching or already waking.
+(defrule (%carrier-wctx)
+  (:- (thread-specific (current-thread)) %WorkerCtx))
+
+;; Single-load zero-mutex fast path whenever no worker sleeps or one is searching/waking.
 ;; Identical Dekker/SeqCst wakeup invariant to :std/sync/wg.
 (def (%sched-wake-one! (sched :- %FiberScheduler))
-  (atomic-fence (memory-order sequentially-consistent))
-  (when (and (fx= (atomic-fxbox-ref sched.spinning (memory-order acquire)) 0)
-             (fx= (atomic-fxbox-ref sched.waking (memory-order acquire)) 0)
-             (fx> (atomic-fxbox-ref sched.sleepers (memory-order acquire)) 0))
-    (mutex-lock! sched.park-mx)
-    (when (and (fx= (atomic-fxbox-ref sched.stopped (memory-order acquire)) 0)
-               (fx= (atomic-fxbox-ref sched.spinning (memory-order acquire)) 0)
-               (fx= (atomic-fxbox-ref sched.waking (memory-order acquire)) 0)
-               (fx> (atomic-fxbox-ref sched.sleepers (memory-order acquire)) 0))
-      (atomic-fxbox-set! sched.waking 1 (memory-order release))
-      (condition-variable-signal! sched.park-cv))
-    (mutex-unlock! sched.park-mx)))
+  (__atomic-fence! 4)
+  (let* ((st sched.state)
+         (ps (:- (__atomic-fx-load st %FS-IDX-PARK 1) :fixnum)))
+    (when (and (fx> (fxand ps %FS-SLEEP-MASK) 0)
+               (fx= (fxand ps %FS-ACTIVE-MASK) 0))
+      (mutex-lock! sched.park-mx)
+      (when (fx= (:- (__atomic-fx-load st %FS-IDX-STOPPED 1) :fixnum) 0)
+        (let ((ps2 (:- (__atomic-fx-load st %FS-IDX-PARK 1) :fixnum)))
+          (when (and (fx> (fxand ps2 %FS-SLEEP-MASK) 0)
+                     (fx= (fxand ps2 %FS-ACTIVE-MASK) 0))
+            (__atomic-fx-fetch-ior! st %FS-IDX-PARK %FS-WAKING-BIT 2)
+            (condition-variable-signal! sched.park-cv))))
+      (mutex-unlock! sched.park-mx))))
 
 (def (%sched-shutdown-parkers! (sched :- %FiberScheduler))
-  (when (fx= (atomic-fxbox-swap! sched.stopped 1 (memory-order acquire-release)) 0)
-    (mutex-lock! sched.park-mx)
-    (condition-variable-broadcast! sched.park-cv)
-    (mutex-unlock! sched.park-mx)
-    (when (fx> (atomic-fxbox-ref sched.timer-started (memory-order acquire)) 0)
-      (mutex-lock! sched.timer-mx)
-      (condition-variable-broadcast! sched.timer-cv)
-      (mutex-unlock! sched.timer-mx))))
+  (let ((st sched.state))
+    (when (fx= (:- (__atomic-fx-exchange! st %FS-IDX-STOPPED 1 3) :fixnum) 0)
+      (mutex-lock! sched.park-mx)
+      (condition-variable-broadcast! sched.park-cv)
+      (mutex-unlock! sched.park-mx)
+      (when (fx> (:- (__atomic-fx-load st %FS-IDX-TIMER 1) :fixnum) 0)
+        (mutex-lock! sched.timer-mx)
+        (condition-variable-broadcast! sched.timer-cv)
+        (mutex-unlock! sched.timer-mx)))))
 
-(def (%sched-enqueue-local! task)
-  (let* ((ctx (%current-wctx))
-         (sched (&%WorkerCtx-sched ctx)))
-    (unless (ws-deque-push! (&%WorkerCtx-dq ctx) task)
-      (lf-queue-enqueue! (&%FiberScheduler-global-q sched) task))
-    (%sched-wake-one! sched)))
+;; Global queue enqueue/dequeue maintaining global-pending >= global-q length.
+(def (%sched-enqueue-global! (sched :- %FiberScheduler) item)
+  (__atomic-fx-fetch-add! sched.state %FS-IDX-GPEND 1 3)
+  (lf-queue-enqueue! sched.global-q item))
+
+(def (%sched-try-dequeue-global! (sched :- %FiberScheduler))
+  (let ((st sched.state))
+    (if (fx= (:- (__atomic-fx-load st %FS-IDX-GPEND 1) :fixnum) 0)
+      (values #f #f)
+      (let-values (((ok t) (lf-queue-try-dequeue! sched.global-q)))
+        (if ok
+          (begin
+            (__atomic-fx-fetch-sub! st %FS-IDX-GPEND 1 3)
+            (values #t t))
+          (values #f #f))))))
+
+;; Push (task, n) to own 4096-slot flat dual-array runqueue; on overflow,
+;; batch-spill 256 oldest tasks to global-q (Go runqputslow style).
+(def (%sched-push-dq-pair! (sched :- %FiberScheduler) (dq :- :vector) task n)
+  (unless (%fq-push-pair! dq task n)
+    (let ((out (vector #f #f)))
+      (let spill ((k 0))
+        (when (fx< k 256)
+          (when (%fq-pop! dq out)
+            (let ((st (##vector-ref out 0))
+                  (sn (##vector-ref out 1)))
+              (%sched-enqueue-global! sched (if sn (cons st sn) st)))
+            (spill (fx+ k 1)))))
+      (unless (%fq-push-pair! dq task n)
+        (%sched-enqueue-global! sched (if n (cons task n) task))))))
+
+;; Publish (task, n) from a carrier worker:
+;; - When all workers are busy (park-state == 0): store in private 1-slot LIFO
+;;   (0 atomics!), evicting any prior occupant to local-dq + wake-check.
+;; - When any sibling is spinning, sleeping, or waking (park-state != 0): flush
+;;   any private LIFO task and push directly to stealable local-dq + wake-one
+;;   so idle cores steal even a single spawned task immediately.
+(def (%sched-push-task! (ctx :- %WorkerCtx) task n)
+  (let* ((sched ctx.sched)
+         (st (&%FiberScheduler-state sched))
+         (ps (:- (__atomic-fx-load st %FS-IDX-PARK 0) :fixnum)))
+    (if (fx= ps 0)
+      (let ((prev ctx.lifo)
+            (prev-n ctx.lifo-n))
+        (set! ctx.lifo task)
+        (set! ctx.lifo-n n)
+        (when prev
+          (%sched-push-dq-pair! sched ctx.dq prev prev-n)
+          (%sched-wake-one! sched)))
+      (begin
+        (let ((prev ctx.lifo))
+          (when prev
+            (let ((prev-n ctx.lifo-n))
+              (set! ctx.lifo #f)
+              (set! ctx.lifo-n #f)
+              (%sched-push-dq-pair! sched ctx.dq prev prev-n))))
+        (%sched-push-dq-pair! sched ctx.dq task n)
+        (%sched-wake-one! sched)))))
 
 (def (%sched-wake! (sched :- %FiberScheduler) task)
   (let ((ctx (thread-specific (current-thread))))
     (if (and (%WorkerCtx? ctx) (eq? (&%WorkerCtx-sched ctx) sched))
-      (unless (ws-deque-push! (&%WorkerCtx-dq ctx) task)
-        (lf-queue-enqueue! sched.global-q task))
-      (lf-queue-enqueue! sched.global-q task))
-    (%sched-wake-one! sched)))
+      (%sched-push-task! ctx task #f)
+      (begin
+        (%sched-enqueue-global! sched task)
+        (%sched-wake-one! sched)))))
 
 ;;;----------------------------------------------------------------------------
-;;; Tiny TTAS Spinlock Helper (for non-blocking channel, mutex & nursery handoffs)
+;;; Tiny TTAS Spinlock Helpers (for non-blocking channel, mutex & nursery handoffs)
 
 (definline (%fspin-lock! (box :- AtomicFxBox))
   (let loop ((spins 0))
@@ -160,6 +482,18 @@
 
 (definline (%fspin-unlock! (box :- AtomicFxBox))
   (atomic-fxbox-set! box 0 (memory-order release)))
+
+(definline (%vspin-lock! (vec :- :vector) (idx :- :fixnum))
+  (let loop ((spins 0))
+    (if (and (fx= (:- (__atomic-fx-load vec idx 0) :fixnum) 0)
+             (fx= (:- (__atomic-fx-cas! vec idx 0 1 1) :fixnum) 0))
+      #t
+      (if (fx>= spins 64)
+        (begin (thread-yield!) (loop 0))
+        (begin (__cpu-relax!) (loop (fx+ spins 1)))))))
+
+(definline (%vspin-unlock! (vec :- :vector) (idx :- :fixnum))
+  (__atomic-fx-store! vec idx 0 2))
 
 ;;;----------------------------------------------------------------------------
 ;;; FIFO Waiter Queue (Protected by owning primitive's TTAS spinlock)
@@ -188,74 +522,132 @@
     (##car h)))
 
 ;;;----------------------------------------------------------------------------
-;;; Structured Concurrency Nursery (Zero Orphaned Fibers + Cooperative Cancel)
+;;; Structured Concurrency Nursery (Phase C18 Unified +32 Credits + Cancel)
+;;;
+;;; cells[0]  = active count (128B isolated from cancelled & lock)
+;;; cells[16] = cancelled flag (0/1)
+;;; cells[17] = TTAS spinlock (touched only on error or final join)
 
 (defstruct Nursery
-  ((sched     :- %FiberScheduler)
-   (active    :- AtomicFxBox)
-   (cancelled :- AtomicFxBox)
-   (lock      :- AtomicFxBox)
+  ((sched       :- %FiberScheduler)
+   (cells       :- :vector)
    waiter-k
    first-err
-   has-err?)
+   has-err?
+   err-handler)
   final: #t)
 
 (defalias nursery? Nursery?)
 
 (def (nursery-cancel! (n : Nursery))
   => :void
-  (atomic-fxbox-set! n.cancelled 1 (memory-order release))
+  (__atomic-fx-store! n.cells 16 1 2)
   (void))
 
 (def (nursery-cancelled? (n : Nursery))
   => :boolean
-  (fx> (atomic-fxbox-ref n.cancelled (memory-order acquire)) 0))
+  (fx> (:- (__atomic-fx-load n.cells 16 1) :fixnum) 0))
 
 (def (%nursery-record-error! (n :- Nursery) exc)
-  (atomic-fxbox-set! n.cancelled 1 (memory-order release))
-  (%fspin-lock! n.lock)
-  (unless n.has-err?
-    (set! n.has-err? #t)
-    (set! n.first-err exc))
-  (%fspin-unlock! n.lock))
+  (let ((cells n.cells))
+    (__atomic-fx-store! cells 16 1 2)
+    (%vspin-lock! cells 17)
+    (unless n.has-err?
+      (set! n.has-err? #t)
+      (set! n.first-err exc))
+    (%vspin-unlock! cells 17)))
 
-(def (%nursery-child-done! (n :- Nursery))
-  (let ((prev (atomic-fxbox-fetch-sub! n.active 1 (memory-order acquire-release))))
-    (when (fx= prev 1)
+(def (%nursery-sub-active! (n :- Nursery) (cnt :- :fixnum))
+  (let* ((cells n.cells)
+         (prev (:- (__atomic-fx-fetch-sub! cells 0 cnt 3) :fixnum)))
+    (when (fx= prev cnt)
       (let ((wk #f))
-        (%fspin-lock! n.lock)
+        (%vspin-lock! cells 17)
         (set! wk n.waiter-k)
         (set! n.waiter-k #f)
-        (%fspin-unlock! n.lock)
+        (%vspin-unlock! cells 17)
         (when wk
           (%sched-wake! n.sched wk))))))
+
+(def (%nursery-flush! (ctx :- %WorkerCtx))
+  (let ((cred ctx.nursery-credit))
+    (when (fx> cred 0)
+      (let ((n ctx.nursery-cur))
+        (set! ctx.nursery-credit 0)
+        (set! ctx.nursery-cur #f)
+        (%nursery-sub-active! n cred)))))
+
+(def (%nursery-credit-take! (ctx :- %WorkerCtx) (n :- Nursery))
+  (let ((cur ctx.nursery-cur)
+        (cred ctx.nursery-credit))
+    (if (and (eq? cur n) (fx>= cred 1))
+      (set! ctx.nursery-credit (fx- cred 1))
+      (begin
+        (when (and cur (fx> cred 0))
+          (%nursery-flush! ctx))
+        (__atomic-fx-fetch-add! (&Nursery-cells n) 0 %MAX-NURSERY-BATCH 3)
+        (set! ctx.nursery-cur n)
+        (set! ctx.nursery-credit (fx- %MAX-NURSERY-BATCH 1))))))
+
+(def (%nursery-child-done-batched! (ctx :- %WorkerCtx) (n :- Nursery))
+  (let ((cur ctx.nursery-cur))
+    (if (eq? cur n)
+      (let ((cnt (fx+ ctx.nursery-credit 1)))
+        (if (fx>= cnt %MAX-NURSERY-BATCH)
+          (begin
+            (set! ctx.nursery-credit 0)
+            (set! ctx.nursery-cur #f)
+            (%nursery-sub-active! n cnt))
+          (set! ctx.nursery-credit cnt)))
+      (begin
+        (when cur
+          (%nursery-flush! ctx))
+        (set! ctx.nursery-cur n)
+        (set! ctx.nursery-credit 1)))))
 
 (def (with-nursery (proc : :procedure))
   (let* ((ctx (%current-wctx))
          (sched (&%WorkerCtx-sched ctx))
-         (n (Nursery sched
-                     (make-atomic-fxbox 1)
-                     (make-atomic-fxbox 0)
-                     (make-atomic-fxbox 0)
-                     #f #f #f))
+         (cells (let ((v (make-vector 32 0)))
+                  (##vector-set! v 0 1)
+                  v))
+         (n (Nursery sched cells #f #f #f #f))
          (parent-res #f))
+    (set! (&Nursery-err-handler n)
+      (lambda (e)
+        (let ((c (%carrier-wctx)))
+          (%nursery-record-error! n e)
+          (%nursery-flush! c)
+          (%nursery-sub-active! n 1))
+        %NURSERY-ERR-TAG))
     (with-catch
      (lambda (e) (%nursery-record-error! n e))
      (lambda () (set! parent-res (proc n))))
-    (let ((prev (atomic-fxbox-fetch-sub! (&Nursery-active n) 1 (memory-order acquire-release))))
-      (when (fx> prev 1)
+    ;; Re-fetch carrier ctx because (proc n) may have migrated across workers!
+    (let* ((cur-ctx (%carrier-wctx))
+           (drop (if (eq? (&%WorkerCtx-nursery-cur cur-ctx) n)
+                   (let ((cred (&%WorkerCtx-nursery-credit cur-ctx)))
+                     (set! (&%WorkerCtx-nursery-credit cur-ctx) 0)
+                     (set! (&%WorkerCtx-nursery-cur cur-ctx) #f)
+                     (fx+ cred 1))
+                   (begin
+                     (%nursery-flush! cur-ctx)
+                     1)))
+           (prev (:- (__atomic-fx-fetch-sub! cells 0 drop 3) :fixnum)))
+      (when (fx> prev drop)
         (perform %eff-park-nursery n)))
     (if (&Nursery-has-err? n)
       (raise (&Nursery-first-err n))
       parent-res)))
 
 (def (%park-nursery-waiter! sched k (n :- Nursery))
-  (let ((wake-now? #f))
-    (%fspin-lock! n.lock)
-    (if (fx= (atomic-fxbox-ref n.active (memory-order acquire)) 0)
+  (let ((cells n.cells)
+        (wake-now? #f))
+    (%vspin-lock! cells 17)
+    (if (fx= (:- (__atomic-fx-load cells 0 1) :fixnum) 0)
       (set! wake-now? #t)
       (set! n.waiter-k k))
-    (%fspin-unlock! n.lock)
+    (%vspin-unlock! cells 17)
     (when wake-now?
       (%sched-wake! sched k))))
 
@@ -276,11 +668,10 @@
 (def (%sched-timer-loop (sched :- %FiberScheduler))
   (let ((mx sched.timer-mx)
         (cv sched.timer-cv)
-        (stopped sched.stopped))
+        (st sched.state))
     (let loop ()
       (let ((to-wake '())
-            (next-dl #f)
-            (done? #f))
+            (next-dl #f))
         (mutex-lock! mx)
         (let ((now (##current-time-point)))
           (let drain ((q sched.timer-q))
@@ -298,7 +689,7 @@
           (mutex-unlock! mx)
           (for-each (lambda (k) (%sched-wake! sched k)) (reverse to-wake))
           (loop))
-         ((fx> (atomic-fxbox-ref stopped (memory-order acquire)) 0)
+         ((fx> (:- (__atomic-fx-load st %FS-IDX-STOPPED 1) :fixnum) 0)
           (mutex-unlock! mx)
           (void))
          (next-dl
@@ -309,7 +700,7 @@
           (loop)))))))
 
 (def (%sched-ensure-timer! (sched :- %FiberScheduler))
-  (when (fx= (atomic-fxbox-compare-and-swap! sched.timer-started 0 1 (memory-order acquire-release)) 0)
+  (when (fx= (:- (__atomic-fx-cas! sched.state %FS-IDX-TIMER 0 1 3) :fixnum) 0)
     (let ((t (make-thread (lambda () (%sched-timer-loop sched))
                           'fiber-timer)))
       (set! sched.timer-thread t)
@@ -337,7 +728,7 @@
     (void))))
 
 ;;;----------------------------------------------------------------------------
-;;; Fiber Spawn, Yield & Worker Count
+;;; Fiber Spawn (Zero-Perform Direct Push), Yield & Worker Count
 
 (def (fiber-worker-count)
   => :fixnum
@@ -347,19 +738,99 @@
   (perform %eff-yield))
 
 (def (fiber-spawn (thunk : :procedure) (n :? Nursery := #f))
-  (if n
-    (begin
-      (atomic-fxbox-fetch-add! (&Nursery-active n) 1 (memory-order acquire-release))
-      (perform %eff-spawn
-               (lambda ()
-                 (with-catch
-                  (lambda (e)
-                    (%nursery-record-error! n e)
-                    (%nursery-child-done! n))
-                  (lambda ()
-                    (thunk)
-                    (%nursery-child-done! n))))))
-    (perform %eff-spawn thunk)))
+  (let ((ctx (%current-wctx)))
+    (if n
+      (begin
+        (%nursery-credit-take! ctx n)
+        (%sched-push-task! ctx thunk n))
+      (begin
+        (__atomic-fx-fetch-add! (&%FiberScheduler-state (&%WorkerCtx-sched ctx))
+                                %FS-IDX-ACTIVE 1 3)
+        (%sched-push-task! ctx thunk #f)))
+    (void)))
+
+;;;----------------------------------------------------------------------------
+;;; Wait-Free Single-Shot FiberPromise (Zero Spinlock / Zero Channel Overhead)
+;;;
+;;; 4-state atomic protocol in state[0]:
+;;;   0 = empty (no waiter, no value)
+;;;   1 = waiter parked (waiter-k and sched published)
+;;;   2 = claimed by single winning resolver (writing val)
+;;;   3 = resolved (val published via release store)
+
+(defstruct FiberPromise
+  ((state :- :vector)
+   val
+   waiter-k
+   sched)
+  final: #t)
+
+(def (make-fiber-promise)
+  => FiberPromise
+  (FiberPromise (vector 0) #f #f #f))
+
+(defalias fiber-promise? FiberPromise?)
+
+(def (fiber-promise-resolved? (p : FiberPromise))
+  => :boolean
+  (fx= (:- (__atomic-fx-load p.state 0 1) :fixnum) 3))
+
+;; Atomically resolves p at most once; returns #t for the winning resolver, #f for losers.
+(def (fiber-promise-resolve! (p : FiberPromise) val)
+  => :boolean
+  (let ((st p.state))
+    (let loop ()
+      (let ((cur (:- (__atomic-fx-load st 0 1) :fixnum)))
+        (cond
+         ((fx>= cur 2) #f)
+         ((fx= cur 0)
+          (if (fx= (:- (__atomic-fx-cas! st 0 0 2 3) :fixnum) 0)
+            (begin
+              (set! p.val val)
+              (__atomic-fx-store! st 0 3 2)
+              #t)
+            (loop)))
+         (else
+          (if (fx= (:- (__atomic-fx-cas! st 0 1 2 3) :fixnum) 1)
+            (let ((wk p.waiter-k)
+                  (sc p.sched))
+              (set! p.val val)
+              (__atomic-fx-store! st 0 3 2)
+              (%sched-wake! sc (cons wk val))
+              #t)
+            (loop))))))))
+
+(def (fiber-promise-await! (p : FiberPromise))
+  (let ((st p.state))
+    (let ((cur (:- (__atomic-fx-load st 0 1) :fixnum)))
+      (cond
+       ((fx= cur 3) p.val)
+       ((fx= cur 2)
+        (let spin ()
+          (if (fx= (:- (__atomic-fx-load st 0 1) :fixnum) 3)
+            p.val
+            (begin (__cpu-relax!) (spin)))))
+       ((in-fiber?)
+        (perform %eff-park-promise p))
+       (else
+        (let wait ()
+          (if (fx= (:- (__atomic-fx-load st 0 1) :fixnum) 3)
+            p.val
+            (begin (thread-yield!) (wait)))))))))
+
+(def (%park-promise-waiter! sched k (p :- FiberPromise))
+  (let ((st p.state))
+    (set! p.waiter-k k)
+    (set! p.sched sched)
+    (let ((prev (:- (__atomic-fx-cas! st 0 0 1 3) :fixnum)))
+      (unless (fx= prev 0)
+        ;; Explicit acquire load guarantees release->acquire ordering for p.val on ARM64.
+        (let spin ((s (:- (__atomic-fx-load st 0 1) :fixnum)))
+          (if (fx= s 3)
+            (%sched-wake! sched (cons k p.val))
+            (begin
+              (__cpu-relax!)
+              (spin (:- (__atomic-fx-load st 0 1) :fixnum)))))))))
 
 ;;;----------------------------------------------------------------------------
 ;;; Direct-Style Bounded & Unbuffered Fiber Channel (Zero Lost Wakeup + Close)
@@ -814,63 +1285,73 @@
          res)))))
 
 ;;;----------------------------------------------------------------------------
-;;; Work-Stealing Scheduler Loop & run-fibers (4096-slot Deques + Adaptive Park)
+;;; Work-Stealing Scheduler Loop & run-fibers (Phase C18-C21 + Cascade Parker)
 
 (def (%init-scheduler-handlers! (sched :- %FiberScheduler))
-  (let ((active sched.active-fibers))
+  (let ((st sched.state))
     (set! sched.handler-entries
       (list
        (%make-handler-entry
-        %eff-spawn 'tail
-        (lambda (thunk)
-          (atomic-fxbox-fetch-add! active 1 (memory-order acquire-release))
-          (%sched-enqueue-local! thunk)
-          (void)))
-       (%make-handler-entry
         %eff-yield 'suspend
         (lambda (k)
-          (%sched-enqueue-local! k)
+          (let ((ctx (%carrier-wctx)))
+            (%sched-push-dq-pair! sched (&%WorkerCtx-dq ctx) k #f)
+            (%sched-wake-one! sched))
+          (void)))
+       (%make-handler-entry
+        %eff-park-promise 'suspend
+        (lambda (k p)
+          (%nursery-flush! (%carrier-wctx))
+          (%park-promise-waiter! sched k p)
           (void)))
        (%make-handler-entry
         %eff-park-nursery 'suspend
         (lambda (k n)
+          (%nursery-flush! (%carrier-wctx))
           (%park-nursery-waiter! sched k n)
           (void)))
        (%make-handler-entry
         %eff-park-send 'suspend
         (lambda (k ch val)
+          (%nursery-flush! (%carrier-wctx))
           (%park-send-waiter! sched k ch val)
           (void)))
        (%make-handler-entry
         %eff-park-recv 'suspend
         (lambda (k ch)
+          (%nursery-flush! (%carrier-wctx))
           (%park-recv-waiter! sched k ch)
           (void)))
        (%make-handler-entry
         %eff-park-sleep 'suspend
         (lambda (k secs)
+          (%nursery-flush! (%carrier-wctx))
           (%park-sleep-waiter! sched k secs)
           (void)))
        (%make-handler-entry
         %eff-park-mutex 'suspend
         (lambda (k fm)
+          (%nursery-flush! (%carrier-wctx))
           (%park-mutex-waiter! sched k fm)
           (void)))
        (%make-handler-entry
         %eff-park-sem 'suspend
         (lambda (k sem)
+          (%nursery-flush! (%carrier-wctx))
           (%park-sem-waiter! sched k sem)
           (void)))))
     (set! sched.return-fn
       (lambda (_)
-        (let ((prev (atomic-fxbox-fetch-sub! active 1 (memory-order acquire-release))))
+        (let ((prev (:- (__atomic-fx-fetch-sub! st %FS-IDX-ACTIVE 1 3) :fixnum)))
           (when (fx= prev 1)
             (%sched-shutdown-parkers! sched)))
-        (void)))))
+        (void)))
+    (set! sched.nursery-return-fn
+      (lambda (_) (void)))))
 
-;; Wrap every fiber body inside the handler prompt with an exception catcher so
+;; Wrap detached fiber body inside the handler prompt with an exception catcher so
 ;; an uncaught exception in a detached fiber never kills a carrier worker thread
-;; or leaks active-fibers (while nursery/root fibers capture errors internally).
+;; or leaks active-fibers.
 (def (%run-fiber-thunk (sched :- %FiberScheduler) thunk)
   (%call-with-handler-entries
    sched.handler-entries
@@ -880,172 +1361,288 @@
       (lambda (_) (void))
       thunk))))
 
-;; Fast 30-bit xorshift PRNG for randomized work-stealing victim selection.
-(definline (%xorshift30 (x :- :fixnum))
-  (let* ((x1 (fxxor x (fxand (fxarithmetic-shift-left x 13) #x3fffffff)))
-         (x2 (fxxor x1 (fxarithmetic-shift-right x1 17)))
-         (x3 (fxxor x2 (fxand (fxarithmetic-shift-left x2 5) #x3fffffff))))
-    (if (fx= x3 0) 1 x3)))
+;; Fast nursery-scoped fiber runner: uses pre-allocated Nursery.err-handler and
+;; Phase C18 +32 batched completion credits (zero sched.active-fibers traffic!).
+(def (%run-nursery-thunk (sched :- %FiberScheduler) (n :- Nursery) thunk)
+  (%call-with-handler-entries
+   sched.handler-entries
+   sched.nursery-return-fn
+   (lambda ()
+     (let ((res (with-catch (&Nursery-err-handler n) thunk)))
+       (unless (eq? res %NURSERY-ERR-TAG)
+         (%nursery-child-done-batched! (%carrier-wctx) n))))))
 
-(def (%worker-try-steal wid num-workers deques seed)
-  (if (fx<= num-workers 1)
-    (values #f #f)
-    (let ((start (fxmodulo seed num-workers)))
-      (let loop ((i 0))
-        (if (fx= i num-workers)
-          (values #f #f)
-          (let* ((v (fx+ start i))
-                 (victim (if (fx>= v num-workers) (fx- v num-workers) v)))
-            (if (fx= victim wid)
-              (loop (fx+ i 1))
-              (let-values (((ok task) (ws-deque-try-steal! (vector-ref deques victim))))
-                (if ok
-                  (values #t task)
-                  (loop (fx+ i 1)))))))))))
+;; Bounded searching-worker permit (caps concurrent steal scanners to max(1, W/2)).
+(def (%sched-try-acquire-search! (sched :- %FiberScheduler))
+  => :boolean
+  (let ((st sched.state)
+        (cap sched.max-searching))
+    (let loop ((i 0))
+      (if (fx>= i 4)
+        #f
+        (let ((cur (:- (__atomic-fx-load st %FS-IDX-SEARCH 1) :fixnum)))
+          (if (fx>= cur cap)
+            #f
+            (if (fx= (:- (__atomic-fx-cas! st %FS-IDX-SEARCH cur (fx+ cur 1) 3) :fixnum) cur)
+              #t
+              (loop (fx+ i 1)))))))))
 
-(def (%worker-poll-any (sched :- %FiberScheduler) wid num-workers deques local-dq global-q rng)
-  (let-values (((ok1 t1) (ws-deque-try-pop! local-dq)))
-    (if ok1
-      (values #t t1)
-      (let-values (((ok2 t2) (lf-queue-try-dequeue! global-q)))
+(definline (%sched-release-search! (sched :- %FiberScheduler))
+  (__atomic-fx-fetch-sub! sched.state %FS-IDX-SEARCH 1 3))
+
+;; Sticky-victim half-deque batch steal scan (returns count stolen: 0..16).
+(def (%worker-try-steal-scan (ctx :- %WorkerCtx) num-workers deques)
+  => :fixnum
+  (let ((wid ctx.wid)
+        (local-dq ctx.dq)
+        (pick-out ctx.pick-out)
+        (start ctx.steal-cursor))
+    (let loop ((tried 1) (victim start))
+      (if (fx>= tried num-workers)
+        (begin
+          ;; Pseudorandomly advance cursor on full miss to desynchronize thieves
+          (set! ctx.steal-cursor (fxmodulo (fx+ (fx* start 5) 1) num-workers))
+          0)
+        (let ((v (if (fx= victim wid)
+                   (let ((n (fx+ victim 1)))
+                     (if (fx>= n num-workers) 0 n))
+                   victim)))
+          (let ((stolen (:- (%fq-steal-batch! (##vector-ref deques v) local-dq pick-out) :fixnum)))
+            (if (fx> stolen 0)
+              (begin
+                (set! ctx.steal-cursor v)
+                stolen)
+              (let ((nxt (fx+ v 1)))
+                (loop (fx+ tried 1)
+                      (if (fx>= nxt num-workers) 0 nxt))))))))))
+
+;; Throttled steal for the hot spin loop (num_searching <= max(1, W/2)).
+(def (%worker-try-steal-throttled (ctx :- %WorkerCtx) (sched :- %FiberScheduler) num-workers deques)
+  => :fixnum
+  (if (or (fx<= num-workers 1)
+          (not (%sched-try-acquire-search! sched)))
+    0
+    (let ((stolen (%worker-try-steal-scan ctx num-workers deques)))
+      (%sched-release-search! sched)
+      stolen)))
+
+;; Unthrottled poll inside Dekker park double-check (serialized under park-mx):
+;; scans lifo, local-dq, global-q, and ALL W-1 peer deques without throttling
+;; to strictly preserve Quint parkDoubleCheckSleep (totalQueued == 0).
+(def (%worker-poll-any-unthrottled (ctx :- %WorkerCtx) (sched :- %FiberScheduler)
+                                   num-workers deques local-dq)
+  (let ((pick-out ctx.pick-out))
+    (cond
+     (ctx.lifo
+      (let ((t ctx.lifo)
+            (n ctx.lifo-n))
+        (set! ctx.lifo #f)
+        (set! ctx.lifo-n #f)
+        (values #t t n)))
+     ((%fq-pop! local-dq pick-out)
+      (let ((t (##vector-ref pick-out 0))
+            (n (##vector-ref pick-out 1)))
+        (##vector-set! pick-out 0 #f)
+        (##vector-set! pick-out 1 #f)
+        (values #t t n)))
+     (else
+      (let-values (((ok2 t2) (%sched-try-dequeue-global! sched)))
         (if ok2
-          (values #t t2)
-          (%worker-try-steal wid num-workers deques rng))))))
+          (values #t t2 #f)
+          (if (fx> num-workers 1)
+            (let ((stolen (%worker-try-steal-scan ctx num-workers deques)))
+              (if (fx> stolen 0)
+                (let ((t (##vector-ref pick-out 0))
+                      (n (##vector-ref pick-out 1)))
+                  (##vector-set! pick-out 0 #f)
+                  (##vector-set! pick-out 1 #f)
+                  (values #t t n))
+                (values #f #f #f)))
+            (values #f #f #f))))))))
 
-(def (%worker-exec-task (sched :- %FiberScheduler) task)
+(def (%worker-exec-task (sched :- %FiberScheduler) task n)
   (cond
+   (n
+    (%run-nursery-thunk sched n task))
    ((procedure? task)
     (%run-fiber-thunk sched task))
    ((effect-continuation? task)
     (resume task #f))
+   ((effect-continuation? (##car task))
+    (resume (##car task) (##cdr task)))
    (else
-    (resume (##car task) (##cdr task)))))
+    ;; Overflowed nursery task (cons thunk nursery) dequeued from global-q
+    (%run-nursery-thunk sched (##cdr task) (##car task)))))
 
 (def (%worker-loop (sched :- %FiberScheduler) wid)
+  (%set-carrier-qos!)
   (let* ((num-workers sched.num-workers)
          (deques sched.deques)
          (local-dq (vector-ref deques wid))
-         (global-q sched.global-q)
-         (active sched.active-fibers)
-         (spinning sched.spinning)
-         (sleepers sched.sleepers)
-         (waking sched.waking)
-         (stopped sched.stopped)
+         (st sched.state)
          (park-mx sched.park-mx)
          (park-cv sched.park-cv)
-         (ctx (%WorkerCtx sched wid local-dq))
-         (init-rng (fxior (fxand (fx* (fx+ wid 1) 1103515245) #x3fffffff) 1)))
+         (pick-out (vector #f #f))
+         (init-cursor (if (fx> num-workers 1)
+                        (fxmodulo (fx+ wid 1) num-workers)
+                        0))
+         (ctx (%WorkerCtx sched wid local-dq
+                          #f #f 0
+                          init-cursor
+                          #f 0
+                          pick-out)))
     (thread-specific-set! (current-thread) ctx)
-    (let loop ((ticks 0) (idle-spins 0) (rng init-rng) (is-spinning? #f))
+    (let loop ((ticks 0) (idle-spins 0) (is-spinning? #f))
+      ;; Periodic nursery-credit flush every 16 ticks for bounded join latency
+      (when (and (fx= (fxand ticks 15) 15)
+                 (fx> (&%WorkerCtx-nursery-credit ctx) 0))
+        (%nursery-flush! ctx))
       (let ((got-task? #f)
             (task #f)
-            (next-rng rng))
-        ;; Periodically poll global-q every 32 local ticks for fairness
+            (task-n #f)
+            (stolen-n 0))
+        ;; 0. Periodically poll global-q every 32 local ticks (1-load fast skip!)
         (when (fx= (fxand ticks 31) 31)
-          (let-values (((ok t) (lf-queue-try-dequeue! global-q)))
+          (let-values (((ok t) (%sched-try-dequeue-global! sched)))
             (when ok
+              (set! (&%WorkerCtx-lifo-streak ctx) 0)
               (set! got-task? #t)
               (set! task t))))
-        ;; 1. Fast path: LIFO pop from own 4096-slot Chase-Lev deque
-        (unless got-task?
-          (let-values (((ok t) (ws-deque-try-pop! local-dq)))
+        ;; 1. Fastest path: private 1-slot LIFO (0 atomics!) if streak < 8
+        (when (and (not got-task?)
+                   (&%WorkerCtx-lifo ctx)
+                   (fx< (&%WorkerCtx-lifo-streak ctx) %MAX-LIFO-STREAK))
+          (set! task (&%WorkerCtx-lifo ctx))
+          (set! task-n (&%WorkerCtx-lifo-n ctx))
+          (set! (&%WorkerCtx-lifo ctx) #f)
+          (set! (&%WorkerCtx-lifo-n ctx) #f)
+          (set! (&%WorkerCtx-lifo-streak ctx) (fx+ (&%WorkerCtx-lifo-streak ctx) 1))
+          (set! got-task? #t))
+        ;; 2. Local 4096-slot flat dual-array runqueue
+        (when (not got-task?)
+          (when (%fq-pop! local-dq pick-out)
+            (set! (&%WorkerCtx-lifo-streak ctx) 0)
+            (set! task (##vector-ref pick-out 0))
+            (set! task-n (##vector-ref pick-out 1))
+            (##vector-set! pick-out 0 #f)
+            (##vector-set! pick-out 1 #f)
+            (set! got-task? #t)))
+        ;; 3. Fallback to private LIFO if streak hit cap while local-dq was empty
+        (when (and (not got-task?) (&%WorkerCtx-lifo ctx))
+          (set! task (&%WorkerCtx-lifo ctx))
+          (set! task-n (&%WorkerCtx-lifo-n ctx))
+          (set! (&%WorkerCtx-lifo ctx) #f)
+          (set! (&%WorkerCtx-lifo-n ctx) #f)
+          (set! (&%WorkerCtx-lifo-streak ctx) 0)
+          (set! got-task? #t))
+        ;; 4. Global lock-free wakeup/overflow queue (1-load fast skip when pending == 0)
+        (when (not got-task?)
+          (let-values (((ok t) (%sched-try-dequeue-global! sched)))
             (when ok
+              (set! (&%WorkerCtx-lifo-streak ctx) 0)
               (set! got-task? #t)
               (set! task t))))
-        ;; 2. Global wakeup / overflow queue
-        (unless got-task?
-          (let-values (((ok t) (lf-queue-try-dequeue! global-q)))
-            (when ok
-              (set! got-task? #t)
-              (set! task t))))
-        ;; 3. Randomized work-steal from peer worker deques
-        (unless got-task?
-          (set! next-rng (%xorshift30 rng))
-          (let-values (((ok t) (%worker-try-steal wid num-workers deques next-rng)))
-            (when ok
-              (set! got-task? #t)
-              (set! task t))))
+        ;; 5. Throttled sticky-victim half-deque batch steal (num_searching <= W/2)
+        (when (not got-task?)
+          (let ((sn (%worker-try-steal-throttled ctx sched num-workers deques)))
+            (when (fx> sn 0)
+              (set! (&%WorkerCtx-lifo-streak ctx) 0)
+              (set! task (##vector-ref pick-out 0))
+              (set! task-n (##vector-ref pick-out 1))
+              (##vector-set! pick-out 0 #f)
+              (##vector-set! pick-out 1 #f)
+              (set! stolen-n sn)
+              (set! got-task? #t))))
         (if got-task?
           (begin
-            (when is-spinning?
-              (let ((prev (atomic-fxbox-fetch-sub! spinning 1 (memory-order acquire-release))))
-                ;; If we were the last searching worker and more work exists, cascade-wake one!
-                (when (and (fx= prev 1)
-                           (or (fx> (ws-deque-size local-dq) 0)
-                               (not (lf-queue-empty? global-q))))
+            (cond
+             (is-spinning?
+              (let ((prev (:- (__atomic-fx-fetch-sub! st %FS-IDX-PARK 1 4) :fixnum)))
+                ;; Formally verified unconditional Rayon/Tokio cascade wakeup
+                ;; (fiber_steal_cascade_wakeup_smp.qnt): when the last spinning
+                ;; worker transitions to BUSY and sleepers remain, wake one
+                ;; sibling so tasks in ANY peer deque fan out across all W cores.
+                (when (and (fx= (fxand prev %FS-SPIN-MASK) 1)
+                           (fx> (fxand prev %FS-SLEEP-MASK) 0))
                   (%sched-wake-one! sched))))
-            (%worker-exec-task sched task)
-            (loop (fx+ ticks 1) 0 next-rng #f))
-          (cond
-           ((fx<= (atomic-fxbox-ref active (memory-order acquire)) 0)
-            (when is-spinning?
-              (atomic-fxbox-fetch-sub! spinning 1 (memory-order acquire-release)))
-            (%sched-shutdown-parkers! sched)
-            (void))
-           ((fx< idle-spins 64)
-            (unless is-spinning?
-              (atomic-fxbox-fetch-add! spinning 1 (memory-order acquire-release)))
-            (__cpu-relax!)
-            (loop ticks (fx+ idle-spins 1) next-rng #t))
-           ((fx< idle-spins 80)
-            (thread-yield!)
-            (loop ticks (fx+ idle-spins 1) next-rng #t))
-           (else
-            ;; Park on condvar with Dekker/SeqCst double-check (0% idle CPU!)
-            (when is-spinning?
-              (atomic-fxbox-fetch-sub! spinning 1 (memory-order sequentially-consistent)))
-            (mutex-lock! park-mx)
-            (atomic-fxbox-fetch-add! sleepers 1 (memory-order sequentially-consistent))
-            (let-values (((ok2 t2) (%worker-poll-any sched wid num-workers deques local-dq global-q next-rng)))
-              (cond
-               (ok2
-                (atomic-fxbox-fetch-sub! sleepers 1 (memory-order release))
-                (mutex-unlock! park-mx)
-                (when (or (fx> (ws-deque-size local-dq) 0)
-                          (not (lf-queue-empty? global-q)))
-                  (%sched-wake-one! sched))
-                (%worker-exec-task sched t2)
-                (loop (fx+ ticks 1) 0 next-rng #f))
-               ((or (fx<= (atomic-fxbox-ref active (memory-order acquire)) 0)
-                    (fx> (atomic-fxbox-ref stopped (memory-order acquire)) 0))
-                (atomic-fxbox-fetch-sub! sleepers 1 (memory-order release))
-                (mutex-unlock! park-mx)
-                (void))
-               (else
-                (mutex-unlock! park-mx park-cv)
-                (atomic-fxbox-fetch-add! spinning 1 (memory-order sequentially-consistent))
-                (atomic-fxbox-fetch-sub! sleepers 1 (memory-order sequentially-consistent))
-                (atomic-fxbox-swap! waking 0 (memory-order sequentially-consistent))
-                (loop ticks 0 next-rng #t)))))))))))
+             ((fx> stolen-n 1)
+              ;; Busy worker stole a batch into its own local-dq; wake a sleeper if any.
+              (%sched-wake-one! sched)))
+            (%worker-exec-task sched task task-n)
+            (loop (fx+ ticks 1) 0 #f))
+          (if (fx> (&%WorkerCtx-nursery-credit ctx) 0)
+            ;; Flush buffered nursery credits immediately before idling/parking,
+            ;; then re-poll once in case flushing woke a parent nursery waiter locally.
+            (begin
+              (%nursery-flush! ctx)
+              (loop ticks idle-spins is-spinning?))
+            (cond
+             ((fx<= (:- (__atomic-fx-load st %FS-IDX-ACTIVE 1) :fixnum) 0)
+              (when is-spinning?
+                (__atomic-fx-fetch-sub! st %FS-IDX-PARK 1 4))
+              (%sched-shutdown-parkers! sched)
+              (void))
+             ((fx< idle-spins 32)
+              (unless is-spinning?
+                (__atomic-fx-fetch-add! st %FS-IDX-PARK 1 4))
+              (%idle-pause! (fxarithmetic-shift-right idle-spins 3))
+              (loop ticks (fx+ idle-spins 1) #t))
+             ((fx< idle-spins 48)
+              (%os-sched-yield!)
+              (loop ticks (fx+ idle-spins 1) #t))
+             (else
+              ;; Park on condvar with Dekker/SeqCst unthrottled double-check (0% idle CPU!)
+              (when is-spinning?
+                (__atomic-fx-fetch-sub! st %FS-IDX-PARK 1 4))
+              (mutex-lock! park-mx)
+              (__atomic-fx-fetch-add! st %FS-IDX-PARK %FS-SLEEP-UNIT 4)
+              (let-values (((ok2 t2 n2)
+                            (%worker-poll-any-unthrottled ctx sched num-workers deques local-dq)))
+                (cond
+                 (ok2
+                  (__atomic-fx-fetch-sub! st %FS-IDX-PARK %FS-SLEEP-UNIT 4)
+                  (mutex-unlock! park-mx)
+                  ;; Formally verified unconditional cascade wakeup on Dekker recovery
+                  (%sched-wake-one! sched)
+                  (%worker-exec-task sched t2 n2)
+                  (loop (fx+ ticks 1) 0 #f))
+                 ((or (fx<= (:- (__atomic-fx-load st %FS-IDX-ACTIVE 1) :fixnum) 0)
+                      (fx> (:- (__atomic-fx-load st %FS-IDX-STOPPED 1) :fixnum) 0))
+                  (__atomic-fx-fetch-sub! st %FS-IDX-PARK %FS-SLEEP-UNIT 4)
+                  (mutex-unlock! park-mx)
+                  (void))
+                 (else
+                  (mutex-unlock! park-mx park-cv)
+                  (__atomic-fx-fetch-add! st %FS-IDX-PARK (fx- 1 %FS-SLEEP-UNIT) 4)
+                  (__atomic-fx-fetch-and! st %FS-IDX-PARK (fxnot %FS-WAKING-BIT) 4)
+                  (loop ticks 0 #t))))))))))))
 
 (def (run-fibers (thunk : :procedure) workers: (workers : :t := (##current-vm-processor-count)))
   (let* ((w (max 1 (if (fixnum? workers) workers 1)))
+         (max-search (max 1 (fxarithmetic-shift-right w 1)))
          (deques (let ((v (make-vector w #f)))
                    (let loop ((i 0))
                      (when (fx< i w)
-                       (vector-set! v i (make-ws-deque 4096))
+                       (vector-set! v i (%make-local-runq))
                        (loop (fx+ i 1))))
                    v))
          (global-q (make-lf-queue))
-         (active (make-atomic-fxbox 1))
-         (spinning (make-atomic-fxbox 0))
-         (sleepers (make-atomic-fxbox 0))
-         (waking (make-atomic-fxbox 0))
-         (stopped (make-atomic-fxbox 0))
+         (st (let ((v (make-vector 96 0)))
+               (vector-set! v %FS-IDX-ACTIVE 1)
+               v))
          (park-mx (make-mutex 'fiber-park))
          (park-cv (make-condition-variable 'fiber-park))
-         (timer-started (make-atomic-fxbox 0))
          (timer-mx (make-mutex 'fiber-timer))
          (timer-cv (make-condition-variable 'fiber-timer))
          (root-done (make-atomic-fxbox 0))
          (root-box (cons #f #f))
-         (sched (%FiberScheduler w deques global-q active
-                                 spinning sleepers waking stopped park-mx park-cv
-                                 timer-started timer-mx timer-cv '() #f
-                                 root-done root-box #f #f)))
+         (sched (%FiberScheduler w max-search deques global-q st
+                                 park-mx park-cv
+                                 timer-mx timer-cv '() #f
+                                 root-done root-box #f #f #f)))
     (%init-scheduler-handlers! sched)
-    (lf-queue-enqueue!
-     global-q
+    (%sched-enqueue-global!
+     sched
      (lambda ()
        (with-catch
         (lambda (e)

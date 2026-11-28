@@ -9,7 +9,8 @@
         :std/control
         :std/sync/atomic
         :std/sync/fiber
-        :std/actor)
+        :std/actor
+        :gerbil/runtime/util)
 (export fiber-test)
 
 (def proto:/fiber-test "/fiber-test/v0")
@@ -410,4 +411,582 @@
                    (fiber-channel-close! ch))
                  n))))))
         (check (atomic-fxbox-ref eof-receivers (memory-order acquire)) => 64)
-        (check (atomic-fxbox-ref closed-senders (memory-order acquire)) => 64)))))
+        (check (atomic-fxbox-ref closed-senders (memory-order acquire)) => 64)))
+
+    (test-case "Wait-free FiberPromise SMP racing resolvers, external wakes & 500-promise fan-out"
+      ;; 1. Pre-resolved fast path & fiber-promise-resolved?
+      (let ((p (make-fiber-promise)))
+        (check (fiber-promise? p) => #t)
+        (check (fiber-promise-resolved? p) => #f)
+        (check (fiber-promise-resolve! p 'hello) => #t)
+        (check (fiber-promise-resolved? p) => #t)
+        (check (fiber-promise-resolve! p 'second) => #f)
+        (check (fiber-promise-await! p) => 'hello))
+
+      ;; 2. External thread wakes parked fiber awaiter + 16 racing resolvers (exact 1 winner!)
+      (def race-res
+        (run-fibers
+         (lambda ()
+           (let ((p-ext (make-fiber-promise))
+                 (wins (make-atomic-fxbox 0))
+                 (fan-sum (make-atomic-fxbox 0)))
+             ;; External green thread resolves p-ext after fiber parks
+             (spawn/name 'promise-ext-waker
+               (lambda ()
+                 (thread-sleep! 0.01)
+                 (fiber-promise-resolve! p-ext 4242)))
+             (check (fiber-promise-await! p-ext) => 4242)
+             ;; 16 concurrent fibers race to resolve a single FiberPromise
+             (let ((p-race (make-fiber-promise))
+                   (winner-val (make-atomic-fxbox -1)))
+               (with-nursery
+                (lambda (n)
+                  (for (i (in-range 16))
+                    (let ((id i))
+                      (fiber-spawn
+                       (lambda ()
+                         (when (fiber-promise-resolve! p-race id)
+                           (atomic-fxbox-fetch-add! wins 1 (memory-order relaxed))
+                           (atomic-fxbox-set! winner-val id (memory-order release))))
+                       n)))))
+               (check (atomic-fxbox-ref wins (memory-order acquire)) => 1)
+               (check (fiber-promise-await! p-race) => (atomic-fxbox-ref winner-val (memory-order acquire))))
+             ;; 500-promise concurrent producer/awaiter fan-out across all SMP workers
+             (let ((promises (let ((v (make-vector 500 #f)))
+                               (for (i (in-range 500))
+                                 (vector-set! v i (make-fiber-promise)))
+                               v)))
+               (with-nursery
+                (lambda (n)
+                  (for (i (in-range 500))
+                    (let ((id i)
+                          (pr (vector-ref promises i)))
+                      (fiber-spawn
+                       (lambda ()
+                         (atomic-fxbox-fetch-add! fan-sum (fiber-promise-await! pr) (memory-order relaxed)))
+                       n)
+                      (fiber-spawn
+                       (lambda ()
+                         (when (fx= (fxand id 7) 0) (fiber-yield))
+                         (fiber-promise-resolve! pr (fx+ id 1)))
+                       n)))))
+               (atomic-fxbox-ref fan-sum (memory-order acquire)))))))
+      (check race-res => (/ (* 500 501) 2)))
+
+    (test-case "Nursery+detached mixed spawn liveness & 10,000-fiber WSDeque batch-spill torture"
+      ;; 1. Detached fibers spawned inside a nursery must keep scheduler alive after nursery exits
+      (def detached-done (make-atomic-fxbox 0))
+      (def nursery-ret
+        (run-fibers
+         (lambda ()
+           (with-nursery
+            (lambda (n)
+              (for (i (in-range 32))
+                (let ((id i))
+                  (fiber-spawn
+                   (lambda ()
+                     (fiber-spawn
+                      (lambda ()
+                        (fiber-sleep! 0.015)
+                        (atomic-fxbox-fetch-add! detached-done (fx+ id 1) (memory-order relaxed)))))
+                   n)))))
+           'nursery-finished)))
+      (check nursery-ret => 'nursery-finished)
+      (check (atomic-fxbox-ref detached-done (memory-order acquire)) => (/ (* 32 33) 2))
+
+      ;; 2. 10,000 bulk-spawned nursery fibers overflow the 4096-slot LocalRunQ -> 256-item batch spill
+      (def bulk-sum
+        (run-fibers
+         (lambda ()
+           (let ((acc (make-atomic-fxbox 0)))
+             (with-nursery
+              (lambda (n)
+                (let loop ((i 1))
+                  (when (fx<= i 10000)
+                    (let ((v i))
+                      (fiber-spawn
+                       (lambda ()
+                         (atomic-fxbox-fetch-add! acc v (memory-order relaxed)))
+                       n))
+                    (loop (fx+ i 1))))))
+             (atomic-fxbox-ref acc (memory-order acquire))))))
+      (check bulk-sum => (/ (* 10000 10001) 2)))
+
+    (test-case "Post-sleep steal-cascade wakeup activates all W/W SMP workers (Quint model witness)"
+      (def expected-workers (max 1 (##current-vm-processor-count)))
+      (def (count-distinct vec)
+        (let ((len (vector-length vec)))
+          (let loop ((i 0) (seen '()))
+            (if (fx>= i len)
+              (length seen)
+              (let ((x (vector-ref vec i)))
+                (loop (fx+ i 1)
+                      (if (or (not x) (memq x seen)) seen (cons x seen))))))))
+
+      ;; 1. Single-producer post-sleep fan-out: after fiber-sleep! parks all W-1
+      ;;    siblings on park-cv, spawning W concurrent tasks MUST wake all W workers
+      ;;    (previously starved to 2/W cores due to lost steal-cascade wakeup!).
+      (def single-wave-distinct
+        (run-fibers
+         (lambda ()
+           (fiber-sleep! 0.03)
+           (let ((seen (make-vector expected-workers #f))
+                 (arrived (make-atomic-fxbox 0))
+                 (t0 (##current-time-point)))
+             (with-nursery
+              (lambda (n)
+                (for (i (in-range expected-workers))
+                  (let ((idx i))
+                    (fiber-spawn
+                     (lambda ()
+                       (vector-set! seen idx (current-thread))
+                       (atomic-fxbox-fetch-add! arrived 1 (memory-order acquire-release))
+                       ;; Hold this carrier briefly until all W siblings have woken and arrived
+                       ;; (bounded safety cap 0.5s prevents hang if a regression breaks cascade).
+                       (let wait ()
+                         (when (and (fx< (atomic-fxbox-ref arrived (memory-order acquire))
+                                         expected-workers)
+                                    (< (- (##current-time-point) t0) 0.5))
+                           (wait))))
+                     n)))))
+             (count-distinct seen)))))
+      (check single-wave-distinct => expected-workers)
+
+      ;; 2. Distributed multi-deque cascade (Quint Counterexample 3 witness):
+      ;;    two parent tasks populate distinct worker deques after all peers sleep,
+      ;;    verifying unconditional cascade wakes all W workers across peer deques.
+      (when (fx>= expected-workers 3)
+        (let ((multi-wave-distinct
+               (run-fibers
+                (lambda ()
+                  (fiber-sleep! 0.03)
+                  (let* ((half (fxquotient expected-workers 2))
+                         (rest (fx- expected-workers half))
+                         (seen (make-vector expected-workers #f))
+                         (arrived (make-atomic-fxbox 0))
+                         (t0 (##current-time-point))
+                         (spawn-group
+                          (lambda (n base cnt)
+                            (for (k (in-range cnt))
+                              (let ((idx (fx+ base k)))
+                                (fiber-spawn
+                                 (lambda ()
+                                   (vector-set! seen idx (current-thread))
+                                   (atomic-fxbox-fetch-add! arrived 1 (memory-order acquire-release))
+                                   (let wait ()
+                                     (when (and (fx< (atomic-fxbox-ref arrived (memory-order acquire))
+                                                     expected-workers)
+                                                (< (- (##current-time-point) t0) 0.5))
+                                       (wait))))
+                                 n))))))
+                    (with-nursery
+                     (lambda (n)
+                       (fiber-spawn (lambda () (spawn-group n 0 half)) n)
+                       (fiber-spawn (lambda () (spawn-group n half rest)) n)))
+                    (count-distinct seen))))))
+          (check multi-wave-distinct => expected-workers))))
+
+    (test-case "Phase C18 +32 nursery credit switching, nested nurseries & mid-batch error abort"
+      ;; 1. Interleave 200 spawns across two distinct nurseries (crossing 32-credit
+      ;;    boundaries and forcing nursery-cur switches on every iteration).
+      (def switch-sums
+        (run-fibers
+         (lambda ()
+           (let ((s1 (make-atomic-fxbox 0))
+                 (s2 (make-atomic-fxbox 0)))
+             (with-nursery
+              (lambda (n1)
+                (with-nursery
+                 (lambda (n2)
+                   (for (i (in-range 1 201))
+                     (let ((v i))
+                       (fiber-spawn
+                        (lambda ()
+                          (when (fx= (fxand v 15) 0) (fiber-yield))
+                          (atomic-fxbox-fetch-add! s1 v (memory-order relaxed)))
+                        n1)
+                       (fiber-spawn
+                        (lambda ()
+                          (when (fx= (fxand v 15) 7) (fiber-yield))
+                          (atomic-fxbox-fetch-add! s2 v (memory-order relaxed)))
+                        n2)))))))
+             (list (atomic-fxbox-ref s1 (memory-order acquire))
+                   (atomic-fxbox-ref s2 (memory-order acquire)))))))
+      (check switch-sums => (list (/ (* 200 201) 2) (/ (* 200 201) 2)))
+
+      ;; 2. Mid-batch child error with unconsumed credits (5 spawns out of 32) inside
+      ;;    an inner nursery must cleanly propagate and never leak outer nursery credits.
+      (def outer-done (make-atomic-fxbox 0))
+      (def caught-inner?
+        (run-fibers
+         (lambda ()
+           (let ((caught #f))
+             (with-nursery
+              (lambda (outer)
+                (for (i (in-range 1 41))
+                  (let ((v i))
+                    (fiber-spawn
+                     (lambda ()
+                       (fiber-yield)
+                       (atomic-fxbox-fetch-add! outer-done v (memory-order relaxed)))
+                     outer)))
+                (with-catch
+                 (lambda (e) (set! caught (Error? e)))
+                 (lambda ()
+                   (with-nursery
+                    (lambda (inner)
+                      (for (k (in-range 5))
+                        (let ((id k))
+                          (fiber-spawn
+                           (lambda ()
+                             (if (fx= id 2)
+                               (error "mid-batch-credit-boom")
+                               (fiber-yield)))
+                           inner)))))))))
+             caught))))
+      (check caught-inner? => #t)
+      (check (atomic-fxbox-ref outer-done (memory-order acquire)) => (/ (* 40 41) 2)))
+
+    (test-case "Multi-wave park/wake stability & zero-busy-spin idle CPU verification"
+      (def expected-workers (max 1 (##current-vm-processor-count)))
+      (def (count-distinct vec)
+        (let ((len (vector-length vec)))
+          (let loop ((i 0) (seen '()))
+            (if (fx>= i len)
+              (length seen)
+              (let ((x (vector-ref vec i)))
+                (loop (fx+ i 1)
+                      (if (or (not x) (memq x seen)) seen (cons x seen))))))))
+      (def (proc-cpu-time)
+        (let ((st (##process-statistics)))
+          (+ (f64vector-ref st 0) (f64vector-ref st 1))))
+
+      ;; 1. Zero-busy-spin idle check: sleeping 120ms across W workers must NOT burn
+      ;;    W * 120ms of CPU time (proves workers truly park on park-cv), AND
+      ;;    immediately waking from that sleep must activate all W/W workers!
+      (def idle-res
+        (run-fibers
+         (lambda ()
+           (let* ((cpu0 (proc-cpu-time))
+                  (_ (fiber-sleep! 0.12))
+                  (cpu-delta (- (proc-cpu-time) cpu0))
+                  (wave-counts (make-vector 5 0)))
+             ;; 5 consecutive sleep->burst waves inside one run-fibers prove
+             ;; SPIN/SLEEP/WAKING counters never drift or leak across park/wake cycles.
+             (for (w (in-range 5))
+               (when (fx> w 0) (fiber-sleep! 0.025))
+               (let ((seen (make-vector expected-workers #f))
+                     (arrived (make-atomic-fxbox 0))
+                     (t0 (##current-time-point)))
+                 (with-nursery
+                  (lambda (n)
+                    (for (i (in-range expected-workers))
+                      (let ((idx i))
+                        (fiber-spawn
+                         (lambda ()
+                           (vector-set! seen idx (current-thread))
+                           (atomic-fxbox-fetch-add! arrived 1 (memory-order acquire-release))
+                           (let wait ()
+                             (when (and (fx< (atomic-fxbox-ref arrived (memory-order acquire))
+                                             expected-workers)
+                                        (< (- (##current-time-point) t0) 0.5))
+                               (wait))))
+                         n)))))
+                 (vector-set! wave-counts w (count-distinct seen))))
+             (cons cpu-delta (vector->list wave-counts))))))
+      ;; Idle CPU during 120ms sleep across W >= 2 workers must stay well below busy-spin
+      (when (fx>= expected-workers 2)
+        (check (< (car idle-res) (* 0.5 0.12 expected-workers)) => #t))
+      (check (cdr idle-res) => (make-list 5 expected-workers)))
+
+    (test-case "External-thread cold wakeup (FiberPromise & FiberChannel) cascades to all W/W workers"
+      (def expected-workers (max 1 (##current-vm-processor-count)))
+      (def (count-distinct vec)
+        (let ((len (vector-length vec)))
+          (let loop ((i 0) (seen '()))
+            (if (fx>= i len)
+              (length seen)
+              (let ((x (vector-ref vec i)))
+                (loop (fx+ i 1)
+                      (if (or (not x) (memq x seen)) seen (cons x seen))))))))
+      (def (run-wave!)
+        (let ((seen (make-vector expected-workers #f))
+              (arrived (make-atomic-fxbox 0))
+              (t0 (##current-time-point)))
+          (with-nursery
+           (lambda (n)
+             (for (i (in-range expected-workers))
+               (let ((idx i))
+                 (fiber-spawn
+                  (lambda ()
+                    (vector-set! seen idx (current-thread))
+                    (atomic-fxbox-fetch-add! arrived 1 (memory-order acquire-release))
+                    (let wait ()
+                      (when (and (fx< (atomic-fxbox-ref arrived (memory-order acquire))
+                                      expected-workers)
+                                 (< (- (##current-time-point) t0) 0.5))
+                        (wait))))
+                  n)))))
+          (count-distinct seen)))
+
+      ;; 1. All W workers parked while root awaits FiberPromise; external green thread resolves it
+      (def p-ext (make-fiber-promise))
+      (def ext1
+        (spawn/name 'cold-promise-waker
+          (lambda ()
+            (thread-sleep! 0.03)
+            (fiber-promise-resolve! p-ext 'wake))))
+      (def d-prom
+        (run-fibers
+         (lambda ()
+           (check (fiber-promise-await! p-ext) => 'wake)
+           (run-wave!))))
+      (thread-join! ext1)
+      (check d-prom => expected-workers)
+
+      ;; 2. All W workers parked while root awaits FiberChannel; external green thread sends to it
+      (def ch-ext (make-fiber-channel 1))
+      (def ext2
+        (spawn/name 'cold-chan-waker
+          (lambda ()
+            (thread-sleep! 0.03)
+            (fiber-send! ch-ext 'go))))
+      (def d-chan
+        (run-fibers
+         (lambda ()
+           (check (fiber-recv! ch-ext) => 'go)
+           (run-wave!))))
+      (thread-join! ext2)
+      (check d-chan => expected-workers))
+
+    (test-case "LocalRunQ exact-once conservation across 4096 boundaries (4095/4096/4097/8500) & batch-stealing"
+      (for-each
+       (lambda (n-tasks)
+         (let ((counts (make-vector n-tasks 0)))
+           (run-fibers
+            (lambda ()
+              (with-nursery
+               (lambda (n)
+                 (let loop ((i 0))
+                   (when (fx< i n-tasks)
+                     (let ((idx i))
+                       (fiber-spawn
+                        (lambda ()
+                          (__atomic-fx-fetch-add! counts idx 1 3))
+                        n))
+                     (loop (fx+ i 1))))))))
+           ;; Verify EVERY task executed EXACTLY ONCE (catches both drops AND duplicates!)
+           (let ((bad 0))
+             (let check-loop ((i 0))
+               (when (fx< i n-tasks)
+                 (unless (fx= (:- (__atomic-fx-load counts i 1) :fixnum) 1)
+                   (set! bad (fx+ bad 1)))
+                 (check-loop (fx+ i 1))))
+             (check bad => 0))))
+       '(4095 4096 4097 8500)))
+
+    (test-case "Private LIFO anti-starvation (streak cap 8), global-q fairness, fork-join tree & oversubscription"
+      ;; 1. Single-worker LIFO ping-pong must NOT starve local-dq or global-q fibers!
+      (def fairness-res
+        (run-fibers
+         (lambda ()
+           (let ((ch (make-fiber-channel 1))
+                 (stop (make-atomic-fxbox 0))
+                 (local-ran (make-atomic-fxbox 0))
+                 (global-ran (make-atomic-fxbox 0))
+                 (p-ext (make-fiber-promise)))
+             (with-nursery
+              (lambda (n)
+                ;; External thread wakes a fiber via global-q while ping-pong hogs LIFO
+                (spawn/name 'fairness-ext
+                  (lambda ()
+                    (thread-sleep! 0.005)
+                    (fiber-promise-resolve! p-ext 'global-ok)))
+                (fiber-spawn
+                 (lambda ()
+                   (when (eq? (fiber-promise-await! p-ext) 'global-ok)
+                     (atomic-fxbox-set! global-ran 1 (memory-order release))
+                     (when (fx= (atomic-fxbox-ref local-ran (memory-order acquire)) 1)
+                       (atomic-fxbox-set! stop 1 (memory-order release)))))
+                 n)
+                ;; Two ping-pong fibers continuously waking each other via LIFO
+                (fiber-spawn
+                 (lambda ()
+                   (let lp ((k 0))
+                     (when (and (fx= (atomic-fxbox-ref stop (memory-order acquire)) 0)
+                                (fx< k 5000))
+                       (fiber-send! ch k)
+                       (lp (fx+ k 1))))
+                   (fiber-channel-close! ch))
+                 n)
+                (fiber-spawn
+                 (lambda ()
+                   (let lp ()
+                     (let ((v (fiber-recv! ch)))
+                       (unless (eof-object? v)
+                         (lp)))))
+                 n)
+                ;; Third local-dq fiber must execute without starvation
+                (fiber-spawn
+                 (lambda ()
+                   (atomic-fxbox-set! local-ran 1 (memory-order release))
+                   (when (fx= (atomic-fxbox-ref global-ran (memory-order acquire)) 1)
+                     (atomic-fxbox-set! stop 1 (memory-order release))))
+                 n)))
+             (list (atomic-fxbox-ref local-ran (memory-order acquire))
+                   (atomic-fxbox-ref global-ran (memory-order acquire)))))
+         workers: 1))
+      (check fairness-res => '(1 1))
+
+      ;; 2. Post-sleep recursive divide-and-conquer fork-join tree (depth 6 = 64 leaves)
+      (def tree-sum
+        (run-fibers
+         (lambda ()
+           (fiber-sleep! 0.025)
+           (let ((acc (make-atomic-fxbox 0)))
+             (letrec ((fork-join
+                       (lambda (lo hi)
+                         (if (fx= lo hi)
+                           (atomic-fxbox-fetch-add! acc lo (memory-order relaxed))
+                           (let ((mid (fxarithmetic-shift-right (fx+ lo hi) 1)))
+                             (with-nursery
+                              (lambda (n)
+                                (fiber-spawn (lambda () (fork-join lo mid)) n)
+                                (fiber-spawn (lambda () (fork-join (fx+ mid 1) hi)) n))))))))
+               (fork-join 1 64))
+             (atomic-fxbox-ref acc (memory-order acquire))))))
+      (check tree-sum => (/ (* 64 65) 2))
+
+      ;; 3. Undersubscribed (1, 2, 3) & oversubscribed (2*P) workers after fiber-sleep!
+      ;;    (proves sched_yield + condvar park never livelocks Gambit green threads)
+      (def nprocs (max 1 (##current-vm-processor-count)))
+      (for-each
+       (lambda (w)
+         (let ((tot (run-fibers
+                     (lambda ()
+                       (fiber-sleep! 0.015)
+                       (let ((acc (make-atomic-fxbox 0)))
+                         (with-nursery
+                          (lambda (n)
+                            (for (i (in-range 1 101))
+                              (let ((v i))
+                                (fiber-spawn
+                                 (lambda ()
+                                   (when (fx= (fxand v 7) 0) (fiber-yield))
+                                   (atomic-fxbox-fetch-add! acc v (memory-order relaxed)))
+                                 n)))))
+                         (atomic-fxbox-ref acc (memory-order acquire))))
+                     workers: w)))
+           (check tot => (/ (* 100 101) 2))))
+       (list 1 2 3 (fx* 2 nprocs))))
+
+    (test-case "Phase C18 nursery credit boundaries (1/31/32/33/63/64/65), parent migration, parked-flush & parent-throw"
+      ;; 1. Exact +32 credit boundary sizes
+      (for-each
+       (lambda (cnt)
+         (let ((got (run-fibers
+                     (lambda ()
+                       (let ((acc (make-atomic-fxbox 0)))
+                         (with-nursery
+                          (lambda (n)
+                            (for (i (in-range 1 (fx+ cnt 1)))
+                              (let ((v i))
+                                (fiber-spawn
+                                 (lambda () (atomic-fxbox-fetch-add! acc v (memory-order relaxed)))
+                                 n)))))
+                         (atomic-fxbox-ref acc (memory-order acquire)))))))
+           (check got => (/ (* cnt (fx+ cnt 1)) 2))))
+       '(1 31 32 33 63 64 65))
+
+      ;; 2. Parent spawns children on worker A, yields/migrates across workers, spawns more on B,
+      ;;    parks on channel waiting for nested child nursery, then exits cleanly
+      (def mig-res
+        (run-fibers
+         (lambda ()
+           (let ((acc (make-atomic-fxbox 0))
+                 (ch (make-fiber-channel 1)))
+             (with-nursery
+              (lambda (n)
+                (for (i (in-range 1 11))
+                  (let ((v i))
+                    (fiber-spawn
+                     (lambda () (atomic-fxbox-fetch-add! acc v (memory-order relaxed)))
+                     n)))
+                (for (_ (in-range 16)) (fiber-yield))
+                (for (i (in-range 11 21))
+                  (let ((v i))
+                    (fiber-spawn
+                     (lambda () (atomic-fxbox-fetch-add! acc v (memory-order relaxed)))
+                     n)))
+                ;; Spawn child that runs a nested nursery and signals ch while parent parks with unconsumed credits
+                (fiber-spawn
+                 (lambda ()
+                   (with-nursery
+                    (lambda (sub)
+                      (for (_ (in-range 5))
+                        (fiber-spawn (lambda () (fiber-yield)) sub))))
+                   (fiber-send! ch 'nested-done))
+                 n)
+                (check (fiber-recv! ch) => 'nested-done)))
+             (atomic-fxbox-ref acc (memory-order acquire))))))
+      (check mig-res => (/ (* 20 21) 2))
+
+      ;; 3. Parent body throws after spawning 5 children (holding 27 unconsumed credits):
+      ;;    all 5 children must STILL complete before parent exception propagates!
+      (def sib-done (make-atomic-fxbox 0))
+      (check-exception
+       (run-fibers
+        (lambda ()
+          (with-nursery
+           (lambda (n)
+             (for (_ (in-range 5))
+               (fiber-spawn
+                (lambda ()
+                  (fiber-sleep! 0.01)
+                  (atomic-fxbox-fetch-add! sib-done 1 (memory-order relaxed)))
+                n))
+             (error "parent-body-boom-with-credits")))))
+       Error?)
+      (check (atomic-fxbox-ref sib-done (memory-order acquire)) => 5))
+
+    (test-case "FiberPromise 2000-race await/resolve torture & post-sleep nested parallel-map"
+      ;; 1. Tight 2000-promise await/resolve race exercising state 0->1 vs 0->2->3 transitions
+      (def prom-sum
+        (run-fibers
+         (lambda ()
+           (let ((acc (make-atomic-fxbox 0)))
+             (with-nursery
+              (lambda (n)
+                (for (i (in-range 1 2001))
+                  (let ((v i)
+                        (p (make-fiber-promise)))
+                    (fiber-spawn
+                     (lambda ()
+                       (atomic-fxbox-fetch-add! acc (fiber-promise-await! p) (memory-order relaxed)))
+                     n)
+                    (fiber-spawn
+                     (lambda ()
+                       (fiber-promise-resolve! p v))
+                     n)))))
+             (atomic-fxbox-ref acc (memory-order acquire))))))
+      (check prom-sum => (/ (* 2000 2001) 2))
+
+      ;; 2. Post-sleep nested parallel-map preserves order and runs across all W workers
+      (def expected-workers (max 1 (##current-vm-processor-count)))
+      (def pmap-res
+        (run-fibers
+         (lambda ()
+           (fiber-sleep! 0.025)
+           (let ((arrived (make-atomic-fxbox 0))
+                 (t0 (##current-time-point)))
+             (parallel-map
+              (lambda (x)
+                (atomic-fxbox-fetch-add! arrived 1 (memory-order acquire-release))
+                (let wait ()
+                  (when (and (fx< (atomic-fxbox-ref arrived (memory-order acquire))
+                                  expected-workers)
+                             (< (- (##current-time-point) t0) 0.5))
+                    (wait)))
+                (* x x))
+              (iota expected-workers))))))
+      (check pmap-res => (map (lambda (x) (* x x)) (iota expected-workers))))))

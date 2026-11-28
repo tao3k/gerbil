@@ -2,7 +2,7 @@
 ;;; © vyzo
 ;;; thread barriers
 (import :std/error
-        :std/sync/atomic)
+        :gerbil/runtime/util)
 (export Barrier? Barrier
         (rename: make-Barrier make-barrier)
         barrier-wait!
@@ -14,7 +14,7 @@
 ;; Atomic tripped state (0=open, 1=passed, 2=failed) gives a zero-mutex acquire fast path.
 (defstruct Barrier ((mx      :- :mutex)
                     (cv      :- :condvar)
-                    (tripped :- AtomicFxBox)
+                    (tripped :- :vector)
                     (count   :- :fixnum)
                     (limit   :- :fixnum)
                     exn
@@ -25,14 +25,14 @@
   (lambda (self (limit :~ nonnegative-fixnum? :- :fixnum))
     (set! self.mx (make-mutex 'barrier))
     (set! self.cv (make-condition-variable 'barrier))
-    (set! self.tripped (make-atomic-fxbox (if (fx= limit 0) 1 0)))
+    (set! self.tripped (vector (if (fx= limit 0) 1 0)))
     (set! self.count 0)
     (set! self.limit limit)
     (set! self.failed? #f)))
 
 (def (barrier-wait! (b : Barrier))
   => :void
-  (let ((st (atomic-fxbox-ref b.tripped (memory-order acquire))))
+  (let ((st (:- (__atomic-fx-load b.tripped 0 1) :fixnum)))
     (cond
      ((fx= st 1) (void))
      ((fx= st 2) (abort! (raise b.exn)))
@@ -60,7 +60,7 @@
     (set! b.count count+1)
     (unless (fx< count+1 b.limit)
       (unless b.failed?
-        (atomic-fxbox-set! b.tripped 1 (memory-order release)))
+        (__atomic-fx-store! b.tripped 0 1 2))
       (condition-variable-broadcast! b.cv))
     (mutex-unlock! b.mx)
     (void)))
@@ -72,7 +72,7 @@
   (unless b.failed?
     (set! b.failed? #t)
     (set! b.exn exn)
-    (atomic-fxbox-set! b.tripped 2 (memory-order release)))
+    (__atomic-fx-store! b.tripped 0 2 2))
   (condition-variable-broadcast! b.cv)
   (mutex-unlock! b.mx)
   (void))

@@ -8,7 +8,8 @@
 ;;;   - ConcurrentTable (Wait-free-read / lock-free-write sharded hash table)
 
 (import :std/error
-        :std/sync/atomic)
+        :std/sync/atomic
+        :gerbil/runtime/util)
 (export
   LFStack
   make-lf-stack
@@ -84,152 +85,173 @@
               (loop))))))))
 
 ;;;============================================================================
-;;; 2. Lock-Free Michael-Scott MPMC FIFO Queue
+;;; 2. Lock-Free Michael-Scott MPMC FIFO Queue (128B Cache-Line Padded)
+;;;
+;;; head lives at cells[0], tail lives at cells[16] (128 bytes apart inside one
+;;; contiguous vector) so producers and consumers never false-share a cache line
+;;; even across compacting GCs.
 
-(defstruct %LFQNode (val (next :- AtomicBox)) final: #t)
+(defstruct %LFQNode (val (next :- :vector)) final: #t)
 
-(defstruct LFQueue ((head :- AtomicBox) (tail :- AtomicBox)) final: #t)
+(defstruct LFQueue ((cells :- :vector)) final: #t)
 
 (def (make-lf-queue)
   => LFQueue
-  (let ((dummy (%LFQNode #f (make-atomic-box #f))))
-    (LFQueue (make-atomic-box dummy)
-             (make-atomic-box dummy))))
+  (let ((dummy (%LFQNode #f (vector #f)))
+        (cells (make-vector 32 #f)))
+    (vector-set! cells 0 dummy)
+    (vector-set! cells 16 dummy)
+    (LFQueue cells)))
 
 (defalias lf-queue? LFQueue?)
 
 (def (lf-queue-empty? (q : LFQueue))
   => :boolean
-  (let* ((h (atomic-box-ref q.head (memory-order acquire)))
-         (nxt (atomic-box-ref (&%LFQNode-next h) (memory-order acquire))))
+  (let* ((h (__atomic-slot-load q.cells 0 1))
+         (nxt (__atomic-slot-load (&%LFQNode-next h) 0 1)))
     (not nxt)))
 
 (def (lf-queue-enqueue! (q : LFQueue) val)
   => :boolean
-  (let ((node (%LFQNode val (make-atomic-box #f)))
-        (tail-box q.tail))
-    (let loop ()
-      (let* ((tail (atomic-box-ref tail-box (memory-order acquire)))
-             (next-box (&%LFQNode-next tail))
-             (next (atomic-box-ref next-box (memory-order acquire))))
-        (if (eq? tail (atomic-box-ref tail-box (memory-order acquire)))
+  (let ((node (%LFQNode val (vector #f)))
+        (cells q.cells))
+    (let loop ((backoff 0))
+      (let* ((tail (__atomic-slot-load cells 16 1))
+             (next-cell (&%LFQNode-next tail))
+             (next (__atomic-slot-load next-cell 0 1)))
+        (if (eq? tail (__atomic-slot-load cells 16 1))
           (if (not next)
-            (let ((prev (atomic-box-compare-and-swap! next-box #f node (memory-order acquire-release))))
+            (let ((prev (__atomic-slot-cas! next-cell 0 #f node 3)))
               (if (not prev)
                 (begin
-                  (atomic-box-compare-and-swap! tail-box tail node (memory-order release))
+                  (__atomic-slot-cas! cells 16 tail node 2)
                   #t)
-                (loop)))
+                (begin
+                  (when (fx> backoff 0) (__cpu-relax!))
+                  (loop (fx+ backoff 1)))))
             (begin
-              (atomic-box-compare-and-swap! tail-box tail next (memory-order release))
-              (loop)))
-          (loop))))))
+              (__atomic-slot-cas! cells 16 tail next 2)
+              (loop backoff)))
+          (loop backoff))))))
 
 ;; Returns (values #t val) on success, or (values #f #f) when empty.
 (def (lf-queue-try-dequeue! (q : LFQueue))
-  (let ((head-box q.head)
-        (tail-box q.tail))
-    (let loop ()
-      (let* ((head (atomic-box-ref head-box (memory-order acquire)))
-             (tail (atomic-box-ref tail-box (memory-order acquire)))
-             (next (atomic-box-ref (&%LFQNode-next head) (memory-order acquire))))
-        (if (eq? head (atomic-box-ref head-box (memory-order acquire)))
+  (let ((cells q.cells))
+    (let loop ((backoff 0))
+      (let* ((head (__atomic-slot-load cells 0 1))
+             (tail (__atomic-slot-load cells 16 1))
+             (next (__atomic-slot-load (&%LFQNode-next head) 0 1)))
+        (if (eq? head (__atomic-slot-load cells 0 1))
           (if (eq? head tail)
             (if (not next)
               (values #f #f)
               (begin
-                (atomic-box-compare-and-swap! tail-box tail next (memory-order release))
-                (loop)))
+                (__atomic-slot-cas! cells 16 tail next 2)
+                (loop backoff)))
             (let ((val (&%LFQNode-val next)))
-              (let ((prev (atomic-box-compare-and-swap! head-box head next (memory-order acquire-release))))
+              (let ((prev (__atomic-slot-cas! cells 0 head next 3)))
                 (if (eq? prev head)
                   (begin
                     ;; Clear payload from new dummy node so GC can reclaim promptly.
                     (set! (&%LFQNode-val next) #f)
                     (values #t val))
-                  (loop)))))
-          (loop))))))
+                  (begin
+                    (when (fx> backoff 0) (__cpu-relax!))
+                    (loop (fx+ backoff 1)))))))
+          (loop backoff))))))
 
 ;;;============================================================================
-;;; 3. Lock-Free Bounded Chase-Lev Work-Stealing Deque
+;;; 3. Lock-Free Bounded Chase-Lev Work-Stealing Deque (128B Padded + Cached Top)
+;;;
+;;; meta[0]  = top (thief-contended cache line)
+;;; meta[16] = bottom (owner-private cache line, 128 bytes from top)
+;;; meta[17] = cached-top (owner-private estimate; avoids reading thief-dirty top
+;;;            cache line on 99.9% of local ws-deque-push! calls)
 
 (defstruct WSDeque
-  ((mask   :- :fixnum)
-   (cap    :- :fixnum)
-   (slots  :- :vector)
-   (top    :- AtomicFxBox)
-   (bottom :- AtomicFxBox))
+  ((mask  :- :fixnum)
+   (cap   :- :fixnum)
+   (slots :- :vector)
+   (meta  :- :vector))
   final: #t)
 
 (def (make-ws-deque (min-cap : :fixnum := 256))
   => WSDeque
   (let* ((cap (%next-pow2 (if (fx> min-cap 0) min-cap 256)))
-         (slots (make-vector cap #f)))
-    (WSDeque (fx- cap 1) cap slots
-             (make-atomic-fxbox 0)
-             (make-atomic-fxbox 0))))
+         (slots (make-vector cap #f))
+         (meta (make-vector 32 0)))
+    (WSDeque (fx- cap 1) cap slots meta)))
 
 (defalias ws-deque? WSDeque?)
 
 (def (ws-deque-size (dq : WSDeque))
   => :fixnum
-  (let ((b (atomic-fxbox-ref dq.bottom (memory-order acquire)))
-        (t (atomic-fxbox-ref dq.top (memory-order acquire))))
-    (let ((d (fx- b t)))
-      (if (fx> d 0) d 0))))
+  (let* ((meta dq.meta)
+         (b (:- (__atomic-fx-load meta 16 1) :fixnum))
+         (t (:- (__atomic-fx-load meta 0 1) :fixnum))
+         (d (fx- b t)))
+    (if (fx> d 0) d 0)))
 
 ;; Owner-only push at bottom. Returns #t on success, #f if bounded ring is full.
 (def (ws-deque-push! (dq : WSDeque) val)
   => :boolean
-  (let* ((b (atomic-fxbox-ref dq.bottom (memory-order relaxed)))
-         (t (atomic-fxbox-ref dq.top (memory-order acquire)))
+  (let* ((meta dq.meta)
+         (b (:- (__atomic-fx-load meta 16 0) :fixnum))
+         (ct (:- (##vector-ref meta 17) :fixnum))
          (cap dq.cap))
-    (if (fx>= (fx- b t) cap)
-      #f
+    (if (fx< (fx- b ct) cap)
       (begin
-        (vector-atomic-set! dq.slots (fxand b dq.mask) val (memory-order relaxed))
-        (atomic-fxbox-set! dq.bottom (fx+ b 1) (memory-order release))
-        #t))))
+        (__atomic-slot-exchange! dq.slots (fxand b dq.mask) val 0)
+        (__atomic-fx-store! meta 16 (fx+ b 1) 2)
+        #t)
+      (let ((t (:- (__atomic-fx-load meta 0 1) :fixnum)))
+        (##vector-set! meta 17 t)
+        (if (fx>= (fx- b t) cap)
+          #f
+          (begin
+            (__atomic-slot-exchange! dq.slots (fxand b dq.mask) val 0)
+            (__atomic-fx-store! meta 16 (fx+ b 1) 2)
+            #t))))))
 
 ;; Owner-only LIFO pop from bottom. Returns (values #t val) or (values #f #f).
 (def (ws-deque-try-pop! (dq : WSDeque))
-  (let* ((b (fx- (atomic-fxbox-ref dq.bottom (memory-order relaxed)) 1))
-         (top-box dq.top)
-         (bot-box dq.bottom)
+  (let* ((meta dq.meta)
+         (b (fx- (:- (__atomic-fx-load meta 16 0) :fixnum) 1))
          (slots dq.slots)
          (idx (fxand b dq.mask)))
-    (atomic-fxbox-set! bot-box b (memory-order relaxed))
-    (atomic-fence (memory-order sequentially-consistent))
-    (let ((t (atomic-fxbox-ref top-box (memory-order relaxed))))
+    (__atomic-fx-store! meta 16 b 0)
+    (__atomic-fence! 4)
+    (let ((t (:- (__atomic-fx-load meta 0 0) :fixnum)))
+      (##vector-set! meta 17 t)
       (cond
        ((fx< t b)
-        (let ((val (vector-atomic-ref slots idx (memory-order acquire))))
+        (let ((val (__atomic-slot-load slots idx 1)))
           (values #t val)))
        ((fx= t b)
-        (let* ((val (vector-atomic-ref slots idx (memory-order acquire)))
-               (prev (atomic-fxbox-compare-and-swap! top-box t (fx+ t 1) (memory-order sequentially-consistent))))
-          (atomic-fxbox-set! bot-box (fx+ b 1) (memory-order relaxed))
+        (let* ((val (__atomic-slot-load slots idx 1))
+               (prev (:- (__atomic-fx-cas! meta 0 t (fx+ t 1) 4) :fixnum)))
+          (__atomic-fx-store! meta 16 (fx+ b 1) 0)
+          (##vector-set! meta 17 (fx+ t 1))
           (if (fx= prev t)
             (values #t val)
             (values #f #f))))
        (else
-        (atomic-fxbox-set! bot-box (fx+ b 1) (memory-order relaxed))
+        (__atomic-fx-store! meta 16 (fx+ b 1) 0)
         (values #f #f))))))
 
 ;; Concurrent thief FIFO steal from top. Returns (values #t val) or (values #f #f).
 (def (ws-deque-try-steal! (dq : WSDeque))
-  (let ((top-box dq.top)
-        (bot-box dq.bottom))
-    (let ((t (atomic-fxbox-ref top-box (memory-order acquire))))
-      (atomic-fence (memory-order sequentially-consistent))
-      (let ((b (atomic-fxbox-ref bot-box (memory-order acquire))))
-        (if (fx< t b)
-          (let* ((val (vector-atomic-ref dq.slots (fxand t dq.mask) (memory-order acquire)))
-                 (prev (atomic-fxbox-compare-and-swap! top-box t (fx+ t 1) (memory-order sequentially-consistent))))
-            (if (fx= prev t)
-              (values #t val)
-              (values #f #f)))
-          (values #f #f))))))
+  (let* ((meta dq.meta)
+         (t (:- (__atomic-fx-load meta 0 1) :fixnum)))
+    (__atomic-fence! 4)
+    (let ((b (:- (__atomic-fx-load meta 16 1) :fixnum)))
+      (if (fx< t b)
+        (let* ((val (__atomic-slot-load dq.slots (fxand t dq.mask) 1))
+               (prev (:- (__atomic-fx-cas! meta 0 t (fx+ t 1) 4) :fixnum)))
+          (if (fx= prev t)
+            (values #t val)
+            (values #f #f)))
+        (values #f #f)))))
 
 ;;;============================================================================
 ;;; 4. Wait-Free-Read / Lock-Free-Write Sharded Concurrent Hash Table
