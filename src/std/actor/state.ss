@@ -10,7 +10,7 @@
 (defstruct ActorState
   ((host  :- ActorHost)
    (peer  :- LocalActor)
-   (seqno :- :vector))
+   (seqno :- :fixnum))
   final: #t
   constructor: :init!)
 
@@ -18,7 +18,7 @@
   (lambda (self)
     (set! self.peer
       (LocalActor (current-thread)))
-    (set! self.seqno (vector 0))))
+    (set! self.seqno 0)))
 
 (def (actor-local-state)
   => ActorState
@@ -66,4 +66,6 @@
 (def (actor-next-seqno!)
   => :integer
   (using (state (actor-local-state) : ActorState)
-    (:- (__atomic-fx-fetch-add! state.seqno 0 1 0) :fixnum)))
+    (let ((s state.seqno))
+      (set! state.seqno (fx+ s 1))
+      s)))

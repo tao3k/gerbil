@@ -217,8 +217,9 @@
       (when seqno
         (let ((entry (concurrent-table-ref pending seqno #f)))
           (when (and entry
-                     (##string=? (&Envelope-protocol msg)
-                                 (&%FiberRPCEntry-protocol entry)))
+                     (let ((p1 (&Envelope-protocol msg))
+                           (p2 (&%FiberRPCEntry-protocol entry)))
+                       (or (##eq? p1 p2) (##string=? p1 p2))))
             (concurrent-table-delete! pending seqno)
             (%fiber-rpc-complete-ok! entry (&Envelope-message msg))))))))
 
@@ -255,7 +256,7 @@
           (if (and (not saw-wake?)
                    cached-time
                    (fx< new-fast 64))
-            (let ((msg (mailbox-take-timeout! cached-time)))
+            (let ((msg (mailbox-take-deadline! cached-time)))
               (cond
                ((##eq? msg mailbox-timeout)
                 (loop active-timers grace-ms grace-time #t #t #f 64))
@@ -285,11 +286,11 @@
                                       (if grace-time
                                         (values grace-ms grace-time is-win-active?)
                                         (let ((gabs (+ (##current-time-point) 0.05)))
-                                          (values (%now-rel-ms gabs) (seconds->time gabs) #f)))))
+                                          (values (%now-rel-ms gabs) gabs #f)))))
                           (atomic-fxbox-set! min-dl gms (memory-order sequentially-consistent))
                           (if (not (lf-queue-empty? timers))
                             (loop '() gms gtm #t #t #f 0)
-                            (let ((msg (mailbox-take-timeout! gtm)))
+                            (let ((msg (mailbox-take-deadline! gtm)))
                               (cond
                                ((##eq? msg mailbox-timeout)
                                 ;; Refresh once if any message arrived during this 50ms window;
@@ -309,7 +310,7 @@
                           (atomic-fxbox-set! min-dl 0 (memory-order sequentially-consistent))
                           (if (not (lf-queue-empty? timers))
                             (loop '() 0 #f #t #t #f 0)
-                            (let ((msg (mailbox-take-timeout! #f)))
+                            (let ((msg (mailbox-take-deadline! #f)))
                               (unless (or (##eq? msg mailbox-timeout)
                                           (##eq? msg mailbox-empty)
                                           (##eq? msg 'timer-wake))
@@ -333,11 +334,15 @@
                                     (sweep (##cdr xs) (cons entry kept) dms (&%FiberRPCEntry-deadline entry))
                                     (sweep (##cdr xs) (cons entry kept) earliest-ms earliest-abs))))))
                             ;; 3. Publish earliest deadline with SeqCst before checking timers queue (Dekker)
-                            (let ((tm (if earliest-abs (seconds->time earliest-abs) #f)))
+                            (let ((tm (if earliest-abs
+                                        (if (##flonum? earliest-abs)
+                                          earliest-abs
+                                          (exact->inexact earliest-abs))
+                                        #f)))
                               (atomic-fxbox-set! min-dl earliest-ms (memory-order sequentially-consistent))
                               (if (not (lf-queue-empty? timers))
                                 (loop kept 0 #f #t #t #f 0)
-                                (let ((msg (mailbox-take-timeout! tm)))
+                                (let ((msg (mailbox-take-deadline! tm)))
                                   (cond
                                    ((or (##eq? msg mailbox-timeout)
                                         (##eq? msg 'timer-wake))
