@@ -43,4 +43,70 @@
       (def other-counter (AtomicCounter 42))
       (check-equal? (increment-atomic-counter! other-counter 3) 42)
       (check-equal? (increment-atomic-counter! other-counter) 45)
-      (check-equal? (increment-atomic-counter-by-1! other-counter) 46))))
+      (check-equal? (increment-atomic-counter-by-1! other-counter) 46))
+
+    (test-case "SMP all-core lock-free Atom CAS, swap!, increment!, watch transition, and AtomicCounter"
+      (let* ((w (max 4 (##current-vm-processor-count)))
+             (iters 2500)
+             (a (atom 0))
+             (cnt (AtomicCounter 0))
+             (cas-wins (AtomicCounter 0)))
+        ;; 1. All-core lock-free atom-increment! + atom-swap! + AtomicCounter conservation
+        (let ((ts
+               (for/collect (tid (in-range w))
+                 (spawn
+                  (lambda ()
+                    (let lp ((i 0))
+                      (when (fx< i iters)
+                        (if (fx= (fxand i 1) 0)
+                          (atom-increment! a 1)
+                          (atom-swap! a (lambda (x) (fx+ x 1))))
+                        (increment-atomic-counter-by-1! cnt)
+                        (lp (fx+ i 1)))))))))
+          (for-each thread-join! ts)
+          (check-equal? (atom-deref a) (* w iters))
+          (check-equal? (atomic-counter-ref cnt) (* w iters)))
+
+        ;; 2. All-core racing compare-and-set! (strictly 1 winner per round across 500 rounds)
+        (let ((race (atom 0)))
+          (let ((ts
+                 (for/collect (tid (in-range w))
+                   (spawn
+                    (lambda ()
+                      (let lp ((r 0))
+                        (when (fx< r 500)
+                          (when (atom-compare-and-set! race r (fx+ r 1))
+                            (increment-atomic-counter-by-1! cas-wins))
+                          ;; Spin until someone advances round r
+                          (let wait ()
+                            (when (fx<= (atom-deref race) r)
+                              (thread-yield!)
+                              (wait)))
+                          (lp (fx+ r 1)))))))))
+            (for-each thread-join! ts)
+            (check-equal? (atom-deref race) 500)
+            (check-equal? (atomic-counter-ref cas-wins) 500)))
+
+        ;; 3. Validator + watcher hot-attach/detach transitions under concurrency
+        (let ((wa (atom 0))
+              (watch-calls (AtomicCounter 0)))
+          (atom-add-watch! wa 'w1 (lambda (_k _a _o _n) (increment-atomic-counter-by-1! watch-calls)))
+          (atom-validator-set! wa (lambda (v) (and (fixnum? v) (fx>= v 0))))
+          (check-exception (atom-reset! wa -1) true)
+          (check-equal? (atom-deref wa) 0)
+          (let ((ts
+                 (for/collect (_ (in-range w))
+                   (spawn
+                    (lambda ()
+                      (let lp ((i 0))
+                        (when (fx< i 200)
+                          (atom-increment! wa 1)
+                          (lp (fx+ i 1)))))))))
+            (for-each thread-join! ts)
+            (check-equal? (atom-deref wa) (* w 200))
+            (check-equal? (atomic-counter-ref watch-calls) (* w 200)))
+          (atom-remove-watch! wa 'w1)
+          (atom-validator-set! wa #f)
+          ;; Back on lock-free fast path
+          (check-equal? (values->list (atom-reset-values! wa 999)) [(* w 200) 999])
+          (check-equal? (atom-deref wa) 999))))))

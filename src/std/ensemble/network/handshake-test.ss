@@ -436,6 +436,36 @@
                    (handshake-test-closed smaller)
                    (handshake-test-closed larger))))))))
 
+      (test-case "authenticated peer refusal closing socket before larger readiness observes rejection"
+        (with-handshake-contexts
+         (lambda (ctx1 ctx2 small large other)
+           (with-handshake-sockets 'unix ctx1 large small
+             (lambda (server client)
+               (let (start (current-time-seconds))
+                 (using ((smaller (make-handshake client ctx1 small large DIRECTION-OUT
+                                    start (+ start 30) (+ start 3600))
+                            :- Handshake)
+                         (larger (make-handshake server ctx2 large #f DIRECTION-IN
+                                   start (+ start 30) 0)
+                            :- Handshake))
+                   (check (handshake-test-peer server client
+                            (lambda ()
+                              (handshake-test-authenticate larger)
+                              ;; Wait for smaller to send REJECT and close Unix fd before larger writes ACCEPT
+                              (thread-sleep! 0.02)
+                              (handshake-ready! larger))
+                            (lambda ()
+                              (handshake-test-authenticate smaller)
+                              (check (handshake-reject! smaller reason-refused) => #f)))
+                          => '(returned #f))
+                   (check smaller.reason => reason-refused)
+                   (check smaller.peer-rejected? => #f)
+                   (check larger.reason => reason-refused)
+                   (check larger.peer-rejected? => #t)
+                   (check larger.identity-proven? => #t)
+                   (handshake-test-closed smaller)
+                   (handshake-test-closed larger))))))))
+
       (test-case "plaintext TCP and unexpected TLS certificate identity close the socket"
         (with-handshake-contexts
          (lambda (ctx1 ctx2 small large other)
