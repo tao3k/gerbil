@@ -17,7 +17,8 @@
 
 (defstruct (ssl-socket stream-socket)
   ((ssl       :- :foreign)  ; SSL*
-   (peer-cert :- :foreign)) ; Maybe X509*
+   (peer-cert :- :foreign)  ; Maybe X509*
+   (ssl-mx    :- :mutex))   ; serializes OpenSSL SSL* I/O under SMP
   final: #t)
 
 (defstruct ssl-socket-reader
@@ -46,6 +47,7 @@
   (using (sslsock (new-instance ssl-socket::t) :- ssl-socket)
     (__copy-struct! sock sslsock)
     (set! sslsock.ssl ssl)
+    (set! sslsock.ssl-mx (make-mutex 'ssl-socket))
     sslsock))
 
 (def (__ssl-socket-from-server-socket (sock :-  basic-server-socket)
@@ -91,6 +93,9 @@
   (with-ssl-socket-close self
     (device-close self.dev DIRECTION-INOUT)))
 
+;; OpenSSL SSL* objects are not safe for concurrent SSL_read/SSL_write across OS
+;; threads under SMP. Serialize only the nonblocking OpenSSL call under ssl-mx
+;; (always ordered inside self.lock) and release ssl-mx before waiting for I/O.
 (def (ssl-socket-recv (self         : ssl-socket)
                       (output       : :u8vector)
                       (output-start : :fixnum)
@@ -99,20 +104,22 @@
   => :fixnum
   (do-with-read-lock self.lock
     (let loop ()
-      (do-check-device-input ssl-socket-recv self.dev
-        (let (result (SSL_read self.ssl output output-start output-end))
-          (cond
-           ((and (fixnum? result) (fx>= result 0)) result)
-           ((eq? result SSL_ERROR_WANT_READ)
-            (if (__basic-socket-wait-input! self)
-              (loop)
-              (raise-timeout ssl-socket-recv "receive timeout")))
-           ((eq? result SSL_ERROR_WANT_WRITE)
-            (if (__basic-socket-wait-output! self)
-              (loop)
-              (raise-timeout ssl-socket-recv "send timeout")))
-           (else
-            (raise-ssl-error ssl-socket-recv result))))))))
+      (let (result
+            (do-with-lock self.ssl-mx
+              (do-check-device-input ssl-socket-recv self.dev
+                (SSL_read self.ssl output output-start output-end))))
+        (cond
+         ((and (fixnum? result) (fx>= result 0)) result)
+         ((eq? result SSL_ERROR_WANT_READ)
+          (if (__basic-socket-wait-input! self)
+            (loop)
+            (raise-timeout ssl-socket-recv "receive timeout")))
+         ((eq? result SSL_ERROR_WANT_WRITE)
+          (if (__basic-socket-wait-output! self)
+            (loop)
+            (raise-timeout ssl-socket-recv "send timeout")))
+         (else
+          (raise-ssl-error ssl-socket-recv result)))))))
 
 (def (ssl-socket-send (self         : ssl-socket)
                       (input        : :u8vector)
@@ -122,20 +129,22 @@
   => :fixnum
   (do-with-read-lock self.lock
     (let loop ()
-      (do-check-device-output ssl-socket-send self.dev
-        (let (result (SSL_write self.ssl input input-start input-end))
-          (cond
-           ((and (fixnum? result) (fx> result 0)) result)
-           ((eq? result SSL_ERROR_WANT_READ)
-            (if (__basic-socket-wait-input! self)
-              (loop)
-              (raise-timeout ssl-socket-send "receive timeout")))
-           ((eq? result SSL_ERROR_WANT_WRITE)
-            (if (__basic-socket-wait-output! self)
-              (loop)
-              (raise-timeout ssl-socket-send "send timeout")))
-           (else
-            (raise-ssl-error ssl-socket-send result))))))))
+      (let (result
+            (do-with-lock self.ssl-mx
+              (do-check-device-output ssl-socket-send self.dev
+                (SSL_write self.ssl input input-start input-end))))
+        (cond
+         ((and (fixnum? result) (fx> result 0)) result)
+         ((eq? result SSL_ERROR_WANT_READ)
+          (if (__basic-socket-wait-input! self)
+            (loop)
+            (raise-timeout ssl-socket-send "receive timeout")))
+         ((eq? result SSL_ERROR_WANT_WRITE)
+          (if (__basic-socket-wait-output! self)
+            (loop)
+            (raise-timeout ssl-socket-send "send timeout")))
+         (else
+          (raise-ssl-error ssl-socket-send result)))))))
 
 (implement
   (Closer

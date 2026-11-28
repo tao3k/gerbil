@@ -169,26 +169,35 @@
                (when listener (Closer-close listener))))))))
 
     (test-case "native malloc and INTERNAL wrapper are terminal without consuming the queue"
-      (unwind-protect
-        (begin
-          (ssl-test-clear-errors!)
-          (ssl-test-push-error! TEST_SSL_MALLOC)
-          (let (malloc (ssl-test-first-error))
-            (check (ssl-local-error? [-1 TEST_SSL_ERROR_SSL malloc]) => #t)
-            (ssl-test-push-error! TEST_SSL_INTERNAL)
-            (let (internal (ssl-test-last-error))
-              (check (not (= malloc internal)) => #t)
-              (check (ssl-local-error? [-1 TEST_SSL_ERROR_SSL internal]) => #t)
-              (check (ssl-test-first-error) => malloc)
-              (check (ssl-test-last-error) => internal)))
-          (ssl-test-clear-errors!)
-          (ssl-test-push-error! TEST_SSL_NEGOTIATION)
-          (let (protocol (ssl-test-last-error))
-            (check (ssl-local-error? [-1 TEST_SSL_ERROR_SSL protocol]) => #f)
-            (check (ssl-local-error? [-1 TEST_SSL_ERROR_SYSCALL protocol]) => #t)
-            (check (ssl-test-last-error) => protocol))
-          (check (ssl-local-error? [-1 TEST_SSL_ERROR_SYSCALL 0]) => #t))
-        (ssl-test-clear-errors!)))
+      ;; Pin this green thread to one OS processor under true-multicore SMP
+      ;; because OpenSSL's ERR queue is OS-thread-local.
+      (let* ((self (current-thread))
+             (pid (##current-processor-id))
+             (proc (##processor pid)))
+        (##thread-pin! self proc)
+        (##thread-migrate-to! pid)
+        (unwind-protect
+          (begin
+            (ssl-test-clear-errors!)
+            (ssl-test-push-error! TEST_SSL_MALLOC)
+            (let (malloc (ssl-test-first-error))
+              (check (ssl-local-error? [-1 TEST_SSL_ERROR_SSL malloc]) => #t)
+              (ssl-test-push-error! TEST_SSL_INTERNAL)
+              (let (internal (ssl-test-last-error))
+                (check (not (= malloc internal)) => #t)
+                (check (ssl-local-error? [-1 TEST_SSL_ERROR_SSL internal]) => #t)
+                (check (ssl-test-first-error) => malloc)
+                (check (ssl-test-last-error) => internal)))
+            (ssl-test-clear-errors!)
+            (ssl-test-push-error! TEST_SSL_NEGOTIATION)
+            (let (protocol (ssl-test-last-error))
+              (check (ssl-local-error? [-1 TEST_SSL_ERROR_SSL protocol]) => #f)
+              (check (ssl-local-error? [-1 TEST_SSL_ERROR_SYSCALL protocol]) => #t)
+              (check (ssl-test-last-error) => protocol))
+            (check (ssl-local-error? [-1 TEST_SSL_ERROR_SYSCALL 0]) => #t))
+          (begin
+            (ssl-test-clear-errors!)
+            (##thread-pin! self #f)))))
     (test-case "local SSL result errors are not negotiation errors"
       (let (error (with-catch values (lambda () (with-ssl-result (values 0)))))
         (check error ? SSLError?)

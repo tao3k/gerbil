@@ -1097,18 +1097,21 @@ namespace: #f
 (def (mixin-method-ref (klass : :class) obj (id : :symbol))
   (mixin-find-method (class-type-precedence-list klass) obj id))
 
+(def __class-type-methods-lock (__make-inline-lock))
+(def __class-type-specializer-lock (__make-inline-lock))
+
 (def (bind-method! klass (id : :symbol) (proc : :procedure) (rebind? #f))
   (def (flush-caches! klass)
-    (when (&class-type-specializer klass)
-      (set! (&class-type-specializer klass) #f)
+    (when (__atomic-struct-ref klass 12 1)
+      (__atomic-struct-set! klass 12 #f 2)
       (when (class-type-sealed? klass)
 	(##unchecked-structure-set! klass (##fxand (##fxnot class-type-flag-sealed) (##type-flags klass))
 				    3 class::t bind-method!)))
     ;; NOTE: we don't drop interface tables to avoid clobbering
     ;;       existing implements declarations, except when
     ;;       rebinding (to support repl development)
-    (when (and rebind? (&class-type-interface klass))
-      (set! (&class-type-interface klass) #f))
+    (when (and rebind? (__atomic-struct-ref klass 13 1))
+      (__atomic-struct-set! klass 13 #f 2))
 
     ;; subclasses also need to be flushed
     (cond
@@ -1131,12 +1134,14 @@ namespace: #f
 
   (cond
    ((class-type? klass)
-    (let (ht (&class-type-methods klass))
-      (if ht
-        (bind! ht)
-        (let (ht (make-symbolic-table #f 0))
-          (&class-type-methods-set! klass ht)
-          (bind! ht)))))
+    (__do-inline-lock! __class-type-methods-lock
+      (let (ht (__atomic-struct-ref klass 11 1))
+        (if ht
+          (bind! ht)
+          (let (ht (make-symbolic-table #f 0))
+            (bind! ht)
+            (__atomic-struct-set! klass 11 ht 2)
+            (void))))))
    ((##type? klass)
     (bind-method! (__shadow-class klass) id proc rebind?))
    (else
@@ -1172,12 +1177,17 @@ namespace: #f
 ;; returns symbolic table mapping method => specialized procedure
 ;; the result is cached in the class-type specializer slot
 (def (specialize-class (klass : :class))
+  ;; Acquire load pairs with single-winner release publication so concurrent
+  ;; SMP threads never observe a half-populated specialized method table.
   (cond
-   ((&class-type-specializer klass))
+   ((__atomic-struct-ref klass 12 1))
    (else
-    (let (method-table (___specialize-class klass))
-      (set! (&class-type-specializer klass) method-table)
-      method-table))))
+    (let (candidate (___specialize-class klass))
+      (__do-inline-lock! __class-type-specializer-lock
+        (or (__atomic-struct-ref klass 12 1)
+            (begin
+              (__atomic-struct-set! klass 12 candidate 2)
+              candidate)))))))
 
 (def (__specialize-method klass method-table method proc)
   (cond
@@ -1269,6 +1279,18 @@ namespace: #f
     (make-symbol (##type-name type) "::t"))
   (def (shadow-type-name type)
     (##type-name type))
+  (def (lookup-shadow-class type)
+    (__do-inline-lock! __shadow-classes-lock
+      (symbolic-table-ref __shadow-classes (##type-id type) #f)))
+  (def (intern-shadow-class! type klass)
+    (__do-inline-lock! __shadow-classes-lock
+      (or (symbolic-table-ref __shadow-classes (##type-id type) #f)
+          (begin
+            (symbolic-table-set! __shadow-classes (##type-id type) klass)
+            klass))))
+  ;; Construct shadow classes outside __shadow-classes-lock so exceptions or
+  ;; asynchronous thread-terminate! cannot poison the global lock; single-winner
+  ;; insert-if-absent guarantees one canonical class per type across SMP cores.
   (def (make-shadow-class type precedence-list)
     (let* ((super
             (if (pair? precedence-list)
@@ -1290,35 +1312,23 @@ namespace: #f
               properties ...]           ; properties
              #f                         ; constructor
              )))
-      (symbolic-table-set! __shadow-classes (##type-id type) klass)
-      klass))
+      (intern-shadow-class! type klass)))
 
-  (__lock-inline! __shadow-classes-lock)
-  (cond
-   ((symbolic-table-ref __shadow-classes (##type-id type) #f)
-    => (lambda (klass)
-         (__unlock-inline! __shadow-classes-lock)
-         klass))
-   (else
-    (let loop ((super (##type-super type)) (hierarchy []))
-      (cond
-       ((not super)
-        (let loop ((rest hierarchy) (precedence-list []))
-          (match rest
-            ([type . rest]
-             (cond
-              ((symbolic-table-ref __shadow-classes (##type-id type) #f)
-               => (lambda (klass)
-                    (loop rest (cons klass precedence-list))))
+  (or (lookup-shadow-class type)
+      (let loop ((super (##type-super type)) (hierarchy []))
+        (cond
+         ((not super)
+          (let loop ((rest hierarchy) (precedence-list []))
+            (match rest
+              ([t . rest]
+               (let (klass (or (lookup-shadow-class t)
+                               (make-shadow-class t precedence-list)))
+                 (loop rest (cons klass precedence-list))))
               (else
-               (let (klass (make-shadow-class type precedence-list))
-                 (loop rest (cons klass precedence-list))))))
-            (else
-             (let (klass (make-shadow-class type precedence-list))
-               (__unlock-inline! __shadow-classes-lock)
-               klass)))))
-       (else
-        (loop (##type-super super) (cons super hierarchy))))))))
+               (or (lookup-shadow-class type)
+                   (make-shadow-class type precedence-list))))))
+         (else
+          (loop (##type-super super) (cons super hierarchy)))))))
 
 ;; support for the type-of/class-of operators
 (cond-expand

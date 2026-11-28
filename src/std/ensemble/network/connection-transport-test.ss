@@ -841,7 +841,7 @@
                                  (set! closing (start (cut connection-parent-close! p first)))
                                  (transport-test-wait! closing lock.wcv)
                                  (with-stream-io-lock lock.mx
-                                   (check lock.readers => 1)
+                                   (check (rwlock-readers lock) => 1)
                                    (check lock.writer => #f)
                                    (check lock.writers-waiting => 1))
                                  (check (thread-join!/error reading .02 'waiting) => 'waiting)))
@@ -849,7 +849,7 @@
                (check (with-catch identity (cut thread-join!/error reading 3)) ? Closed?)
                (check-eq? (ConnectionParent-error p) first)
                (with-stream-io-lock lock.mx
-                 (check lock.readers => 0)
+                 (check (rwlock-readers lock) => 0)
                  (check lock.writer => #f)
                  (check lock.writers-waiting => 0))))))
 

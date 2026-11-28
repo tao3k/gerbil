@@ -64,7 +64,11 @@ namespace: #f
   read-substring
   write-substring
 
-  object->serial-number)
+  object->serial-number
+
+  ##thread-control-state
+  ##thread-control-state-set!
+  ##continuation-try-rewind-oneshot!)
 
 ;; gambit macros
 (extern

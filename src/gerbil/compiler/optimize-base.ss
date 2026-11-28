@@ -14,6 +14,10 @@ namespace: gxc
 
 (def current-compile-optimizer-info
   (make-parameter #f))
+(def current-compile-class-methods-overlay
+  (make-parameter #f))
+(def current-compile-optimizer-delta
+  (make-parameter #f))
 (def current-compile-mutators
   (make-parameter #f))
 (def current-compile-local-type
@@ -331,16 +335,28 @@ namespace: gxc
                   arguments: '(t::t)))))
 
 (def (!class-method-table klass)
-  (cond
-   ((!class-methods klass))
-   (else
-    (let (tab (make-hash-table-eq))
-      (set! (!class-methods klass) tab)
-      tab))))
+  (let (ov (current-compile-class-methods-overlay))
+    (if ov
+      (or (hash-get ov klass)
+          (let* ((base (!class-methods klass))
+                 (tab (if base (hash-copy base) (make-hash-table-eq))))
+            (hash-put! ov klass tab)
+            tab))
+      (cond
+       ((!class-methods klass))
+       (else
+        (let (tab (make-hash-table-eq))
+          (set! (!class-methods klass) tab)
+          tab))))))
 
 (def (!class-lookup-method klass method)
-  (alet (tab (!class-methods klass))
-    (hash-get tab method)))
+  (let (ov (current-compile-class-methods-overlay))
+    (cond
+     ((and ov (hash-get ov klass))
+      => (lambda (tab) (hash-get tab method)))
+     ((!class-methods klass)
+      => (lambda (tab) (hash-get tab method)))
+     (else #f))))
 
 (def (!type-subtype? type-a type-b)
   (and type-a type-b
@@ -435,6 +451,10 @@ namespace: gxc
          proc.signature.origin)))
 
 ;; utilities
+(def (optimizer-record-delta! entry)
+  (alet (delta (current-compile-optimizer-delta))
+    (set-box! delta (cons entry (unbox delta)))))
+
 (def (optimizer-declare-type! sym type (local? #f))
   (unless (!type? type)
     (error "bad declaration: expected !type" sym type))
@@ -442,7 +462,9 @@ namespace: gxc
   (let (table (if local?
                 (current-compile-local-type)
                 (optimizer-info-type (current-compile-optimizer-info))))
-    (hash-put! table sym type)))
+    (hash-put! table sym type)
+    (unless local?
+      (optimizer-record-delta! ['type sym type]))))
 
 (def (optimizer-declare-class! sym type)
   (unless (!class? type)
@@ -450,7 +472,8 @@ namespace: gxc
   (let (table (optimizer-info-classes (current-compile-optimizer-info)))
     (verbose "declare-class " sym " " (struct->list type))
     (hash-put! table sym type)
-    (hash-put! table type sym)))
+    (hash-put! table type sym)
+    (optimizer-record-delta! ['class sym type])))
 
 (def (optimizer-declare-builtin-class! sym type)
   (unless (!class? type)
@@ -459,12 +482,14 @@ namespace: gxc
     (unless (hash-get table sym)
       (verbose "declare-builtin-class " sym " " (struct->list type))
       (hash-put! table sym type)
-      (hash-put! table type sym))))
+      (hash-put! table type sym)
+      (optimizer-record-delta! ['builtin-class sym type]))))
 
 (def (optimizer-clear-type! sym)
   (verbose "clear-type " sym)
   (hash-remove! (current-compile-local-type) sym)
-  (hash-remove! (optimizer-info-type (current-compile-optimizer-info)) sym))
+  (hash-remove! (optimizer-info-type (current-compile-optimizer-info)) sym)
+  (optimizer-record-delta! ['clear-type sym]))
 
 (def (optimizer-declare-method! type-t method sym (rebind? #f))
   (hash-put! (optimizer-info-methods (current-compile-optimizer-info)) sym #t)
@@ -477,17 +502,21 @@ namespace: gxc
             (cond
              (rebind?
               (verbose "declare-method: rebind existing method" type-t " " method)
-              (hash-put! vtab method sym))
+              (hash-put! vtab method sym)
+              (optimizer-record-delta! ['method type-t method sym rebind?]))
              ((eq? existing sym)
-              (void))
+              (optimizer-record-delta! ['method-flag sym]))
              (else
               (raise-compile-error
                "declare-method: duplicate method declaration"
                `(bind-method! ,type-t ,method ,sym) method)))))
          (else
           (verbose "declare-method " type-t " " method " => " sym)
-          (hash-put! vtab method sym))))
-      (verbose "declare-method: unknown class"  type-t))))
+          (hash-put! vtab method sym)
+          (optimizer-record-delta! ['method type-t method sym rebind?]))))
+      (begin
+        (optimizer-record-delta! ['method-flag sym])
+        (verbose "declare-method: unknown class"  type-t)))))
 
 (def (optimizer-lookup-type sym)
   (or (agetq sym (current-compile-path-type))

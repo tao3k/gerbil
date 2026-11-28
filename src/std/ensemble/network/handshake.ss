@@ -277,13 +277,21 @@
              (catch (e)
                (self.socket.close)
                (raise e))))))
-    (try
-      (handshake-read! self type)
-      (catch (e)
-        (self.socket.close)
-        (raise e))
-      (finally
-        (network-thread-join! worker)))))
+    (let ((result #f)
+          (read-ok? #f))
+      (try
+        (set! result (handshake-read! self type))
+        (set! read-ok? #t)
+        (catch (e)
+          (self.socket.close)
+          (raise e))
+        (finally
+          (if (and read-ok? (not result) self.peer-rejected?)
+            ;; Peer already delivered a valid REJECT and closed; do not let a
+            ;; concurrent EPIPE/closed error from the write worker mask it.
+            (ignore-errors (network-thread-join! worker))
+            (network-thread-join! worker))))
+      result)))
 
 ;; Explicit local refusal, called by the driver for credential/admission/election
 ;; rejection. Output is best-effort in the sense that failure still closes; its
@@ -417,10 +425,19 @@
     (if self.smaller?
       (let (payload (handshake-read! self frame-accept))
         (and payload (begin (handshake-accept! self payload) #t)))
-      (begin
+      (try
         (handshake-write! self frame-accept
                           (encode-frame-payload frame-accept [self.selection.index] limits: self.output-limits))
-        #t))))
+        #t
+        (catch (e)
+          ;; Under true multicore SMP, the smaller-DID peer may refuse admission,
+          ;; send frame-reject, and close the Unix socket before our write runs (EPIPE).
+          ;; Drain any pending peer rejection before surfacing the write error.
+          (if (try
+                (not (handshake-read! self frame-accept))
+                (catch (_) #f))
+            #f
+            (raise e)))))))
 
 ;; The smaller DID's owner elects the candidate and finishes its open callback
 ;; BEFORE this call. The larger DID receives commitment here and then performs

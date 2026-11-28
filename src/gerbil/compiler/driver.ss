@@ -9,6 +9,7 @@ namespace: gxc
         "../runtime/error"
         "base"
         "compile"
+        "optimize-base"
         "optimize")
 (export compile-module compile-exe
         call-with-compilation-output read-compilation-output execute-compilation-output)
@@ -20,10 +21,10 @@ namespace: gxc
 (def default-gerbil-gcc "gcc")
 (def default-gerbil-ar "ar")
 
-(def +driver-mutex+ (make-mutex 'compiler/driver))
-(defrules with-driver-mutex ()
-  ((_ expr)
-   (with-lock +driver-mutex+ (lambda () expr))))
+(def +fs-mutex+ (make-mutex 'compiler/fs))
+(def (ensure-directory* dir)
+  (unless (file-exists? dir)
+    (with-lock +fs-mutex+ (lambda () (create-directory* dir)))))
 
 (def (compile-timestamp)
   (inexact->exact (floor (time->seconds (current-time)))))
@@ -220,9 +221,9 @@ namespace: gxc
          (parallel?   (pgetq parallel: opts)))
 
     (when outdir
-      (with-driver-mutex (create-directory* outdir)))
+      (ensure-directory* outdir))
     (when optimize
-      (with-driver-mutex (optimizer-info-init!)))
+      (optimizer-info-init!))
     (parameterize ((current-compile-output-dir outdir)
                    (current-compile-invoke-gsc invoke-gsc?)
                    (current-compile-gsc-options gsc-options)
@@ -239,7 +240,7 @@ namespace: gxc
                    (current-compilation-target target)
                    (current-expander-compiling? #t))
       (verbose "compile " srcpath)
-      (compile-top-module (with-driver-mutex (import-module srcpath))))))
+      (compile-top-module (import-module srcpath)))))
 
 (def (compile-exe srcpath (opts []))
   (unless (string? srcpath)
@@ -256,7 +257,7 @@ namespace: gxc
          (debug       (pgetq debug: opts))
          (parallel?   (pgetq parallel: opts)))
     (when outdir
-      (with-driver-mutex (create-directory* outdir)))
+      (ensure-directory* outdir))
     (parameterize ((current-compile-output-dir outdir)
                    (current-compile-invoke-gsc invoke-gsc?)
                    (current-compilation-target target)
@@ -270,7 +271,7 @@ namespace: gxc
                    (current-compile-parallel parallel?)
                    (current-expander-compiling? #t))
       (verbose "compile exe " srcpath)
-      (compile-executable-module (with-driver-mutex (import-module srcpath)) opts))))
+      (compile-executable-module (import-module srcpath) opts))))
 
 (def (compile-executable-module ctx opts)
   (if (pgetq full-program-optimization: opts)
@@ -434,7 +435,7 @@ namespace: gxc
                            c-path])))
               (unlock)))))
 
-      (with-driver-mutex (create-directory* (path-directory output-bin)))
+      (ensure-directory* (path-directory output-bin))
       (with-output-to-scheme-file output-scm
                                   (cut generate-stub builtin-modules))
       (when (current-compile-invoke-gsc)
@@ -623,7 +624,7 @@ namespace: gxc
              (cond-expand
                ((or freebsd netbsd) ["-lutil" "-lm"])
                (else ["-ldl" "-lm"]))))
-      (with-driver-mutex (create-directory* (path-directory output-bin)))
+      (ensure-directory* (path-directory output-bin))
       (with-output-to-scheme-file output-scm
         (cut generate-stub [runtime ... deps ... bin-scm]))
       (when (current-compile-invoke-gsc)
@@ -807,16 +808,22 @@ namespace: gxc
                  (current-compile-runtime-names
                   (make-hash-table)))
     (verbose "compile " (expander-context-id ctx))
-    (when (current-compile-optimize)
-      (with-driver-mutex (optimize! ctx)))
-    (collect-bindings ctx)
-
-    (compile-runtime-code ctx)
-    (compile-meta-code ctx)
-
-    (when (and (current-compile-optimize)
-               (current-compile-generate-ssxi))
-      (compile-ssxi-code ctx))))
+    (if (current-compile-optimize)
+      (let-values (((base session overlay delta) (optimizer-session-begin! ctx)))
+        (parameterize ((current-compile-optimizer-info session)
+                       (current-compile-class-methods-overlay overlay)
+                       (current-compile-optimizer-delta delta))
+          (optimize-module-source! ctx)
+          (collect-bindings ctx)
+          (compile-runtime-code ctx)
+          (compile-meta-code ctx)
+          (when (current-compile-generate-ssxi)
+            (compile-ssxi-code ctx)))
+        (optimizer-session-commit! ctx base delta))
+      (begin
+        (collect-bindings ctx)
+        (compile-runtime-code ctx)
+        (compile-meta-code ctx)))))
 
 (def (collect-bindings ctx)
   (apply-collect-bindings
@@ -1218,7 +1225,7 @@ namespace: gxc
        (module-source-directory ctx)))))
 
   (let (path (file-path))
-    (with-driver-mutex (create-directory* (path-directory path)))
+    (ensure-directory* (path-directory path))
     path))
 
 (def (compile-static-output-file ctx)
@@ -1235,7 +1242,7 @@ namespace: gxc
         (path-expand file "static")))))
 
   (let (path (file-path))
-    (with-driver-mutex (create-directory* (path-directory path)))
+    (ensure-directory* (path-directory path))
     path))
 
 (def (compile-exe-output-file ctx opts)

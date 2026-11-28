@@ -11,6 +11,13 @@ namespace: gx
 
 (def __module-registry (make-hash-table))
 (def __module-pkg-cache (make-hash-table))
+(def __module-registry-mutex (make-mutex 'expander/module-registry))
+
+;; Re-entrant serialization for __module-registry across SMP compiler workers.
+(def (with-module-registry-lock thunk)
+  (if (eq? (mutex-state __module-registry-mutex) (current-thread))
+    (thunk)
+    (with-lock __module-registry-mutex thunk)))
 
 (defstruct module-import (source name phi weak?)
   final: #t print: (name))
@@ -129,14 +136,21 @@ namespace: gx
      (else #f))))
 
 (def (core-module->prelude-context ctx)
-  (cond
-   ((hash-get __module-registry ctx))
-   (else
-    (let (pre (make-prelude-context ctx))
-      (hash-put! __module-registry ctx pre)
-      pre))))
+  (with-module-registry-lock
+   (lambda ()
+     (cond
+      ((hash-get __module-registry ctx))
+      (else
+       (let (pre (make-prelude-context ctx))
+         (hash-put! __module-registry ctx pre)
+         pre))))))
 
 (def (core-import-module rpath (reload? #f))
+  (with-module-registry-lock
+   (lambda ()
+     (core-import-module/locked rpath reload?))))
+
+(def (core-import-module/locked rpath (reload? #f))
   (def (import-source path)
     (when (member path (current-expander-path))
       (raise-syntax-error #f "Cyclic expansion"
@@ -522,22 +536,24 @@ namespace: gx
    (else #f)))
 
 (def (core-library-package-plist dir (exists? #f))
-  (cond
-   ((hash-get __module-pkg-cache dir))
-   (else
-    (let* ((gerbil.pkg (path-expand "gerbil.pkg" dir))
-           (plist
-            (if (or exists? (file-exists? gerbil.pkg))
-              (let (e (call-with-input-source-file gerbil.pkg read))
-                (cond
-                 ((eof-object? e) [])
-                 ((list? e) e)
-                 (else
-                  (raise-syntax-error #f "Malformed package info; unexpected datum"
-                                      gerbil.pkg e))))
-              [])))
-      (hash-put! __module-pkg-cache dir plist)
-      plist))))
+  (with-module-registry-lock
+   (lambda ()
+     (cond
+      ((hash-get __module-pkg-cache dir))
+      (else
+       (let* ((gerbil.pkg (path-expand "gerbil.pkg" dir))
+              (plist
+               (if (or exists? (file-exists? gerbil.pkg))
+                 (let (e (call-with-input-source-file gerbil.pkg read))
+                   (cond
+                    ((eof-object? e) [])
+                    ((list? e) e)
+                    (else
+                     (raise-syntax-error #f "Malformed package info; unexpected datum"
+                                         gerbil.pkg e))))
+                 [])))
+         (hash-put! __module-pkg-cache dir plist)
+         plist))))))
 
 (def (core-library-module-path? stx)
   (core-special-module-path? stx #\:))

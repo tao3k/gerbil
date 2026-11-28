@@ -18,12 +18,107 @@ namespace: gxc
         "optimize-call")
 (export #t)
 
+(def +optimizer-info-mutex+ (make-mutex 'compiler/optimizer-info))
+(def +shared-optimizer-info+ #f)
+
 ;; sticky to persist across batch compilation and avoid reloading ssxi modules
 (def (optimizer-info-init!)
-  (unless (current-compile-optimizer-info)
-    (current-compile-optimizer-info (make-optimizer-info))))
+  (with-lock +optimizer-info-mutex+
+    (lambda ()
+      (unless +shared-optimizer-info+
+        (set! +shared-optimizer-info+ (make-optimizer-info)))
+      (unless (current-compile-optimizer-info)
+        (current-compile-optimizer-info +shared-optimizer-info+)))))
 
-;;; optimizer entry point
+(def (clone-!class-with-method klass method sym)
+  (let* ((old-methods (!class-methods klass))
+         (new-methods (if old-methods (hash-copy old-methods) (make-hash-table-eq))))
+    (hash-put! new-methods method sym)
+    (##structure !class::t
+                 (!type-id klass)
+                 (!class-super klass)
+                 (!class-precedence-list klass)
+                 (!class-slots klass)
+                 (!class-fields klass)
+                 (!class-constructor klass)
+                 (!class-struct? klass)
+                 (!class-final? klass)
+                 (!class-system? klass)
+                 (!class-metaclass klass)
+                 new-methods)))
+
+;; Per-module isolated optimizer session for true parallel SMP compilation:
+;;   1. Load any missing builtin/dependency .ssxi under +optimizer-info-mutex+
+;;   2. Snapshot immutable base tables into a thread-private session + overlay
+;;   3. Run optimize-source, codegen, and compile-ssxi-code lock-free in parallel
+;;   4. Commit the module's delta into base using copy-on-write !class records
+;;      strictly after compile-ssxi-code finishes.
+(def (optimizer-session-begin! ctx)
+  (with-lock +optimizer-info-mutex+
+    (lambda ()
+      (unless +shared-optimizer-info+
+        (set! +shared-optimizer-info+ (make-optimizer-info)))
+      (let (base (or (current-compile-optimizer-info) +shared-optimizer-info+))
+        (parameterize ((current-compile-optimizer-info base)
+                       (current-compile-class-methods-overlay #f)
+                       (current-compile-optimizer-delta #f))
+          (optimizer-load-builtin-ssxi ctx)
+          (optimizer-load-ssxi-deps ctx))
+        (let ((session (##structure optimizer-info::t
+                                    (hash-copy (optimizer-info-type base))
+                                    (hash-copy (optimizer-info-classes base))
+                                    (hash-copy (optimizer-info-ssxi base))
+                                    (hash-copy (optimizer-info-methods base))))
+              (overlay (make-hash-table-eq))
+              (delta (box [])))
+          (values base session overlay delta))))))
+
+(def (optimizer-session-commit! ctx base delta)
+  (with-lock +optimizer-info-mutex+
+    (lambda ()
+      (let ((types (optimizer-info-type base))
+            (classes (optimizer-info-classes base))
+            (methods (optimizer-info-methods base))
+            (ssxi (optimizer-info-ssxi base)))
+        (for-each
+         (lambda (entry)
+           (match entry
+             (['type sym val]
+              (hash-put! types sym val))
+             (['clear-type sym]
+              (hash-remove! types sym))
+             (['class sym klass]
+              (hash-put! classes sym klass)
+              (hash-put! classes klass sym))
+             (['builtin-class sym klass]
+              (unless (hash-get classes sym)
+                (hash-put! classes sym klass)
+                (hash-put! classes klass sym)))
+             (['method-flag sym]
+              (hash-put! methods sym #t))
+             (['method type-t method sym rebind?]
+              (hash-put! methods sym #t)
+              (alet (klass (hash-get classes type-t))
+                (let (updated (clone-!class-with-method klass method sym))
+                  (hash-put! classes type-t updated)
+                  (hash-put! classes updated type-t)
+                  (let (stale [])
+                    (hash-for-each
+                     (lambda (k v)
+                       (when (eq? v klass)
+                         (set! stale (cons k stale))))
+                     types)
+                    (for-each (lambda (k) (hash-put! types k updated)) stale)))))))
+         (reverse (unbox delta)))
+        (hash-put! ssxi (expander-context-id ctx) #t)))))
+
+(def (optimize-module-source! ctx)
+  (parameterize ((current-compile-mutators (make-hash-table-eq))
+                 (current-compile-local-type (make-hash-table-eq)))
+    (let (code (optimize-source (module-context-code ctx)))
+      (set! (module-context-code ctx) code))))
+
+;;; optimizer entry point (direct/single-module compatibility)
 (def (optimize! ctx)
   (parameterize ((current-compile-mutators (make-hash-table-eq))
                  (current-compile-local-type (make-hash-table-eq)))
@@ -270,7 +365,10 @@ namespace: gxc
 (defmethod {typedecl !class}
   (lambda (self)
     (with ((!class id super precendence-list slots fields constructor struct? final? system? metaclass methods) self)
-      ['@class id super precendence-list slots fields constructor struct? final? system? metaclass (and methods (hash->list methods))])))
+      (let (methods (or (alet (ov (current-compile-class-methods-overlay))
+                          (hash-get ov self))
+                        methods))
+        ['@class id super precendence-list slots fields constructor struct? final? system? metaclass (and methods (hash->list methods))]))))
 
 (defmethod {typedecl !predicate}
   (lambda (self)

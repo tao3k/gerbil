@@ -72,14 +72,18 @@
   (flush! __object-cache-flush!))
 
 (def (object-cache-get (cache : ObjectCache))
-  (do-with-spin-lock cache.lock
-    (if (null? cache.objects)
+  (let (cached
+        (do-with-spin-lock cache.lock
+          (if (null? cache.objects)
+            absent-obj
+            (using (p cache.objects :- :pair)
+              (let (obj (car p))
+                (set! cache.objects (cdr p))
+                (set! cache.size    (fx- cache.size 1))
+                obj)))))
+    (if (eq? cached absent-obj)
       (cache.new)
-      (using (p cache.objects :- :pair)
-        (let (obj (car p))
-          (set! cache.objects (cdr p))
-          (set! cache.size    (fx- cache.size 1))
-          obj)))))
+      cached)))
 
 (def (object-cache-put! (cache : ObjectCache) o)
   => :void

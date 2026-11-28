@@ -66,8 +66,9 @@
       (raise-context-error stop-repl-server!
                            "Cannot stop REPL server from a client thread"))
     (ignore-errors (close-port sock))
-    (ignore-errors (thread-terminate! server))
-    (ignore-errors (thread-join! server))
+    (when (eq? (with-catch (lambda (_) 'timeout) (cut thread-join! server 1.0 'timeout)) 'timeout)
+      (ignore-errors (thread-terminate! server))
+      (ignore-errors (thread-join! server)))
     (when (repl-server-state? state)
       (for-each stop-repl-client!
                 (repl-server-state-take-clients! state)))

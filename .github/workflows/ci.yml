@@ -8,13 +8,16 @@ jobs:
     strategy:
       fail-fast: false  # if one fails, do not cancel the other
       matrix:
-        runner: [ubuntu-latest]
-        gambit-version: ['', '--with-gambit=master']
-        shared-mode: ['', '--enable-shared']
         include:
-          - runner: macos-26
-            gambit-version: ''
+          - runner: ubuntu-latest
             shared-mode: '--enable-shared'
+            smp-mode: '--enable-smp --enable-multiple-vms --enable-multiple-threaded-vms'
+          - runner: ubuntu-latest
+            shared-mode: ''
+            smp-mode: '--enable-smp --enable-multiple-vms --enable-multiple-threaded-vms'
+          - runner: macos-26
+            shared-mode: '--enable-shared'
+            smp-mode: '--enable-smp --enable-multiple-vms --enable-multiple-threaded-vms'
     steps:
       - uses: actions/checkout@v3
       - name: Install Linux dependencies
@@ -37,16 +40,21 @@ jobs:
             echo "GERBIL_CI_PREFIX=$RUNNER_TEMP/gerbil"
             echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
           } >> "$GITHUB_ENV"
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
       - name: Configure Gerbil
         shell: bash
         run: |
           native_args=()
           if [[ "$RUNNER_OS" == macOS ]]; then
-            native_args=(--enable-march= --enable-smp --enable-c-opt=-O1
+            native_args=(--enable-march= --enable-c-opt=-O1
+                         --enable-c-opt-rts=yes --enable-gcc-opts --enable-inline-jumps
+                         --enable-dynamic-clib --enable-trust-c-tco --enable-single-host=0)
+          elif [[ "${{ matrix.smp-mode }}" == *"--enable-smp"* ]]; then
+            native_args=(--enable-march= --enable-c-opt=-O1
                          --enable-c-opt-rts=yes --enable-gcc-opts --enable-inline-jumps
                          --enable-dynamic-clib --enable-trust-c-tco --enable-single-host=0)
           fi
-          ./configure --prefix="$GERBIL_CI_PREFIX" "${native_args[@]}" ${{ matrix.gambit-version }} ${{ matrix.shared-mode }}
+          ./configure --prefix="$GERBIL_CI_PREFIX" "${native_args[@]}" ${{ matrix.smp-mode }} ${{ matrix.shared-mode }}
       - name: Create Gerbil version file
         run: |
               echo "(def (gerbil-version-string) \"git-$(git rev-parse --short=8 HEAD)\")" > src/gerbil/runtime/version.ss
@@ -61,15 +69,7 @@ jobs:
       - name: Build Gerbil stage1
         run: GERBIL_BUILD_CORES=$(nproc) ./build.sh stage1
       - name: Build Gerbil stdlib
-        env:
-          STDLIB_DIAGNOSTICS: ${{ matrix.gambit-version == '--with-gambit=master' }}
-        run: |
-          export GERBIL_BUILD_CORES="$(nproc)"
-          if [[ "$STDLIB_DIAGNOSTICS" == true ]]; then
-            bash .github/scripts/stdlib-diagnostics.sh
-          else
-            ./build.sh stdlib
-          fi
+        run: GERBIL_BUILD_CORES=$(nproc) ./build.sh stdlib
       - name: Build Gerbil libgerbil
         run: GERBIL_BUILD_CORES=$(nproc) ./build.sh libgerbil
       - name: Build Gerbil lang
@@ -90,4 +90,17 @@ jobs:
             sudo /sbin/route -n add -host "$multicast_group" -interface lo0
             trap 'sudo /sbin/route -n delete -host "$multicast_group" -interface lo0; rm -rf -- "$TMPDIR"' EXIT
           fi
-          gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...
+          NCPUS="$(nproc)"
+          EXPECTED_PROCS=$(( NCPUS > 64 ? 64 : NCPUS ))
+          procs4="$(GAMBOPT=p4 gxi -e '(display (##current-vm-processor-count))')"
+          procs_full="$(GAMBOPT="p${EXPECTED_PROCS}" gxi -e '(display (##current-vm-processor-count))')"
+          echo "Detected CPU cores: $NCPUS; p4 -> $procs4 procs; full p${EXPECTED_PROCS} -> $procs_full procs"
+          test "$procs4" -eq 4
+          test "$procs_full" -eq "$EXPECTED_PROCS"
+          # 1. Fixed 4-core SMP baseline gate
+          GAMBOPT=p4 gxtest -q src/gerbil/test/smp-runtime-test.ss src/std/control-test.ss src/std/sync/... src/std/actor/... src/std/net/ssl/socket-test.ss src/std/net/repl-test.ss
+          # 2. Full host-core saturation SMP gate (when host has != 4 cores) + full test suite at full host cores
+          if [[ "$EXPECTED_PROCS" -ne 4 ]]; then
+            GAMBOPT="p${EXPECTED_PROCS}" gxtest -q src/gerbil/test/smp-runtime-test.ss src/std/control-test.ss src/std/sync/... src/std/actor/... src/std/net/ssl/socket-test.ss src/std/net/repl-test.ss
+          fi
+          GAMBOPT="p${EXPECTED_PROCS}" gxtest -q src/gerbil/test/... src/std/... src/lang/... src/tools/...

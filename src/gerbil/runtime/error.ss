@@ -74,21 +74,29 @@ namespace: #f
 ;; redefine this to avoid clown shoes
 (def with-exception-catcher with-catch)
 
+(def __wrapping-runtime-exception? (make-parameter #f))
+
 (def (wrap-runtime-exception exn)
   (cond
    ((or (heap-overflow-exception? exn)   ; out of memory, don't allocate
-        (stack-overflow-exception? exn)) ; not safe to do much
+        (stack-overflow-exception? exn)  ; not safe to do much
+        (__wrapping-runtime-exception?)) ; prevent recursive exception wrapping under SMP
     exn)
-   ((Exception? exn)                    ; already has it if we want it
-    exn)
-   ((macro-exception? exn)              ; runtime emitted exception
-    (let (rte (RuntimeException exception: exn))
-      (##continuation-capture
-       (lambda (cont)
-         (unchecked-slot-set! rte 'continuation (##continuation-next cont))))
-      rte))
    (else
-    exn)))
+    (##parameterize1
+     __wrapping-runtime-exception? #t
+     (lambda ()
+       (cond
+        ((Exception? exn)                ; already has it if we want it
+         exn)
+        ((macro-exception? exn)          ; runtime emitted exception
+         (let (rte (RuntimeException exception: exn))
+           (##continuation-capture
+            (lambda (cont)
+              (unchecked-slot-set! rte 'continuation (##continuation-next cont))))
+           rte))
+        (else
+         exn)))))))
 
 ;; compatibility shims for existing code
 (def exception? Exception?)

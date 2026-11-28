@@ -2,6 +2,7 @@
 ;;; © vyzo
 ;;; actor local state
 (import :std/error
+        :gerbil/runtime/util
         ./message
         ./host)
 (export #t)
@@ -9,7 +10,7 @@
 (defstruct ActorState
   ((host  :- ActorHost)
    (peer  :- LocalActor)
-   (seqno :- :integer))
+   (seqno :- :fixnum))
   final: #t
   constructor: :init!)
 
@@ -65,6 +66,6 @@
 (def (actor-next-seqno!)
   => :integer
   (using (state (actor-local-state) : ActorState)
-    (let (seqno state.seqno)
-      (set! state.seqno (1+ seqno))
-      seqno)))
+    (let ((s state.seqno))
+      (set! state.seqno (fx+ s 1))
+      s)))

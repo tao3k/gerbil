@@ -5,7 +5,7 @@ prelude: "../core"
 package: gerbil/runtime
 namespace: #f
 
-(import "gambit" "util" "error" "hash")
+(import "gambit" "util" "control" "error" "hash")
 (export #t)
 
 ;; the system thread group
@@ -72,13 +72,17 @@ namespace: #f
       (lambda (cont)
         (when (procedure? __unhandled-actor-exception-hook)
           (with-catch void (cut __unhandled-actor-exception-hook cont exn)))
+        (##thread-control-state-set! #f)
         ;; unwind stack and continue with the primordial exception handler
         ;; see discussion in gambit#295 about ##continuation-last
         (##continuation-graft
          (##continuation-last cont)
          ##primordial-exception-handler
          exn))))
-   thunk))
+   (lambda ()
+     (let ((res (thunk)))
+       (##thread-control-state-set! #f)
+       res))))
 
 ;;; thread locals
 (def (thread-local-ref key (default absent-obj))
@@ -109,17 +113,14 @@ namespace: #f
      ((eq? thr ##primordial-thread)
       __primordial-thread-locals)
      (else
-      (mutex-lock! __thread-locals-mutex)
-      (cond
-       ((hash-get __thread-locals thr)
-        => (lambda (tab)
-             (mutex-unlock! __thread-locals-mutex)
-             tab))
-       (else
-        (let (tab (make-hash-table-eq))
-          (hash-put! __thread-locals thr tab)
-          (mutex-unlock! __thread-locals-mutex)
-          tab)))))))
+      (with-lock __thread-locals-mutex
+        (lambda ()
+          (cond
+           ((hash-get __thread-locals thr))
+           (else
+            (let (tab (make-hash-table-eq))
+              (hash-put! __thread-locals thr tab)
+              tab)))))))))
 
 (def __primordial-thread-locals
   (make-hash-table-eq))
@@ -137,6 +138,7 @@ namespace: #f
 
 (def (with-lock (mx : :mutex) (proc : :procedure))
   (let (handler (current-exception-handler))
+    (mutex-lock! mx)
     (with-exception-handler
      (lambda (e)
        (with-catch void
@@ -146,8 +148,7 @@ namespace: #f
        ;; if the handler returns here the state is inconsistent -- we need to bail
        (##thread-end-with-uncaught-exception! e))
      (lambda ()
-       (mutex-lock! mx)
-       (let (result (proc))
+       (let (result (__call-with-runtime-barrier proc))
          (mutex-unlock! mx)
          result)))))
 

@@ -57,10 +57,12 @@ namespace: #f
 (def (__prototype-table-get (prototable :- prototype-table)
                             (descriptor :- interface-descriptor))
   (declare (not safe) (not interrupts-enabled))
-  (let ((tab  prototable.table)
+  ;; Acquire loads pair with release stores in __prototype-table-set! so ARM64
+  ;; readers never observe partially initialized prototype slots or resized tables.
+  (let ((tab   (__atomic-struct-ref prototable 2 1))
         (index descriptor.index))
     (if (fx< index (vector-length tab))
-      (vector-ref tab index)
+      (__atomic-slot-load tab index 1)
       #f)))
 
 (def (__prototype-table-set! (prototable :- prototype-table)
@@ -72,26 +74,34 @@ namespace: #f
     (__do-inline-lock! lock
       (let (tab prototable.table)
         (if (fx< index (vector-length tab))
-          (vector-set! tab index prototype)
+          (__atomic-slot-exchange! tab index prototype 2)
           (let (new-size __next-interface-index)
             (if (fx< index new-size)
               (let (new-tab (make-vector new-size #f))
                 (subvector-move! tab 0 (vector-length tab) new-tab 0)
                 (vector-set! new-tab index prototype)
-                (set! prototable.table new-tab))
+                (__atomic-struct-set! prototable 2 new-tab 2))
               (error "interface index out of range" interface: descriptor index: index max-index: new-size))))))))
 
 (def (interface-subclass? klass)
   (alet (super (##type-super klass))
     (eq? (##type-id super) (##type-id interface-instance::t))))
 
+(def __class-type-interface-lock (__make-inline-lock))
+
 (def (class-type-interface-table klass)
+  ;; Acquire load pairs with release publication under __class-type-interface-lock.
   (cond
-   ((&class-type-interface klass))
+   ((__atomic-struct-ref klass 13 1))
    (else
-    (let (tab (make-prototype-table))
-      (set! (&class-type-interface klass) tab)
-      tab))))
+    ;; Allocate candidate outside lock; single-winner release-publish prevents
+    ;; concurrent SMP interface casts from clobbering or seeing half-init tables.
+    (let (candidate (make-prototype-table))
+      (__do-inline-lock! __class-type-interface-lock
+        (or (&class-type-interface klass)
+            (begin
+              (__atomic-struct-set! klass 13 candidate 2)
+              candidate)))))))
 
 (defrules do-create-prototype ()
   ((_ descriptor klass obj-klass continue fail!)

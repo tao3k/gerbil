@@ -35,9 +35,23 @@
     "string/symbol"
 
     "cache"
+    "sync/atomic"
+    "sync/concurrent"
+    "control"
     "sync/rwlock"
     "sync/spinlock"
     "sync/threads"
+    "sync/fiber/runq"
+    "sync/fiber/state"
+    "sync/fiber/nursery"
+    "sync/fiber/timer"
+    "sync/fiber/promise"
+    "sync/fiber/channel"
+    "sync/fiber/mutex"
+    "sync/fiber/scheduler"
+    "sync/fiber/parallel"
+    "sync/fiber/api"
+    "sync/fiber"
 
     "net/address/types"
     "net/address/parser"
@@ -60,8 +74,8 @@
     "os/time"
     "os/sockaddr"
     (gxc: "os/socket" "-cc-options" "-D _GNU_SOURCE")
-    "os/sockopt"
-    "os/hostname"
+    (gxc: "os/sockopt" "-cc-options" "-D _GNU_SOURCE")
+    (gxc: "os/hostname" "-cc-options" "-D _GNU_SOURCE")
     "os/pid"
     "os/signal"
     (gxc: "os/signal-test-support" (extra-inputs: ("os/signal.ss")))
@@ -138,7 +152,7 @@
     (gxc: "time/date" "-cc-options" "-D _GNU_SOURCE")
 
     "sync/atom"
-    "sync/channel"
+    (gxc: "sync/channel" ,@(include-gambit-sharp))
     "sync/completion"
     "sync/barrier"
     "sync/wg"
@@ -346,6 +360,7 @@
     "actor/state"
     (gxc: "actor/interaction" ,@(include-gambit-sharp))
     "actor/proto"
+    "actor/nursery"
     "actor/serde"
     "actor/api"
     "actor"

@@ -1268,7 +1268,12 @@
       (with-stream-io-lock self.parent.mx
         (connection-parent-check-live! self.parent)
         (set! self.parent.connection self)
-        (set! self.ready? #t)))
+        (set! self.ready? #t)
+        ;; Wake the already-running parent service thread after publishing
+        ;; self.parent.connection; under true-multicore SMP it may have run on
+        ;; connection-parent-attach!'s signal before self.parent.connection was
+        ;; set and parked until raw parent.expire without scheduling renewal.
+        (stream-wake-signal! self.parent.wake #t)))
     (catch (failure)
       (connection-parent-close! self.parent failure)
       (raise failure)))
