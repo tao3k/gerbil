@@ -5,6 +5,7 @@
         :std/stxparam
         :std/time/time
         :std/time/precise
+        :gerbil/runtime/util
         ./message
         ./host
         ./state)
@@ -20,7 +21,7 @@
     (cond
      ((LocalActor? e.dest)
       (using (dest e.dest : LocalActor)
-        (thread-send dest.thread e)))
+        (thread-send-fast! dest.thread e)))
      ((Handle? e.dest)
       (using (host (actor-local-host) : ActorHost)
         (host.send! e)))
@@ -54,7 +55,7 @@
                                      #f))))
                (unless (and exp (<= exp (##current-time-point)))
                  (using (d dest :- LocalActor)
-                   (thread-send d.thread env)))))
+                   (thread-send-fast! d.thread env)))))
             ((Handle? dest)
              (using (host (actor-local-host) : ActorHost)
                (host.send-reply! msg in-reply continue)))
@@ -102,11 +103,12 @@
             timeout: (timeo : :real := default-reply-timeout)
             expire:  (expire :? :integer := #f))
   => Envelope
-  (let* ((seqno (actor-next-seqno!))
+  (let* ((st (actor-local-state))
+         (seqno (:- (__atomic-fx-fetch-add! (&ActorState-seqno st) 0 1 0) :fixnum))
          (now (##current-time-point))
          (deadline (or expire (+ now timeo)))
          (exp (exact (ceiling deadline)))
-         (env (Envelope source: (actor-local-peer)
+         (env (Envelope source: (&ActorState-peer st)
                         dest: dest
                         message: msg
                         protocol: protocol
@@ -114,12 +116,9 @@
                                           continue: (ReplyOption seqno: seqno)))))
     (if (and (LocalActor? dest) (not (<= exp now)))
       (using (d dest :- LocalActor)
-        (thread-send d.thread env))
+        (thread-send-fast! d.thread env))
       (send-message! env))
-    (<- continue: seqno
-        timeout: (seconds->time deadline)
-        protocol: protocol
-        (_ @envelope))))
+    (mailbox-receive-reply! seqno protocol deadline)))
 
 ;; sends a reply in a reaction context
 (defrule (--> reply)
@@ -183,23 +182,23 @@
          (cond
           ((and (not else-clause) (not timeout))
            #'(let loop ()
-               (let (next (thread-mailbox-next))
+               (let (next (mailbox-next-blocking!))
                  (recv-e next))))
           (else-clause
            (with-syntax (((else-body ...) else-clause))
              #'(let loop ()
                  (let (next (mailbox-next))
                    (if (eq? next mailbox-empty)
-                     ((lambda () (thread-mailbox-rewind) else-body ...))
+                     ((lambda () (mailbox-rewind-fast!) else-body ...))
                      (recv-e next))))))
           (else
            (with-syntax ((timeo timeout))
              #'(let (expiry (reaction-timeout timeo))
                  (let loop ()
-                   (let (next (thread-mailbox-next expiry mailbox-timeout))
+                   (let (next (mailbox-next-timeout! expiry))
                      (if (eq? next mailbox-timeout)
                        (begin
-                         (thread-mailbox-rewind)
+                         (mailbox-rewind-fast!)
                          (raise-timeout receive "receive timeout" expiry))
                        (recv-e next))))))))))))
 
@@ -214,7 +213,7 @@
                   (loop loop))
       #'(lambda (msg)
           (match msg
-            (pat (thread-mailbox-extract-and-rewind) body ...) ...
+            (pat (mailbox-extract-and-rewind-fast!) body ...) ...
             (else (loop))))))
 
   (def (generate-receive-envelope-e stx clauses loop)
@@ -238,7 +237,7 @@
                                          (@@continue (quote-syntax $continue)))
                      (match* ($protocol $continue $message)
                        (((equal? proto) (eqv? cont) pat)
-                        (thread-mailbox-extract-and-rewind)
+                        (mailbox-extract-and-rewind-fast!)
                         body ...) ...
                        (else (loop)))))
                   (else (loop))))
@@ -323,18 +322,196 @@
 (cond-expand
  (gerbil-smp
   (extern namespace: #f
+    macro-thread-mailbox
     macro-mailbox-mutex
+    macro-mailbox-condvar
+    macro-condvar-name-set!
     macro-mutex-lock-anonymously!
-    macro-mutex-unlock!)
+    macro-mutex-unlock!
+    ##thread-send-with-mb
+    ##mutex-signal-and-condvar-wait!
+    ##absrel-timeout->timeout)
+
+  ;; Acquire-fenced fast mailbox lookup: once a thread's mailbox is allocated it
+  ;; is immutable for life, so steady-state actor send/recv skips macro-lock-thread!.
+  (def (mailbox-get-fast! thread)
+    (declare (not interrupts-enabled))
+    (let ((mb (macro-thread-mailbox thread)))
+      (if mb
+        (begin
+          (__atomic-fence! 1)
+          mb)
+        (##thread-mailbox-get! thread))))
+
+  (def (thread-send-fast! thread obj)
+    (let ((mb (macro-thread-mailbox thread)))
+      (if mb
+        (begin
+          (__atomic-fence! 1)
+          (##thread-send-with-mb thread mb obj))
+        (thread-send thread obj))))
+
+  (def (mailbox-rewind-fast!)
+    (declare (not interrupts-enabled))
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb)))
+      (##check-heap-limit)
+      (macro-mutex-lock-anonymously! mutex #f)
+      (macro-mailbox-cursor-set! mb #f)
+      (macro-mutex-unlock! mutex)
+      (void)))
+
+  (def (mailbox-extract-and-rewind-fast!)
+    (declare (not interrupts-enabled))
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb)))
+      (##check-heap-limit)
+      (macro-mutex-lock-anonymously! mutex #f)
+      (let ((cursor (macro-mailbox-cursor mb)))
+        (when cursor
+          (let* ((next (macro-fifo-next cursor))
+                 (next2 (macro-fifo-next next)))
+            (macro-fifo-next-set! cursor next2)
+            (when (##not (##pair? next2))
+              (macro-fifo-tail-set! (macro-mailbox-fifo mb) cursor))
+            (macro-mailbox-cursor-set! mb #f))))
+      (macro-mutex-unlock! mutex)
+      (void)))
+
+  (def (mailbox-next-blocking!)
+    (declare (not interrupts-enabled))
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb))
+           (cv (macro-mailbox-condvar mb)))
+      (let loop ()
+        (##check-heap-limit)
+        (macro-mutex-lock-anonymously! mutex #f)
+        (let* ((cursor (macro-mailbox-cursor mb))
+               (next (if cursor (macro-fifo-next cursor) (macro-mailbox-fifo mb)))
+               (next2 (macro-fifo-next next)))
+          (if (##pair? next2)
+            (let ((result (macro-fifo-elem next2)))
+              (macro-mailbox-cursor-set! mb next)
+              (macro-mutex-unlock! mutex)
+              (let ()
+                (declare (interrupts-enabled))
+                result))
+            (begin
+              ;; In Gambit's ##mutex-signal-and-condvar-wait!, #t means infinite wait
+              ;; (returned by (##absrel-timeout->timeout #f)), while #f means expired!
+              (macro-condvar-name-set! cv #t)
+              (##mutex-signal-and-condvar-wait! mutex cv #t)
+              (loop)))))))
+
+  (def (mailbox-next-timeout! expiry)
+    (declare (not interrupts-enabled))
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb))
+           (cv (macro-mailbox-condvar mb)))
+      (let loop ((timeout-ready? #f) (timeout #f))
+        (##check-heap-limit)
+        (macro-mutex-lock-anonymously! mutex #f)
+        (let* ((cursor (macro-mailbox-cursor mb))
+               (next (if cursor (macro-fifo-next cursor) (macro-mailbox-fifo mb)))
+               (next2 (macro-fifo-next next)))
+          (if (##pair? next2)
+            (let ((result (macro-fifo-elem next2)))
+              (macro-mailbox-cursor-set! mb next)
+              (macro-mutex-unlock! mutex)
+              (let ()
+                (declare (interrupts-enabled))
+                result))
+            (if (##not timeout-ready?)
+              (begin
+                (macro-mutex-unlock! mutex)
+                (loop #t
+                      (##absrel-timeout->timeout
+                       (if (##eq? expiry absent-obj) #f expiry))))
+              (begin
+                (macro-condvar-name-set! cv #t)
+                (if (##mutex-signal-and-condvar-wait! mutex cv timeout)
+                  (loop #t timeout)
+                  mailbox-timeout))))))))
+
+  ;; Dedicated single-lock SMP reply receiver for `->>>` / `->>`:
+  ;; Scans FIFO and extracts matching (seqno, protocol) reply in ONE mutex lock
+  ;; with zero allocation under lock and lazy deadline conversion on wait only.
+  (def (mailbox-receive-reply! (seqno : :integer)
+                               (protocol : :string)
+                               (deadline : :real))
+    => Envelope
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb))
+           (cv (macro-mailbox-condvar mb))
+           (fifo (macro-mailbox-fifo mb)))
+      (let loop ((timeout-ready? #f) (timeout #f))
+        (let* ((now (##current-time-point))
+               (now-sec (exact (floor now))))
+          (let ((found
+                 (let ()
+                   (declare (not interrupts-enabled))
+                   (##check-heap-limit)
+                   (macro-mutex-lock-anonymously! mutex #f)
+                   (let scan ((prev fifo) (cur (macro-fifo-next fifo)))
+                     (if (##pair? cur)
+                       (let ((elem (macro-fifo-elem cur))
+                             (nxt (macro-fifo-next cur)))
+                         (if (Envelope? elem)
+                           (let ((opts (&Envelope-options elem)))
+                             (if (and opts
+                                      (&Options-expire opts)
+                                      (let ((exp (&Options-expire opts)))
+                                        (and (##fixnum? exp) (##fixnum? now-sec)
+                                             (##fx<= exp now-sec))))
+                               ;; Unlink expired envelope in place
+                               (begin
+                                 (macro-fifo-next-set! prev nxt)
+                                 (when (##not (##pair? nxt))
+                                   (macro-fifo-tail-set! fifo prev))
+                                 (scan prev nxt))
+                               (if (and (##eqv? (&Envelope-continue elem) seqno)
+                                        (##string=? (&Envelope-protocol elem) protocol))
+                                 (begin
+                                   (macro-fifo-next-set! prev nxt)
+                                   (when (##not (##pair? nxt))
+                                     (macro-fifo-tail-set! fifo prev))
+                                   (macro-mailbox-cursor-set! mb #f)
+                                   (macro-mutex-unlock! mutex)
+                                   elem)
+                                 (scan cur nxt))))
+                           (scan cur nxt)))
+                       ;; Not found in current FIFO snapshot
+                       (if (##not timeout-ready?)
+                         (begin
+                           (macro-mutex-unlock! mutex)
+                           mailbox-empty)
+                         (begin
+                           (macro-condvar-name-set! cv #t)
+                           (if (##mutex-signal-and-condvar-wait! mutex cv timeout)
+                             mailbox-empty
+                             (begin
+                               (##check-heap-limit)
+                               (macro-mutex-lock-anonymously! mutex #f)
+                               (macro-mailbox-cursor-set! mb #f)
+                               (macro-mutex-unlock! mutex)
+                               mailbox-timeout)))))))))
+            (cond
+             ((##eq? found mailbox-empty)
+              (if timeout-ready?
+                (loop #t timeout)
+                (loop #t (##absrel-timeout->timeout (seconds->time deadline)))))
+             ((##eq? found mailbox-timeout)
+              (raise-timeout receive "receive timeout" (seconds->time deadline)))
+             (else
+              (:- found Envelope))))))))
+
   ;; Synchronize directly with Gambit's SMP mailbox mutex protocol
   ;; (##check-heap-limit + anonymous lock), avoiding owned-mutex BTQ linking
   ;; and abandoned-mutex state if an actor terminates concurrently.
   (def (mailbox-next)
     (declare (not interrupts-enabled))
-    (let* ((mb
-            (##thread-mailbox-get! (macro-current-thread)))
-           (mutex
-            (macro-mailbox-mutex mb)))
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb)))
       (##check-heap-limit)
       (macro-mutex-lock-anonymously! mutex #f)
       (let* ((cursor
@@ -356,10 +533,8 @@
   ;; Removes the current message and returns the next without rewinding the cursor.
   (def (mailbox-extract-and-next)
     (declare (not interrupts-enabled))
-    (let* ((mb
-            (##thread-mailbox-get! (macro-current-thread)))
-           (mutex
-            (macro-mailbox-mutex mb)))
+    (let* ((mb (mailbox-get-fast! (macro-current-thread)))
+           (mutex (macro-mailbox-mutex mb)))
       (##check-heap-limit)
       (macro-mutex-lock-anonymously! mutex #f)
       (let* ((cursor
@@ -383,6 +558,24 @@
         (macro-mutex-unlock! mutex)
         result))))
  (else
+  (def (thread-send-fast! thread obj)
+    (thread-send thread obj))
+  (def (mailbox-rewind-fast!)
+    (thread-mailbox-rewind))
+  (def (mailbox-extract-and-rewind-fast!)
+    (thread-mailbox-extract-and-rewind))
+  (def (mailbox-next-blocking!)
+    (thread-mailbox-next))
+  (def (mailbox-next-timeout! expiry)
+    (thread-mailbox-next expiry mailbox-timeout))
+  (def (mailbox-receive-reply! (seqno : :integer)
+                               (protocol : :string)
+                               (deadline : :real))
+    => Envelope
+    (<- continue: seqno
+        timeout: (seconds->time deadline)
+        protocol: protocol
+        (_ @envelope)))
   (def (mailbox-next)
     (declare (not interrupts-enabled))
     (let* ((mb

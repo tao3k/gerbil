@@ -11,10 +11,11 @@
 ;;   but only one set of functions for atoms.
 ;; - Also export atom-increment! and atomic-counter for the common case.
 
-(import :std/error)
+(import :std/error
+        :gerbil/runtime/util)
 
 (export atom
-        (rename: Atom-value atom-deref)
+        atom-deref
         (rename: Atom? atom?)
         (rename: swap! atom-swap!)
         (rename: swap-values! atom-swap-values!)
@@ -26,16 +27,26 @@
         (rename: add-watch! atom-add-watch!)
         (rename: remove-watch! atom-remove-watch!)
         atom-increment!
-        (struct-out AtomicCounter) increment-atomic-counter! increment-atomic-counter-by-1!)
+        (struct-out AtomicCounter)
+        atomic-counter-ref
+        atomic-counter-set!
+        increment-atomic-counter!
+        increment-atomic-counter-by-1!)
 
 (defstruct Atom
-  (mutex value validator watchers)
+  (mutex cell validator watchers)
   final: #t)
 
 (def (atom (initial-value (void)) validator: (validator #f))
-  (Atom (make-mutex 'atom) initial-value validator (hash)))
+  (Atom (make-mutex 'atom) (vector initial-value) validator (hash)))
 
-(defalias &deref &Atom-value)
+;; Lock-free SRFI-230 acquire load ensures weak-memory SMP (ARM64) visibility
+;; of objects published by swap!/reset!/compare-and-set!.
+(def (atom-deref (a : Atom))
+  (__atomic-slot-load a.cell 0 1))
+
+(defrule (&deref a)
+  (__atomic-slot-load (&Atom-cell a) 0 1))
 
 ;; Internal helper to ensure atomicity
 (defrule (with-atom-lock a body ...)
@@ -43,15 +54,16 @@
 
 ;; Internal helper to be called inside with-atom-lock
 (def (update-atom! a new-val (values? #t))
-  (with ((Atom _ old-val validator watchers) a)
-    (when validator
-      (unless (validator new-val)
-        (raise-bad-argument update-atom! "valid atom value" new-val)))
-    (set! (&Atom-value a) new-val)
-    (hash-for-each (lambda (key watch) (watch key a old-val new-val)) watchers)
-    (if values?
-      (values old-val new-val)
-      new-val)))
+  (with ((Atom _ cell validator watchers) a)
+    (let ((old-val (__atomic-slot-load cell 0 1)))
+      (when validator
+        (unless (validator new-val)
+          (raise-bad-argument update-atom! "valid atom value" new-val)))
+      (__atomic-slot-exchange! cell 0 new-val 2)
+      (hash-for-each (lambda (key watch) (watch key a old-val new-val)) watchers)
+      (if values?
+        (values old-val new-val)
+        new-val))))
 
 ;; analog to Clojure swap-values!, but returning (values old-val new-val) rather than [old-val new-val]
 (def* swap-values!
@@ -112,14 +124,16 @@
   (lambda (self (initial-value : :fixnum := 0))
     (struct-instance-init! self (vector initial-value))))
 
+(def (atomic-counter-ref (counter : AtomicCounter)) => :fixnum
+  (:- (__atomic-fx-load (AtomicCounter-v counter) 0 1) :fixnum))
+
+(def (atomic-counter-set! (counter : AtomicCounter) (val : :fixnum)) => :void
+  (__atomic-fx-store! (AtomicCounter-v counter) 0 val 2)
+  (void))
+
+;; Single-instruction hardware atomic fetch-add (ldaddal / lock xadd) via C23 SRFI-230.
 (def (increment-atomic-counter! (counter : AtomicCounter) (increment : :fixnum := 1)) => :fixnum
-  (let (v (AtomicCounter-v counter))
-    (let retry ((oldval (vector-ref v 0)))
-      (let* ((newval (fx+ oldval increment))
-             (actual (##vector-cas! v 0 newval oldval)))
-        (if (##fx= actual oldval)
-          oldval
-          (retry actual))))))
+  (:- (__atomic-fx-fetch-add! (AtomicCounter-v counter) 0 increment 3) :fixnum))
 
 (def (increment-atomic-counter-by-1! (counter : AtomicCounter)) => :fixnum
-  (__increment-atomic-counter! counter 1))
+  (:- (__atomic-fx-fetch-add! (AtomicCounter-v counter) 0 1 3) :fixnum))

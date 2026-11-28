@@ -1,19 +1,23 @@
 ;;; -*- Gerbil -*-
 ;;; © vyzo
 ;;; asynchronous completions
-(import :std/error)
+(import :std/error
+        :std/sync/atomic)
 (export Completion
         Completion?
         (rename: make-Completion make-completion)
-        (rename: Completion-ready? completion-ready?)
+        completion-ready?
         completion-wait!
         completion-post!
         completion-reset!
         completion-error!
         with-completion-error)
 
-(defstruct Completion ((mx :- :mutex)
-                       (cv :- :condvar)
+;; Atomic state protocol (ARM64 acquire/release safe, lock-free fast path):
+;;   0 = pending, 1 = value posted, 2 = error posted
+(defstruct Completion ((mx    :- :mutex)
+                       (cv    :- :condvar)
+                       (state :- AtomicFxBox)
                        ready? val exn)
   final: #t
   constructor: :init!
@@ -22,10 +26,17 @@
 (defmethod {:init! Completion}
   (lambda (self (name 'completion)) ;; name is for debugging
     (set! self.mx (make-mutex name))
-    (set! self.cv (make-condition-variable name))))
+    (set! self.cv (make-condition-variable name))
+    (set! self.state (make-atomic-fxbox 0))
+    (set! self.ready? #f)))
+
+(def (completion-ready? (c : Completion))
+  => :boolean
+  (fx> (atomic-fxbox-ref c.state (memory-order acquire)) 0))
 
 (def (completion-reset! (c : Completion))
   (mutex-lock! c.mx)
+  (atomic-fxbox-set! c.state 0 (memory-order release))
   (set! c.ready? #f)
   (set! c.val #f)
   (set! c.exn #f)
@@ -33,36 +44,49 @@
   (void))
 
 (def (completion-wait! (c : Completion))
-  (let lp ()
-    (mutex-lock! c.mx)
-    (if c.ready?
-      (let ((exn c.exn)
-            (val c.val))
-        (mutex-unlock! c.mx)
-        (if exn (raise exn) val))
-      (begin
-        (mutex-unlock! c.mx c.cv)
-        (lp)))))
+  ;; Lock-free acquire fast path when completion is already published.
+  (let ((st (atomic-fxbox-ref c.state (memory-order acquire))))
+    (cond
+     ((fx= st 1) c.val)
+     ((fx= st 2) (raise c.exn))
+     (else
+      (let lp ()
+        (mutex-lock! c.mx)
+        (let ((s (atomic-fxbox-ref c.state (memory-order acquire))))
+          (cond
+           ((fx= s 1)
+            (let ((val c.val))
+              (mutex-unlock! c.mx)
+              val))
+           ((fx= s 2)
+            (let ((exn c.exn))
+              (mutex-unlock! c.mx)
+              (raise exn)))
+           (else
+            (mutex-unlock! c.mx c.cv)
+            (lp)))))))))
 
-(defrule (do-completion-post! compl val set-e)
+(defrule (do-completion-post! compl val set-e state-code)
   (using (c compl :- Completion)
     (mutex-lock! c.mx)
-    (if c.ready?
+    (if (fx> (atomic-fxbox-ref c.state (memory-order acquire)) 0)
       (begin
         (mutex-unlock! c.mx)
         (raise-context-error completion-post! "Completion has already been posted" c))
       (begin
         (set-e c val)
         (set! c.ready? #t)
+        ;; Release store publishes val/exn before any lock-free reader sees state > 0.
+        (atomic-fxbox-set! c.state state-code (memory-order release))
         (condition-variable-broadcast! c.cv)
         (mutex-unlock! c.mx)
         (void)))))
 
 (def (completion-post! (compl : Completion) val)
-  (do-completion-post! compl val &Completion-val-set!))
+  (do-completion-post! compl val &Completion-val-set! 1))
 
 (def (completion-error! (compl : Completion) exn)
-  (do-completion-post! compl exn &Completion-exn-set!))
+  (do-completion-post! compl exn &Completion-exn-set! 2))
 
 (defrules with-completion-error ()
   ((_ compl expr rest ...)

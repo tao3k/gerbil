@@ -8,6 +8,23 @@ namespace: #f
 (import "gambit" "util" "table")
 (export #t)
 
+;; Private sentinel for atomic-promise cells (never exposed to user code)
+(def __atomic-promise-pending
+  (list 'atomic-promise-pending))
+
+;; Optional SRFI-226 continuation-barrier hook installed by :std/control.
+;; Fast path checks Gambit's native per-thread ##thread-control-state slot
+;; in a single load with zero allocation when no delimited control is active.
+(def __continuation-barrier-hook #f)
+
+(def (__set-continuation-barrier-hook! (proc :? :procedure))
+  (set! __continuation-barrier-hook proc))
+
+(def (__call-with-runtime-barrier (thunk : :procedure))
+  (if (and __continuation-barrier-hook (##thread-control-state))
+    (__continuation-barrier-hook thunk)
+    (thunk)))
+
 (def (make-promise (thunk : :procedure))
   => :promise
   (:- (##make-delay-promise thunk) :promise))
@@ -15,18 +32,33 @@ namespace: #f
 (def (make-atomic-promise (thunk : :procedure))
   => :promise
   (let ((mx (make-mutex 'promise))
-        (inner (make-promise thunk)))
+        (cell (vector __atomic-promise-pending)))
     (make-promise
      (lambda ()
-       (let (once (vector 0))
-         (dynamic-wind
-             (lambda ()
-               (declare (not interrupts-enabled))
-               (unless (##fx= (##vector-cas! once 0 1 0) 0)
-                 (error "Cannot reenter atomic block"))
-               (mutex-lock! mx))
-             (cut ##force-out-of-line inner)
-             (cut mutex-unlock! mx)))))))
+       (let ((cached (__atomic-slot-load cell 0 1)))
+         (if (not (eq? cached __atomic-promise-pending))
+           cached
+           (let (once (vector 0))
+             (dynamic-wind
+                 (lambda ()
+                   (declare (not interrupts-enabled))
+                   (unless (##fx= (__atomic-fx-cas! once 0 0 1 3) 0)
+                     (error "Cannot reenter atomic block"))
+                   (mutex-lock! mx))
+                 (lambda ()
+                   (let ((v (__atomic-slot-load cell 0 1)))
+                     (if (not (eq? v __atomic-promise-pending))
+                       v
+                       (let* ((raw (__call-with-runtime-barrier thunk))
+                              (res (if (##promise? raw)
+                                     (##force-out-of-line raw)
+                                     raw)))
+                         ;; Release-publish result with GC card + SATB barrier
+                         ;; so weak-memory SMP readers see fully initialized object.
+                         (__atomic-slot-exchange! cell 0 res 2)
+                         (__atomic-fence! 3)
+                         res))))
+                 (cut mutex-unlock! mx)))))))))
 
 (def* call-with-parameters
   (((thunk : :procedure)) (thunk))
@@ -42,9 +74,10 @@ namespace: #f
     (dynamic-wind
         (lambda ()
           (declare (not interrupts-enabled))
-          (unless (##fx= (##vector-cas! once 0 1 0) 0)
+          (unless (##fx= (__atomic-fx-cas! once 0 0 1 3) 0)
             (error "Cannot re-enter unwind protected block")))
-        K fini)))
+        (cut __call-with-runtime-barrier K)
+        fini)))
 
 ;; same as unwind-protect but it does not protect against
 ;; continuation escapes, only raised exceptions.

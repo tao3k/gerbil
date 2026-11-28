@@ -5,7 +5,7 @@ prelude: "../core"
 package: gerbil/runtime
 namespace: #f
 
-(import "gambit" "util" "error" "hash")
+(import "gambit" "util" "control" "error" "hash")
 (export #t)
 
 ;; the system thread group
@@ -72,13 +72,17 @@ namespace: #f
       (lambda (cont)
         (when (procedure? __unhandled-actor-exception-hook)
           (with-catch void (cut __unhandled-actor-exception-hook cont exn)))
+        (##thread-control-state-set! #f)
         ;; unwind stack and continue with the primordial exception handler
         ;; see discussion in gambit#295 about ##continuation-last
         (##continuation-graft
          (##continuation-last cont)
          ##primordial-exception-handler
          exn))))
-   thunk))
+   (lambda ()
+     (let ((res (thunk)))
+       (##thread-control-state-set! #f)
+       res))))
 
 ;;; thread locals
 (def (thread-local-ref key (default absent-obj))
@@ -144,7 +148,7 @@ namespace: #f
        ;; if the handler returns here the state is inconsistent -- we need to bail
        (##thread-end-with-uncaught-exception! e))
      (lambda ()
-       (let (result (proc))
+       (let (result (__call-with-runtime-barrier proc))
          (mutex-unlock! mx)
          result)))))
 

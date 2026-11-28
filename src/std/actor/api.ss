@@ -6,9 +6,11 @@
         ./host
         ./state
         ./interaction
-        ./proto)
+        ./proto
+        ./nursery)
 (export (import: ./message
                 ./host
                 ./state
                 ./interaction
-                ./proto))
+                ./proto
+                ./nursery))

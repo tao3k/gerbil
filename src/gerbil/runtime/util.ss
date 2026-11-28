@@ -17,11 +17,209 @@ namespace: #f
   ((_ proc inline-rules)
    (begin-annotation (@inline proc) 'inline-rules)))
 
+;;; low level C23 SMP atomics & CPU pause primitives
+;; Memory order codes match Gambit modern-c SRFI-230 / C23 runtime_protocols.h:
+;;   0 = relaxed, 1 = acquire, 2 = release, 3 = acquire-release, 4 = sequentially-consistent
+(cond-expand
+  (,(compilation-target? C)
+   (def (__cpu-relax!)
+     (declare (not interrupts-enabled))
+     (##c-code "___CPU_RELAX(); ___RESULT = ___VOID;"))
+
+   (def (__atomic-fence! code)
+     (declare (not interrupts-enabled))
+     (##c-code "___atomic_fence_order((int)___INT(___ARG1)); ___RESULT = ___VOID;"
+               code))
+
+   (def (__atomic-slot-load vec idx code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___gc_atomic_slot_load(___s, (int)___INT(___ARG3));"
+      vec idx code))
+
+   (def (__atomic-slot-exchange! vec idx newval code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___gc_atomic_slot_exchange(
+         ___ps, ___ARG1, ___s, ___ARG3, (int)___INT(___ARG4),
+         ___EXT(___gc_write_barrier_slow), ___EXT(___gc_satb_barrier_val));"
+      vec idx newval code))
+
+   (def (__atomic-slot-cas! vec idx expected desired code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___gc_atomic_slot_cas(
+         ___ps, ___ARG1, ___s, ___ARG3, ___ARG4, (int)___INT(___ARG5),
+         ___EXT(___gc_write_barrier_slow), ___EXT(___gc_satb_barrier_val));"
+      vec idx expected desired code))
+
+   ;; GC-barriered C23 atomic structure-field operations (slot 0 = type, 1..N = fields)
+   ;; Eliminates ARM64 weak-memory publication races on MOP/interface caches.
+   (def (__atomic-struct-ref obj idx code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tSTRUCTURE), ___ARG2);
+       ___RESULT = ___gc_atomic_slot_load(___s, (int)___INT(___ARG3));"
+      obj idx code))
+
+   (def (__atomic-struct-set! obj idx newval code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tSTRUCTURE), ___ARG2);
+       ___RESULT = ___gc_atomic_slot_exchange(
+         ___ps, ___ARG1, ___s, ___ARG3, (int)___INT(___ARG4),
+         ___EXT(___gc_write_barrier_slow), ___EXT(___gc_satb_barrier_val));"
+      obj idx newval code))
+
+   (def (__atomic-struct-cas! obj idx expected desired code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tSTRUCTURE), ___ARG2);
+       ___RESULT = ___gc_atomic_slot_cas(
+         ___ps, ___ARG1, ___s, ___ARG3, ___ARG4, (int)___INT(___ARG5),
+         ___EXT(___gc_write_barrier_slow), ___EXT(___gc_satb_barrier_val));"
+      obj idx expected desired code))
+
+   (def (__atomic-fx-load vec idx code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_word_load(___CAST(___VOLATILE ___WORD*, ___s), (int)___INT(___ARG3)));"
+      vec idx code))
+
+   (def (__atomic-fx-store! vec idx val code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___atomic_word_store(___CAST(___VOLATILE ___WORD*, ___s),
+                            ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4));
+       ___RESULT = ___VOID;"
+      vec idx val code))
+
+   (def (__atomic-fx-exchange! vec idx val code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_word_exchange(___CAST(___VOLATILE ___WORD*, ___s),
+                                 ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4)));"
+      vec idx val code))
+
+   (def (__atomic-fx-cas! vec idx expected desired code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_word_cas(___CAST(___VOLATILE ___WORD*, ___s),
+                            ___CAST(___WORD, ___ARG3),
+                            ___CAST(___WORD, ___ARG4), (int)___INT(___ARG5)));"
+      vec idx expected desired code))
+
+   (def (__atomic-fx-fetch-add! vec idx delta code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_uword_fetch_add(___CAST(___VOLATILE ___WORD*, ___s),
+                                   ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4)));"
+      vec idx delta code))
+
+   (def (__atomic-fx-fetch-sub! vec idx delta code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_uword_fetch_sub(___CAST(___VOLATILE ___WORD*, ___s),
+                                   ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4)));"
+      vec idx delta code))
+
+   (def (__atomic-fx-fetch-and! vec idx mask code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_uword_fetch_and(___CAST(___VOLATILE ___WORD*, ___s),
+                                   ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4)));"
+      vec idx mask code))
+
+   (def (__atomic-fx-fetch-ior! vec idx mask code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_uword_fetch_ior(___CAST(___VOLATILE ___WORD*, ___s),
+                                   ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4)));"
+      vec idx mask code))
+
+   (def (__atomic-fx-fetch-xor! vec idx mask code)
+     (declare (not interrupts-enabled))
+     (##c-code
+      "___WORD *___s = ___FXINDX_WORD(___BODY_AS(___ARG1, ___tVECTOR), ___ARG2);
+       ___RESULT = ___CAST(___SCMOBJ,
+         ___atomic_uword_fetch_xor(___CAST(___VOLATILE ___WORD*, ___s),
+                                   ___CAST(___WORD, ___ARG3), (int)___INT(___ARG4)));"
+      vec idx mask code)))
+  (else
+   (def (__cpu-relax!) (void))
+   (def (__atomic-fence! code) (void))
+   (def (__atomic-slot-load vec idx code) (##vector-cas! vec idx #!unbound #!unbound))
+   (def (__atomic-slot-exchange! vec idx newval code)
+     (let loop ((old (##vector-cas! vec idx #!unbound #!unbound)))
+       (let ((prev (##vector-cas! vec idx newval old)))
+         (if (eq? prev old) old (loop prev)))))
+   (def (__atomic-slot-cas! vec idx expected desired code)
+     (##vector-cas! vec idx desired expected))
+   (def (__atomic-struct-ref obj idx code)
+     (##unchecked-structure-ref obj idx #f #f))
+   (def (__atomic-struct-set! obj idx newval code)
+     (let ((old (##unchecked-structure-ref obj idx #f #f)))
+       (##unchecked-structure-set! obj newval idx #f #f)
+       old))
+   (def (__atomic-struct-cas! obj idx expected desired code)
+     (let ((old (##unchecked-structure-ref obj idx #f #f)))
+       (when (eq? old expected)
+         (##unchecked-structure-set! obj desired idx #f #f))
+       old))
+   (def (__atomic-fx-load vec idx code) (##vector-cas! vec idx #!unbound #!unbound))
+   (def (__atomic-fx-store! vec idx val code)
+     (__atomic-slot-exchange! vec idx val code)
+     (void))
+   (def (__atomic-fx-exchange! vec idx val code)
+     (__atomic-slot-exchange! vec idx val code))
+   (def (__atomic-fx-cas! vec idx expected desired code)
+     (##vector-cas! vec idx desired expected))
+   (def (__atomic-fx-fetch-add! vec idx delta code)
+     (##vector-inc! vec idx delta))
+   (def (__atomic-fx-fetch-sub! vec idx delta code)
+     (let loop ((old (##vector-cas! vec idx #!unbound #!unbound)))
+       (let* ((nxt (##fxwrap- old delta))
+              (prev (##vector-cas! vec idx nxt old)))
+         (if (eq? prev old) old (loop prev)))))
+   (def (__atomic-fx-fetch-and! vec idx mask code)
+     (let loop ((old (##vector-cas! vec idx #!unbound #!unbound)))
+       (let* ((nxt (##fxand old mask))
+              (prev (##vector-cas! vec idx nxt old)))
+         (if (eq? prev old) old (loop prev)))))
+   (def (__atomic-fx-fetch-ior! vec idx mask code)
+     (let loop ((old (##vector-cas! vec idx #!unbound #!unbound)))
+       (let* ((nxt (##fxior old mask))
+              (prev (##vector-cas! vec idx nxt old)))
+         (if (eq? prev old) old (loop prev)))))
+   (def (__atomic-fx-fetch-xor! vec idx mask code)
+     (let loop ((old (##vector-cas! vec idx #!unbound #!unbound)))
+       (let* ((nxt (##fxxor old mask))
+              (prev (##vector-cas! vec idx nxt old)))
+         (if (eq? prev old) old (loop prev)))))))
+
 ;;; low level locks
-;; Single-slot atomic owner CAS lock: slot 0 holds #f (unlocked) or the owning
-;; Gambit thread (##current-thread). Eliminates the 2-slot non-atomic SMP
-;; window where a contender could observe owner=#f and pass #f to
-;; macro-thread-end-condvar.
+;; Single-slot atomic owner CAS lock with TTAS acquire-load + CPU relax backoff:
+;; slot 0 holds #f (unlocked) or the owning Gambit thread (##current-thread).
+;; Eliminates the 2-slot non-atomic SMP window where a contender could observe
+;; owner=#f and pass #f to macro-thread-end-condvar.
 (def (__inline-lock-owner-dead? mx owner)
   ;; Re-check mx[0] via atomic RMW strictly AFTER observing owner's termination
   ;; (macro-thread-end-condvar == #f). A dead thread can never re-acquire mx, so
@@ -29,7 +227,7 @@ namespace: #f
   ;; cleanly and exited before the contender ran this slow-path check.
   (and (thread? owner)
        (not (macro-thread-end-condvar owner))
-       (eq? (##vector-cas! mx 0 owner owner) owner)))
+       (eq? (__atomic-slot-cas! mx 0 owner owner 3) owner)))
 
 (defrules __make-inline-lock ()
   ((_) (vector #f)))
@@ -40,18 +238,33 @@ namespace: #f
      (declare (not interrupts-enabled))
      (let ((self (##current-thread)))
        (let again ((spin 0))
-         (let ((owner (##vector-cas! mx 0 self #f)))
+         (let ((cur (__atomic-slot-load mx 0 1)))
            (cond
-            ((not owner)
-             (void))
+            ((not cur)
+             (let ((owner (__atomic-slot-cas! mx 0 #f self 1)))
+               (when owner
+                 (if (##fx< spin max-spin)
+                   (begin
+                     (__cpu-relax!)
+                     (again (##fx+ spin 1)))
+                   (begin
+                     (cond
+                      ((eq? owner self)
+                       (##thread-deadlock-action!))
+                      ((__inline-lock-owner-dead? mx owner)
+                       (##thread-deadlock-action!))
+                      (else
+                       (##thread-yield!)
+                       (again 0))))))))
             ((##fx< spin max-spin)
+             (__cpu-relax!)
              (cond-expand
                ((not gerbil-smp)
                 (##thread-yield!)))
              (again (##fx+ spin 1)))
-            ((eq? owner self)
+            ((eq? cur self)
              (##thread-deadlock-action!))
-            ((__inline-lock-owner-dead? mx owner)
+            ((__inline-lock-owner-dead? mx cur)
              (##thread-deadlock-action!))
             (else
              (##thread-yield!)
@@ -63,7 +276,7 @@ namespace: #f
   ((_ mx)
    (let ()
      (declare (not interrupts-enabled))
-     (##vector-cas! mx 0 #f (##current-thread)))))
+     (__atomic-slot-cas! mx 0 (##current-thread) #f 2))))
 
 (defrule (__do-inline-lock! lock expr)
   (let ((__lock lock))

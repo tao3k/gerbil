@@ -4,6 +4,7 @@
 (import :std/test
         :std/error
         :std/iter
+        ./atomic
         ./wg)
 (export wg-test)
 
@@ -54,4 +55,25 @@
                       (set! count (fx+ count 1))
                       (mutex-unlock! mx))))
       (wg-wait! wg)
-      (check count => 100))))
+      (check count => 100))
+
+    (test-case "SMP stress: multi-producer burst + idle park/wake cycles"
+      (def acc (make-atomic-fxbox 0))
+      (def wg (make-wg 8))
+      ;; Phase 1: 4 concurrent producers submitting 2000 tasks each
+      (def producers
+        (map (lambda (_)
+               (spawn (lambda ()
+                        (for (_ (in-range 2000))
+                          (wg-add! wg (lambda ()
+                                        (atomic-fxbox-fetch-add! acc 1 (memory-order relaxed))))))))
+             (iota 4)))
+      (for-each thread-join! producers)
+      ;; Phase 2: let all workers park on condvar, then wake via trickled tasks
+      (thread-sleep! 0.02)
+      (for (_ (in-range 20))
+        (wg-add! wg (lambda ()
+                      (atomic-fxbox-fetch-add! acc 1 (memory-order relaxed))))
+        (thread-sleep! 0.002))
+      (wg-wait! wg)
+      (check (atomic-fxbox-ref acc (memory-order acquire)) => 8020))))

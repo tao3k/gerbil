@@ -10,6 +10,8 @@
         :std/sync/rwlock
         :std/sync/atom
         :std/sync/wg
+        :std/sync/atomic
+        :std/interface
         :gerbil/runtime/util
         :gerbil/runtime/thread
         :gerbil/runtime/mop
@@ -408,4 +410,133 @@
                     (inc (+ k 1))))))
             (loop (+ w 1))))
         (wg-wait! wg)
-        (check (increment-atomic-counter! ctr 0) => (* nworkers per-worker))))))
+        (check (increment-atomic-counter! ctr 0) => (* nworkers per-worker))))
+
+    (test-case "12-core MOP specialize-class, bind-method!, and Interface prototype publication race torture"
+      (let* ((rounds 24)
+             (nthreads 12)
+             (ok-count (make-atomic-fxbox 0)))
+        (let rloop ((r 0))
+          (when (< r rounds)
+            (let* ((cname (string->symbol (string-append "smp-mop-cls-" (number->string r))))
+                   (klass (make-class-type cname cname [] '(val) '((struct: . #t)) #f))
+                   (iface-type (make-class-type
+                                (string->symbol (string-append "smp-iface-" (number->string r)))
+                                'smp-iface [interface-instance::t] [] '((struct: . #t)) #f))
+                   (desc (make-interface-descriptor iface-type '(get-val)))
+                   (bar (make-barrier nthreads)))
+              (bind-method! klass 'get-val (lambda (self) (##unchecked-structure-ref self 1 klass #f)))
+              (let ((threads
+                     (let tloop ((i 0) (acc []))
+                       (if (< i nthreads)
+                         (let ((tid i))
+                           (tloop (+ i 1)
+                                  (cons
+                                   (spawn/name 'mop-race
+                                     (lambda ()
+                                       (let ((inst (##structure klass (+ r tid))))
+                                         (barrier-post! bar)
+                                         (barrier-wait! bar)
+                                         ;; Concurrent specialize-class + interface cast + method call!
+                                         (let* ((spec (specialize-class klass))
+                                                (iface (cast desc inst))
+                                                (m (##unchecked-structure-ref iface 2 #f #f))
+                                                (v (m (&interface-instance-object iface))))
+                                           (when (and spec (= v (+ r tid)))
+                                             (atomic-fxbox-fetch-add! ok-count 1 (memory-order relaxed)))))))
+                                   acc)))
+                         acc))))
+                (for-each thread-join! threads)))
+            (rloop (+ r 1))))
+        (check (atomic-fxbox-ref ok-count (memory-order acquire)) => (* rounds nthreads))))
+
+    (test-case "12-core Lock-Free RWLock read/write interleaving, locked-hash-table & Completion weak-memory torture"
+      ;; 1. Atomic reader fast-path + concurrent writer interleaving on RWLock + locked-hash-table
+      (let* ((rw (make-rwlock 'smp-fast-rw))
+             (shared-a 0)
+             (shared-b 0)
+             (inconsistent (make-atomic-fxbox 0))
+             (ht (make-hash-table lock: (make-rwlock 'smp-ht-rw)))
+             (bar (make-barrier 12))
+             (workers
+              (let loop ((i 0) (acc []))
+                (if (< i 12)
+                  (let ((tid i))
+                    (loop (+ i 1)
+                          (cons
+                           (spawn/name 'rw-torture
+                             (lambda ()
+                               (barrier-post! bar)
+                               (barrier-wait! bar)
+                               (if (< tid 2)
+                                 ;; 2 writers updating invariant shared-a == shared-b + hash-table
+                                 (let wloop ((k 0))
+                                   (when (< k 400)
+                                     (with-write-lock rw
+                                       (lambda ()
+                                         (set! shared-a (+ shared-a 1))
+                                         (set! shared-b (+ shared-b 1))))
+                                     (hash-put! ht (modulo k 32) (+ tid k))
+                                     (wloop (+ k 1))))
+                                 ;; 10 lock-free readers verifying shared-a == shared-b + reading hash-table
+                                 (let rloop ((k 0))
+                                   (when (< k 2000)
+                                     (with-read-lock rw
+                                       (lambda ()
+                                         (unless (= shared-a shared-b)
+                                           (atomic-fxbox-fetch-add! inconsistent 1 (memory-order relaxed)))))
+                                     (hash-get ht (modulo k 32))
+                                     (rloop (+ k 1)))))))
+                           acc)))
+                  acc))))
+        (for-each thread-join! workers)
+        (check (atomic-fxbox-ref inconsistent (memory-order acquire)) => 0)
+        (check shared-a => 800)
+        (check shared-b => 800))
+
+      ;; 2. Completion ARM64 acquire/release publication race torture (200 rounds x 8 readers)
+      (let ((bad (make-atomic-fxbox 0)))
+        (let rloop ((r 0))
+          (when (< r 200)
+            (let* ((c (make-completion 'arm64-comp))
+                   (payload (vector r (* r 2) (* r 3) (* r 4)))
+                   (readers
+                    (let loop ((i 0) (acc []))
+                      (if (< i 8)
+                        (loop (+ i 1)
+                              (cons
+                               (spawn/name 'comp-poll
+                                 (lambda ()
+                                   ;; Half poll completion-ready? lock-free, half block in completion-wait!
+                                   (let ((v (if (= (modulo i 2) 0)
+                                              (let spin ()
+                                                (if (completion-ready? c)
+                                                  (completion-wait! c)
+                                                  (begin (thread-yield!) (spin))))
+                                              (completion-wait! c))))
+                                     (unless (and (vector? v)
+                                                  (= (vector-ref v 0) r)
+                                                  (= (vector-ref v 3) (* r 4)))
+                                       (atomic-fxbox-fetch-add! bad 1 (memory-order relaxed))))))
+                               acc))
+                        acc))))
+              (completion-post! c payload)
+              (for-each thread-join! readers))
+            (rloop (+ r 1))))
+        (check (atomic-fxbox-ref bad (memory-order acquire)) => 0))
+
+      ;; 3. Channel reader-abort recovery (cancelled waiter must not strand remaining readers!)
+      (let* ((ch (make-channel 1))
+             (cancel-exn (box 'chan-cancel))
+             (r1 (spawn/name 'chan-cancel-r1
+                   (lambda ()
+                     (with-catch (lambda (e) (eq? e cancel-exn))
+                                 (lambda () (channel-get ch) #f)))))
+             (r2 (spawn/name 'chan-live-r2
+                   (lambda () (channel-get ch)))))
+        (thread-sleep! 0.02)
+        (with-catch (lambda (e) (unless (abandoned-mutex-exception? e) (raise e)))
+                    (lambda () (thread-interrupt! r1 (lambda () (raise cancel-exn)))))
+        (check (thread-join! r1 5) => #t)
+        (channel-put ch 'delivered-to-r2)
+        (check (thread-join! r2 5) => 'delivered-to-r2)))))

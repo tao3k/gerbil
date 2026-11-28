@@ -90,44 +90,57 @@
                                        host: "reader-server.test"))
                         ;; No other thread can touch TLS between queue seeding
                         ;; and the adjacent nonblocking native operation below.
+                        ;; Under true-multicore SMP, pin this green thread to a
+                        ;; single OS processor so OpenSSL's OS-thread-local ERR
+                        ;; queue stays consistent across separate FFI calls.
                         (thread-join! worker 10)
-                        (let ((client-ssl (ssl-socket-ssl (interface-instance-object client)))
-                              (server-ssl (ssl-socket-ssl (interface-instance-object server)))
-                              (output (make-u8vector 1 255))
-                              (input #u8(42)))
-                          (ssl-test-clear-errors!)
-                          (check (SSL_read client-ssl output 0 1) => SSL_ERROR_WANT_READ)
-                          (let (result
-                                (begin
-                                  (ssl-test-push-error! TEST_SSL_NEGOTIATION)
-                                  (SSL_read client-ssl output 0 1)))
-                            (check result => SSL_ERROR_WANT_READ))
-                          (check (ssl-test-last-error) => 0)
-                          (check output => #u8(255))
-                          (let (result
-                                (begin
-                                  (ssl-test-push-error! TEST_SSL_NEGOTIATION)
-                                  (SSL_write server-ssl input 0 1)))
-                            (check result => 1))
-                          (check (ssl-test-last-error) => 0)
-                          (StreamSocket-set-input-timeout! client (timeout->deadline 5))
-                          (check (StreamSocket-recv client output) => 1)
-                          (check output => input)
-                          ;; Closer closes TCP without sending TLS close_notify.
-                          ;; A fresh native failure must still retain its code.
-                          (Closer-close server)
-                          (ssl-test-push-error! TEST_SSL_NEGOTIATION)
-                          (let (failure
-                                (with-catch values
-                                  (lambda () (StreamSocket-recv client output))))
-                            (check failure ? SSLError?)
-                            (match (Error-irritants failure)
-                              ([_ detail [r code last]]
-                               (check (fx<= r 0) => #t)
-                               (check code => TEST_SSL_ERROR_SSL)
-                               (check (fx> last 0) => #t)
-                               (check last => (ssl-test-last-error))
-                               (check (string-suffix? "unexpected eof while reading" detail) => #t))))))
+                        (let* ((self (current-thread))
+                               (pid (##current-processor-id))
+                               (proc (##processor pid))
+                               (client-ssl (ssl-socket-ssl (interface-instance-object client)))
+                               (server-ssl (ssl-socket-ssl (interface-instance-object server)))
+                               (output (make-u8vector 1 255))
+                               (input #u8(42)))
+                          (##thread-pin! self proc)
+                          (##thread-migrate-to! pid)
+                          (unwind-protect
+                            (begin
+                              (ssl-test-clear-errors!)
+                              (check (SSL_read client-ssl output 0 1) => SSL_ERROR_WANT_READ)
+                              (let (result
+                                    (begin
+                                      (ssl-test-push-error! TEST_SSL_NEGOTIATION)
+                                      (SSL_read client-ssl output 0 1)))
+                                (check result => SSL_ERROR_WANT_READ))
+                              (check (ssl-test-last-error) => 0)
+                              (check output => #u8(255))
+                              (let (result
+                                    (begin
+                                      (ssl-test-push-error! TEST_SSL_NEGOTIATION)
+                                      (SSL_write server-ssl input 0 1)))
+                                (check result => 1))
+                              (check (ssl-test-last-error) => 0)
+                              (StreamSocket-set-input-timeout! client (timeout->deadline 5))
+                              (check (StreamSocket-recv client output) => 1)
+                              (check output => input)
+                              ;; Closer closes TCP without sending TLS close_notify.
+                              ;; A fresh native failure must still retain its code.
+                              (Closer-close server)
+                              (ssl-test-push-error! TEST_SSL_NEGOTIATION)
+                              (let (failure
+                                    (with-catch values
+                                      (lambda () (StreamSocket-recv client output))))
+                                (check failure ? SSLError?)
+                                (match (Error-irritants failure)
+                                  ([_ detail [r code last]]
+                                   (check (fx<= r 0) => #t)
+                                   (check code => TEST_SSL_ERROR_SSL)
+                                   (check (fx> last 0) => #t)
+                                   (check last => (ssl-test-last-error))
+                                   (check (string-suffix? "unexpected eof while reading" detail) => #t)))))
+                            (begin
+                              (ssl-test-clear-errors!)
+                              (##thread-pin! self #f)))))
                       (when client (Closer-close client))
                       (listener.close)
                       (when worker

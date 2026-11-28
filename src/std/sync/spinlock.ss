@@ -1,6 +1,8 @@
 ;;; -*- Gerbil -*-
 ;;; © vyzo
-;;; spin locks
+;;; spin locks (TTAS acquire/release with CPU relax backoff & SRFI-226 barrier)
+(import :gerbil/runtime/util
+        :gerbil/runtime/control)
 (export SpinLock SpinLock?
         spin-lock!
         spin-unlock!
@@ -21,17 +23,27 @@
     (declare (not interrupts-enabled))
     (let ((self (##current-thread)))
       (let again ((spin 0))
-        (let ((owner (##vector-cas! lk 0 self #f)))
+        (let ((cur (__atomic-slot-load lk 0 1)))
           (cond
-           ((not owner)
-            (void))
+           ((not cur)
+            (let ((owner (__atomic-slot-cas! lk 0 #f self 1)))
+              (when owner
+                (if (##fx< spin max-spin)
+                  (begin
+                    (__cpu-relax!)
+                    (again (##fx+ spin 1)))
+                  (begin
+                    (__check-spin-deadlock! lk owner self)
+                    (##thread-yield!)
+                    (again 0))))))
            ((##fx< spin max-spin)
+            (__cpu-relax!)
             (cond-expand
               ((not gerbil-smp)
                (##thread-yield!)))
             (again (##fx+ spin 1)))
            (else
-            (__check-spin-deadlock! lk owner self)
+            (__check-spin-deadlock! lk cur self)
             (##thread-yield!)
             (again 0))))))))
 
@@ -45,13 +57,13 @@
      ;; so a thread that unlocked cleanly before exiting cannot trigger a
      ;; false abandoned-mutex exception under SMP.
      ((and (thread-dead? owner)
-           (eq? (##vector-cas! lk 0 owner owner) owner))
+           (eq? (__atomic-slot-cas! lk 0 owner owner 3) owner))
       (##thread-abandoned-mutex-action!)))))
 
 (definline (spin-unlock! (lock : SpinLock))
   (let (lk lock.lk)
     (declare (not interrupts-enabled))
-    (##vector-cas! lk 0 #f (##current-thread))))
+    (__atomic-slot-cas! lk 0 (##current-thread) #f 2)))
 
 (defrules do-with-spin-lock ()
   ((_ lock-expr ~ klass body rest ...)
@@ -67,5 +79,5 @@
           (spin-unlock! __lock)
           (__eh __exn))
         (lambda ()
-          (begin0 (begin body rest ...)
+          (begin0 (__call-with-runtime-barrier (lambda () body rest ...))
             (spin-unlock! __lock))))))))

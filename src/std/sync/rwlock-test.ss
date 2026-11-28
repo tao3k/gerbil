@@ -12,7 +12,7 @@
   (unless (mutex-lock! rw.mx 2)
     (error "Timed out inspecting RWLock"))
   (unwind-protect!
-    [rw.readers rw.writer rw.writers-waiting]
+    [(rwlock-readers rw) rw.writer rw.writers-waiting]
     (mutex-unlock! rw.mx)))
 
 ;; Wait for an exact blocking boundary, not a scheduling delay.

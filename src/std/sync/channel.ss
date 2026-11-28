@@ -53,13 +53,29 @@
         #t)
        (else
         (set! ch.writers-waiting (fx+ ch.writers-waiting 1))
-        (if (mutex-unlock! ch.mx ch.wcv timeo)
-          (loop #t)
-          (begin
-            (mutex-lock! ch.mx)
-            (set! ch.writers-waiting (fx- ch.writers-waiting 1))
-            (mutex-unlock! ch.mx)
-            #f)))))))
+        (let ((completed? #f)
+              (signaled? #f))
+          (unwind-protect
+            (begin
+              (set! signaled? (mutex-unlock! ch.mx ch.wcv timeo))
+              (set! completed? #t))
+            (unless completed?
+              ;; Aborted/terminated while waiting on wcv: decrement count and pass
+              ;; any wakeup signal to a remaining writer so no sibling is stranded.
+              (mutex-lock! ch.mx)
+              (set! ch.writers-waiting (fx- ch.writers-waiting 1))
+              (when (and (fx> ch.writers-waiting 0)
+                         (or ch.eof (not ch.limit)
+                             (fx< (Queue-length ch.q) (:- ch.limit :fixnum))))
+                (condition-variable-signal! ch.wcv))
+              (mutex-unlock! ch.mx)))
+          (if signaled?
+            (loop #t)
+            (begin
+              (mutex-lock! ch.mx)
+              (set! ch.writers-waiting (fx- ch.writers-waiting 1))
+              (mutex-unlock! ch.mx)
+              #f))))))))
 
 (def (channel-try-put (ch : Channel) val)
   (mutex-lock! ch.mx)
@@ -105,13 +121,28 @@
             #!eof)
            (else
             (set! ch.readers-waiting (fx+ ch.readers-waiting 1))
-            (if (mutex-unlock! ch.mx ch.rcv timeo)
-              (loop #t)
-              (begin
-                (mutex-lock! ch.mx)
-                (set! ch.readers-waiting (fx- ch.readers-waiting 1))
-                (mutex-unlock! ch.mx)
-                default)))))
+            (let ((completed? #f)
+                  (signaled? #f))
+              (unwind-protect
+                (begin
+                  (set! signaled? (mutex-unlock! ch.mx ch.rcv timeo))
+                  (set! completed? #t))
+                (unless completed?
+                  ;; Aborted/terminated while waiting on rcv: decrement count and pass
+                  ;; any wakeup signal to a remaining reader so no sibling is stranded.
+                  (mutex-lock! ch.mx)
+                  (set! ch.readers-waiting (fx- ch.readers-waiting 1))
+                  (when (and (fx> ch.readers-waiting 0)
+                             (or ch.eof (not (queue-empty? ch.q))))
+                    (condition-variable-signal! ch.rcv))
+                  (mutex-unlock! ch.mx)))
+              (if signaled?
+                (loop #t)
+                (begin
+                  (mutex-lock! ch.mx)
+                  (set! ch.readers-waiting (fx- ch.readers-waiting 1))
+                  (mutex-unlock! ch.mx)
+                  default))))))
          (else
           (let (next (front ch.q))
             (when (and dequeue? ch.limit (fx> ch.writers-waiting 0)
